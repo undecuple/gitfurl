@@ -115,7 +115,9 @@ def main(start: str = "library", prefix: str | None = None) -> int:
             root.iconphoto(True, tk.PhotoImage(file=str(icon)))
     except tk.TclError:
         pass
-    F = lambda size=10, bold=False: w.pick_font(root, size, bold)
+    def F(size=10, bold=False):
+        return w.pick_font(root, size, bold)
+
     SIDE = "#10152a"
 
     results: queue.Queue = queue.Queue()
