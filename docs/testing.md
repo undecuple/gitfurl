@@ -8,6 +8,11 @@ What has been run, and how to repeat it. Counts are not listed here because they
 
 They use temporary folders, fake `/proc` data, fake Wine and mocked subprocess calls. One test opens the window under Xvfb for 5 seconds; it is skipped when `xvfb-run` or tkinter is missing. CI runs both commands on Python 3.11 and 3.12.
 
+## Window polish (footer, keys, focus, checklist, resizing)
+`tests/test_gui_polish.py`. Pure functions are tested directly: WCAG contrast of every text colour pair the window uses against 4.5:1 (and the focus outline against 3:1), the checklist and the reasons shown for a disabled button, the footer texts. The window tests start gitfurl under `xvfb-run -a` in a subprocess, with a temporary home, a fake Wine path and no network, and drive it through `gitfurl.gui.main(driver=...)`: Up/Down/Enter in the Library, Esc from a prefix's page, Space and Return on a switch, an orange outline on every custom widget kind when focused (and gone when not), Tab order matching the screen order on a prefix's page (and no keyboard trap), the footer on every page and its run state, the Wine banner, the checklist and the Run and Create states, the sticky bar, no horizontal clipping at 900 x 620, mouse-wheel scrolling, scroll-into-view on focus, and the content following a larger window. They pump `root.update()` until a condition holds (with a cap) rather than sleeping. They are skipped when `xvfb-run` or tkinter is missing.
+
+Not tested: a real display or window manager (Xvfb has none, so the minimum size is checked as the value set, not as enforced by a window manager), HiDPI or scaling, other fonts or themes, Wayland, a screen reader (Tk offers none), pointer hover and drag, and what the screen looks like (contrast is computed from the colours, not measured on screenshots). Clicking Run, Create or Stop through the window is still not tested.
+
 ## Starting a real installer (manual, not in CI)
 This was done with the maintainer's explicit approval, for two specific files the maintainer supplied and confirmed in person. The limits: this machine only, inside `tools/sandbox.sh` (no network, empty home), no credentials present, only counts and the exit status looked at, nothing copied off the machine, and no installer path or name in any tracked file or message. Anyone else repeating this should use their own installers under the same limits.
 
@@ -56,4 +61,4 @@ The maintainer pointed at a generated test installer: an Inno Setup 5.5.0 `setup
 Not proven: Fedora, Arch, Wayland-only sessions, older distributions than Ubuntu 22.04.
 
 ## Not tested
-A complete installation, running an installed program, the progress numbers on a real install (tested against fake `/proc` data only), Proton from the app, the Docker image, a non-NixOS system, keyboard navigation and screen readers.
+A complete installation, running an installed program, the progress numbers on a real install (tested against fake `/proc` data only), Proton from the app, the Docker image, a non-NixOS system and screen readers (Tk offers none).

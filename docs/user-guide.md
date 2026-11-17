@@ -25,12 +25,19 @@ With Nix, `nix develop` gives you Python with tkinter, and `nix develop .#wine` 
 ### Library
 The Library lists your prefixes. A prefix is a folder where Wine keeps its own fake Windows drive and registry. gitfurl keeps its prefixes in `~/.local/share/gitfurl/prefixes/` (or under `$XDG_DATA_HOME`) and **never uses `~/.wine`**.
 - **+ New prefix** adds a name to the list. The folder is created only when you create it or run an installer.
-- Click a prefix to open it.
+- Click a prefix, or move to it with Up/Down and press Enter, to open it.
 - "ready" means the folder exists. "not created yet" means it does not.
+
+### The window, keys and footer
+The window can be resized (smallest size about 900 x 620); the content follows its width and the pages scroll with the mouse wheel. The bar along the bottom shows, from left to right: whether Wine and umu-run were found ("ok" or "missing"), the keys that work on this page, and what gitfurl is doing ("Idle", "Creating prefix", "Installer running" or "Stopping...").
+
+Keys: **Tab** and **Shift+Tab** move through everything you can use, in the order it appears on screen, and the page scrolls to keep the focused item visible. The focused item gets an orange outline (white on the orange buttons). **Enter** or **Space** activates it (open a prefix, press a button, flip a switch, choose an option). In the Library, **Up** and **Down** move between prefixes. **Esc** goes from a prefix's page back to the Library. These keys are for the keyboard; gitfurl does not provide screen-reader support (the toolkit it uses, Tk, cannot).
+
+If Wine is not found, an amber box on the Library and on a prefix's page says so and has a **Check again** button.
 
 ### Running an installer
 Open a prefix, then:
-1. **Installer:** type or browse to the installer file (`setup.exe`).
+1. **Installer:** type or browse to the installer file (`setup.exe`). The **Checklist** at the top of the page shows what Run needs, each with a tick or a cross and a sentence: an installer file chosen, Wine (or umu-run for proton) found, and the prefix existing or set to be created. **Run installer**, **Create now** and **Stop** sit in a bar at the bottom of the page that stays in view; when Run is off, the bar says why in words.
 2. Read the **Plan**. It shows the exact command, the prefix, the working folder and the environment variable gitfurl will set. Nothing has run yet.
 3. Choose options (below).
 4. Click **Run installer**. A dialog repeats the plan and the warning. Nothing starts until you confirm.

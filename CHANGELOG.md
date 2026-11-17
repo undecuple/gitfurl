@@ -9,8 +9,15 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - A read-only, advisory preflight before a run: measured free space, installer-folder size and memory, apart from estimates; required space is shown as unknown and no multiplier is applied.
 - The progress line shows how many processes run in the prefix, their CPU use and helper names, with a "quiet" hint; `doctor` reports CPU threads and available memory.
 
+- A footer on every page: whether Wine and umu-run were found, the keys that work on the page, and the run state (Idle, Creating prefix, Installer running, Stopping...).
+- Keyboard use: an orange focus outline on every button, switch, choice, prefix card and sidebar item; Tab follows the screen order and scrolls the page to the focused item; Enter or Space activates; Up and Down move between prefixes in the Library; Esc goes from a prefix's page back to the Library. There is no screen-reader support.
+- A prefix's page has a checklist (installer chosen, Wine or umu-run found, prefix exists or will be created, each with a tick or cross and a sentence) and a bar at the bottom with Stop, Create now and Run installer that stays in view, with the reason in words when a button is off.
+- The "Wine was not found" message is a banner with a Check again button, on the Library and on a prefix's page.
+
 ### Changed
 - Before a run, the plan preview, the approval dialog and `gitfurl cli install --dry-run` show a read-only guess at the installer's format (Inno Setup, FreeArc), from file headers only. Nothing is extracted and the route is always Wine/Proton; `doctor` also notes whether `innoextract` is on PATH by running its `--version` (a bounded probe, as for `wine`); nothing runs it to extract.
+- The content follows the window width (the window already had a smallest size of 900 x 620) and nothing is clipped at that size; one spacing scale, one type scale, one corner radius, and a computed contrast check of every text colour (disabled buttons and the hover colour of the ghost button were below 4.5:1 and were changed).
+- Run is now off, with the reason shown, when Wine (or umu-run) is not on PATH or when the prefix does not exist and creating it is off. Before, the button was on and a dialog said so after the click. The dialogs remain as a second check. Approvals, dry runs, Stop and cleanup are unchanged.
 - The README, the user guide and SECURITY.md state exactly what the progress display reads from `/proc`, including the process environment (only to find the prefix).
 
 ## [1.0.0] - 2026-11-16
