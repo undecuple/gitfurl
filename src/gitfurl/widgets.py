@@ -173,22 +173,31 @@ class Switch(tk.Canvas):
         super().__init__(master, width=46, height=26, bg=outer, highlightthickness=0, bd=0,
                          cursor="hand2")
         self.var, self.command = variable, command
+        self.enabled = True  # False: clicks and keys do nothing (the caller says why)
         self.bind("<Button-1>", lambda _e: self._toggle())
         variable.trace_add("write", lambda *_: self._draw())
         make_focusable(self, self._toggle, self._draw)
         self._draw()
 
     def _toggle(self):
+        if not self.enabled:
+            return
         self.var.set(not self.var.get())
         if self.command:
             self.command()
+
+    def set_enabled(self, enabled: bool) -> None:
+        self.enabled = enabled
+        self.configure(cursor="hand2" if enabled else "arrow")
+        self._draw()
 
     def _draw(self):
         self.delete("all")
         on = self.var.get()
         rounded(self, 1, 1, 45, 25, 12, fill=ORANGE if on else LINE, outline=ORANGE if on else LINE)
         x = 33 if on else 13
-        self.create_oval(x - 9, 4, x + 9, 22, fill=BG if on else FG, outline="")
+        self.create_oval(x - 9, 4, x + 9, 22, fill=BG if on else (FG if self.enabled else MUTED),
+                         outline="")
         focus_ring(self, 46, 26, 12)
 
 

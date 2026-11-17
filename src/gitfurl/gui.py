@@ -10,6 +10,7 @@ import os
 import queue
 import shutil
 import threading
+from dataclasses import replace
 from pathlib import Path
 
 from gitfurl import __version__
@@ -44,6 +45,11 @@ WARNING = (
 )
 
 
+PORTABLE_NOTE = (
+    "Runs the installer in bwrap: only this prefix is writable, the network is off and Wine's "
+    "menu entries are disabled. Reduces changes outside the prefix; not a guarantee.")
+
+
 def short_path(path: Path) -> str:
     """Show a path with ~ for the home folder."""
     home = str(Path.home())
@@ -59,8 +65,18 @@ def describe_environment(report: dict) -> str:
     return "\n".join(lines)
 
 
+def portable_option_state(runtime: str, bwrap_path: str | None) -> tuple[bool, str]:
+    """(available, reason) for the portable toggle. The reason is shown next to it."""
+    if runtime != "wine":
+        return False, "Not available with the proton runtime (untested under bwrap)."
+    if not bwrap_path:
+        return False, "Not available: bwrap (bubblewrap) was not found on PATH."
+    return True, PORTABLE_NOTE
+
+
 def describe_plan(installer: str, prefix: str, runtime: str = "wine",
-                  proton_path: str | None = None) -> tuple[str, str | None]:
+                  proton_path: str | None = None, portable: bool = False
+                  ) -> tuple[str, str | None]:
     """Return (preview text, error). No side effects."""
     if not installer.strip():
         return "", "Choose an installer file."
@@ -68,7 +84,18 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
         return "", "Choose or create a prefix."
     try:
         plan = build_plan(validate_installer(installer.strip()), prefix.strip(),
-                          runtime=runtime, proton_path=proton_path)
+                          runtime=runtime, proton_path=proton_path, portable=portable)
+        portable_lines = []
+        if portable:
+            from gitfurl.portable import check_portable_supported, describe_portable, find_bwrap
+
+            bwrap, penv = find_bwrap(), dict(os.environ)
+            installer_path = validate_installer(installer.strip())
+            wine = shutil.which("wine") or "wine"
+            wrapped = replace(plan, argv=[wine, *plan.argv[1:]])
+            check_portable_supported(wrapped, bwrap, penv, installer_path)
+            portable_lines = describe_portable(wrapped, bwrap, installer_path, penv,
+                                               full_argv=True)
     except ValueError as exc:
         return "", str(exc)
     text = (
@@ -77,6 +104,8 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
         f"working dir: {plan.cwd}\n"
         + "".join(f"env:         {k}={v}\n" for k, v in plan.env_overrides.items())
     )
+    if portable_lines:
+        text += "\n".join(portable_lines)
     return text.rstrip(), None
 
 
@@ -239,6 +268,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     cleanup_var = tk.StringVar(value="none")
     runtime_var = tk.StringVar(value="wine")
     find_var = tk.BooleanVar(value=False)
+    portable_var = tk.BooleanVar(value=False)
     progress_var = tk.StringVar(value="Shown while an installer runs: payload read, rate, rough ETA.")
     pending = {"cleanup": None, "control": None, "proton": False}
     proton_var = tk.StringVar(value=os.environ.get("PROTONPATH", ""))
@@ -624,6 +654,27 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
 
     row(c, "Proton folder", "Only used with the proton runtime. Defaults to PROTONPATH.", proton_row)
 
+    portable_switch = {}
+
+    def portable_widget(p):
+        portable_switch["w"] = w.Switch(p, portable_var, command=lambda: refresh_plan())
+        return portable_switch["w"]
+
+    portable_row = row(c, "Portable install (no changes outside this prefix)", PORTABLE_NOTE,
+                       portable_widget)
+
+    def refresh_portable():
+        ok, reason = portable_option_state(runtime_var.get(), shutil.which("bwrap"))
+        if not ok:
+            portable_var.set(False)
+        portable_switch["w"].set_enabled(ok)
+        for child in portable_row.winfo_children()[-1:]:  # the title and note frame
+            for lab in child.winfo_children()[-1:]:
+                lab.configure(text=reason)
+
+    runtime_var.trace_add("write", lambda *_: refresh_portable())
+    refresh_portable()
+
     row(c, "Delete the original installer after a good run",
         "installer = the file, folder = everything beside it. Only when it exits with status 0.",
         segmented_for(cleanup_var, MODES))
@@ -709,7 +760,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                                            else str(exc))
             sub_var.set("invalid name")
         runtime = runtime_var.get()
-        text, err = describe_plan(installer_var.get(), name, runtime, proton_dir())
+        text, err = describe_plan(installer_var.get(), name, runtime, proton_dir(),
+                                  portable_var.get())
         set_text(plan_box, text or (err or ""))
         tool = wine_path["umu"] if runtime == "proton" else wine_path["value"]
         rows = plan_checklist(installer_problem(installer_var.get()), prefix_error, exists,
@@ -827,7 +879,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     def run_clicked():
         proton = runtime_var.get() == "proton"
         text, err = describe_plan(installer_var.get(), selected_prefix(), runtime_var.get(),
-                                  proton_dir())
+                                  proton_dir(), portable_var.get())
         if err:
             messagebox.showerror("Cannot run", err)
             return
@@ -837,7 +889,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                                  "PATH. Nothing was run.")
             return
         plan = build_plan(validate_installer(installer_var.get().strip()), selected_prefix(),
-                          runtime=runtime_var.get(), proton_path=proton_dir())
+                          runtime=runtime_var.get(), proton_path=proton_dir(),
+                          portable=portable_var.get())
         missing = not plan.prefix.is_dir()
         if missing and not create_var.get():
             messagebox.showerror("Prefix missing", f"{plan.prefix} does not exist. Create it first, "
@@ -860,6 +913,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             extra += RUNTIME_DOWNLOAD_NOTE
         if changes_var.get():
             extra += "\n\nWhat the installer changed will be listed afterwards."
+            if plan.portable:
+                extra += " (checked places only)"
         if find_var.get():
             extra += "\n\nA guess at the installed program will be shown afterwards."
         if not messagebox.askyesno("Run this installer?", f"{text}{extra}\n\n{WARNING}",
@@ -871,11 +926,13 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                    if missing else "Installer running. Close its window when it is done.",
                    "install")
         create, track = create_var.get(), changes_var.get() or find_var.get()
-        ctx = {"prefix": selected_prefix_path(), "changes": changes_var.get(), "find": find_var.get()}
+        ctx = {"prefix": selected_prefix_path(), "changes": changes_var.get(), "find": find_var.get(),
+               "portable": plan.portable}
         bar.set(0)
         progress_var.set("Waiting for the installer to start reading its files...")
         control = RunControl()
         pending["control"], pending["proton"] = control, proton
+        pending["portable"] = plan.portable
         options = RunOptions(on_progress=ui_updates.put, progress_interval=3.0,
                              detailed_log=detail_var.get(), control=control)
         stop_btn.state(["!disabled"])  # a Stop from an earlier run must not leave it disabled
@@ -888,7 +945,9 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         control = pending["control"]
         if not stop_applies(pending, control):
             return
-        server = ("" if pending["proton"] else
+        server = ("\n\nThis was a portable run: the sandbox ends with the run's process group, "
+                  "so wineserver -k is not run." if pending.get("portable") else
+                  "" if pending["proton"] else
                   "\n\nThen this prefix's Wine server is asked to exit (wineserver -k). That also "
                   "ends anything you started by hand in this same prefix.")
         if not messagebox.askyesno(
@@ -974,7 +1033,9 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             if changes is not None:
                 parts = []
                 if ctx and ctx["changes"]:
-                    parts.append(changes.describe())
+                    parts.append(changes.describe() + (
+                        "\nPortable run: this covers the checked places only; it says nothing "
+                        "about places gitfurl did not check." if ctx.get("portable") else ""))
                 if ctx and ctx["find"]:
                     parts.append(changes.describe_executables(ctx["prefix"]))
                 show_report("After the install", "\n\n".join(parts))
