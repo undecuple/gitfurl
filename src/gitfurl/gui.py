@@ -32,6 +32,7 @@ from gitfurl.runner import (
     RunControl,
     RunOptions,
     build_plan,
+    describe_result,
     logs_root,
     run_tracked,
     runtime_env,
@@ -1000,7 +1001,9 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         if state == "ok" and kind == "install" and control is not None and control.cancelled:
             log = value[1]
             notes = "".join(f"\nNote: {n}" for n in control.notes)
-            status_var.set(f"Cancelled. {CANCEL_REMAINS}{notes}\nCleanup skipped. "
+            facts = describe_result(value)
+            status_var.set(f"Cancelled. {CANCEL_REMAINS}{notes}\n"
+                           f"{facts + chr(10) if facts else ''}Cleanup skipped. "
                            f"Local log: {log} (may contain your user name and paths)")
             status_label.configure(fg=w.AMBER)
             pending["cleanup"] = None
@@ -1027,6 +1030,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                         f", {len(problems)} problem(s)" if problems else "")
                 else:
                     extra = "\nCleanup skipped: the installer did not exit with status 0."
+            facts = describe_result(value)
+            extra += f"\n{facts}" if facts else ""
             status_var.set(f"Installer exited with status {status}{note}{extra}\n"
                            f"Local log: {log} (may contain your user name and paths)")
             status_label.configure(fg=w.CYAN if status == 0 else w.AMBER)

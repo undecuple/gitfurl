@@ -13,8 +13,10 @@ from pathlib import Path
 
 from gitfurl.prefixes import child_env as build_child_env
 from gitfurl.prefixes import prefix_path
+from gitfurl.preflight import memory_available
 from gitfurl.procgroup import SigintGuard as _SigintGuard
 from gitfurl.procgroup import wineserver_for
+from gitfurl.progress import ActivityObserver, ProgressMonitor, StallDetector, _dur
 
 
 @dataclass(frozen=True)
@@ -138,6 +140,11 @@ class RunControl:
         self._server_argv: list[str] | None = None
         self._server_env: dict[str, str] | None = None
         self._server_configured = False
+
+    @property
+    def started(self) -> bool:
+        """The run's process was created."""
+        return self._pgid is not None
 
     def configure_server(self, argv: list[str] | None, env: dict[str, str] | None) -> None:
         """Wine runtime only. argv None means no wineserver was found."""
@@ -319,6 +326,11 @@ class RunOptions:
     detailed_log: bool = False  # also write a JSON-lines event log
     wine_debug: str | None = None  # WINEDEBUG channels, e.g. "err+all"
     control: RunControl | None = None  # lets the caller stop the run (see RunControl)
+    stall_after_s: float | None = None  # advisory "possibly stalled" after this much idle time
+    on_note: object = None  # callable(str): one-line advisory notes (the stall advisory)
+    clock: object = time.monotonic  # injected in tests
+    proc_root: str = "/proc"  # injected in tests
+    meminfo: str = "/proc/meminfo"  # injected in tests
 
 
 _WINEDEBUG_OK = None
@@ -340,9 +352,69 @@ def logs_root(env: dict[str, str] | None = None) -> Path:
     return Path(base) / "gitfurl" / "logs"
 
 
+@dataclass
+class ExecResult:
+    """What a run reported, as separate facts. Unpacks as (status, log_path) for old callers.
+
+    started: the installer process was created (False if a stop came before the start).
+    exit_status: the process's own exit code (None if it never started). `status` is what
+      gitfurl reports: 130 for a cancelled run, otherwise the same as exit_status.
+    extraction_observed: a heuristic only. The prefix grew and payload files were read, as
+      the progress monitor saw. It is observed activity, not proof of anything. It is False
+      when nothing was seen, and also when it was not measured (see observation_measured).
+    observation_measured: the progress monitor ran and took at least one sample.
+    """
+
+    status: int
+    log_path: Path
+    started: bool = True
+    extraction_observed: bool = False
+    observation_measured: bool = False
+    exit_status: int | None = None
+
+    def as_tuple(self):
+        return (self.status, self.log_path)
+
+    def __iter__(self):
+        return iter(self.as_tuple())
+
+    def __getitem__(self, i):
+        return self.as_tuple()[i]
+
+    def __len__(self):
+        return len(self.as_tuple())
+
+
+@dataclass
+class TrackedResult(ExecResult):
+    """ExecResult from run_tracked: unpacks as (status, log_path, ChangeReport or None)."""
+
+    changes: object = None
+
+    def as_tuple(self):
+        return (self.status, self.log_path, self.changes)
+
+
+def describe_result(result) -> str | None:
+    """Three plain lines for the end text. None if `result` is not an ExecResult."""
+    if not isinstance(result, ExecResult):
+        return None
+    if not result.started:
+        return "Started: no (stopped before the installer was created).\nExit status: none."
+    if not result.observation_measured:
+        seen = "not measured (the progress monitor was off)"
+    elif result.extraction_observed:
+        seen = ("yes. The prefix grew and the installer's files were read while it ran. This is "
+                "a heuristic and does not show that anything was extracted or installed")
+    else:
+        seen = "no (not seen; a short burst between samples would be missed)"
+    return (f"Started: yes.\nObserved activity (heuristic): {seen}.\n"
+            f"Exit status: {result.exit_status}.")
+
+
 def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run=None,
             options: RunOptions | None = None):
-    """Run the installer from an approved plan. Returns (exit status, log path).
+    """Run the installer from an approved plan. Returns an ExecResult (unpacks as status, log).
 
     Output goes to a local log file only. The environment values are never written to the log.
     With options, it can also report progress and write a JSON-lines event log next to it.
@@ -387,17 +459,34 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
             events.flush()
 
     monitor = None
-    if options.on_progress is not None:
-        from gitfurl.progress import ProgressMonitor
-
+    observer = None
+    stall = None
+    if options.stall_after_s is not None:
+        stall = StallDetector(options.stall_after_s, log_path, options.clock)  # raises if <= 0
+    if options.on_progress is not None or stall is not None:
         def handle(sample):
             event("progress", elapsed_s=round(sample.elapsed_s), read_bytes=sample.read_bytes,
                   total_bytes=sample.total_bytes, written_bytes=sample.written_bytes,
                   percent=None if sample.percent is None else round(sample.percent, 2))
-            options.on_progress(sample)
+            observer.update(sample)
+            if events:  # detailed log only
+                event("processes", count=sample.procs, programs=list(sample.helpers))
+                event("memory", mem_available_bytes=memory_available(options.meminfo))
+            idle = stall.check(sample) if stall else None
+            if idle is not None:
+                event("possibly_stalled", idle_s=round(idle), after_s=options.stall_after_s,
+                      advisory=True)
+                if options.on_note is not None:
+                    options.on_note(
+                        f"possibly stalled: no payload read, no CPU use and no log growth for "
+                        f"{_dur(idle)}. This is advice only; nothing was stopped, and slow "
+                        f"phases can be normal.")
+            if options.on_progress is not None:
+                options.on_progress(sample)
 
+        observer = ActivityObserver()
         monitor = ProgressMonitor(plan.argv and Path(plan.argv[-1]), plan.prefix, handle,
-                                  options.progress_interval)
+                                  options.progress_interval, options.proc_root)
     t0 = time.monotonic()
     # Variable names only, never values: the environment can hold secrets.
     event("start", command=shlex.join(argv), cwd=str(plan.cwd), prefix=str(plan.prefix),
@@ -409,6 +498,7 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
             log.flush()
             if monitor:
                 monitor.start()
+            started = True
             try:
                 if run is not None:  # tests inject a fake runner
                     proc = run(argv, cwd=plan.cwd, env=child_env, stdout=log,
@@ -420,8 +510,11 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
                                                  {**child_env, "WINEPREFIX": str(plan.prefix)})
                     proc = _run_in_group(argv, cwd=plan.cwd, env=child_env, stdout=log,
                                          control=control)
+                    started = control.started
             finally:
                 final = monitor.stop() if monitor else None
+                if final is not None:
+                    observer.update(final)
             if control.cancelled and plan.portable:
                 control.notes.append("portable run: bwrap's process group was stopped and the "
                                      "sandbox ended with it (--die-with-parent); "
@@ -434,14 +527,21 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
                 log.write(f"\n--- exit status {proc.returncode}\n")
         if final is not None:
             event("progress_final", line=final.line())
+        facts = {"started": started,
+                 "extraction_observed": bool(observer and observer.observed),
+                 "observation_measured": bool(observer and observer.measured),
+                 "exit_status": proc.returncode if started else None}
         if control.cancelled:
-            event("cancelled", notes=control.notes, seconds=round(time.monotonic() - t0, 1))
+            event("cancelled", notes=control.notes, seconds=round(time.monotonic() - t0, 1),
+                  **facts)
         else:
-            event("exit", status=proc.returncode, seconds=round(time.monotonic() - t0, 1))
+            event("exit", status=proc.returncode, seconds=round(time.monotonic() - t0, 1),
+                  **facts)
     finally:
         if events:
             events.close()
-    return (CANCELLED_STATUS if control.cancelled else proc.returncode), log_path
+    return ExecResult(CANCELLED_STATUS if control.cancelled else proc.returncode, log_path,
+                      **facts)
 
 
 def run_with_prefix(plan: InstallPlan, wine: str, create_if_missing: bool,
@@ -449,7 +549,7 @@ def run_with_prefix(plan: InstallPlan, wine: str, create_if_missing: bool,
                     options: RunOptions | None = None):
     """Create the plan's prefix first when asked and needed, then run the installer.
 
-    Returns (exit status, log path). If creating the prefix fails, the installer is not run.
+    Returns an ExecResult (unpacks as exit status, log path). If creating the prefix fails, the installer is not run.
     """
     from gitfurl.prefixes import create_prefix
 
@@ -477,11 +577,11 @@ def run_tracked(plan: InstallPlan, wine: str, create_if_missing: bool, track: bo
                 env: dict[str, str] | None = None, run=None, options: RunOptions | None = None):
     """Like run_with_prefix, and when track is true also report what the installer changed.
 
-    Returns (exit status, log path, ChangeReport or None).
+    Returns a TrackedResult (unpacks as exit status, log path, ChangeReport or None).
     """
     if not track:
-        status, log = run_with_prefix(plan, wine, create_if_missing, env, run, options=options)
-        return status, log, None
+        res = run_with_prefix(plan, wine, create_if_missing, env, run, options=options)
+        return TrackedResult(**vars(res))
     from gitfurl.changes import compare, take_snapshot
 
     skip = [logs_root(env), plan.prefix.parent.parent]  # gitfurl's own data and state
@@ -490,7 +590,7 @@ def run_tracked(plan: InstallPlan, wine: str, create_if_missing: bool, track: bo
     def before():
         box["b"] = take_snapshot(plan.prefix, skip=[logs_root(env)])
 
-    status, log = run_with_prefix(plan, wine, create_if_missing, env, run, on_ready=before,
-                                  options=options)
+    res = run_with_prefix(plan, wine, create_if_missing, env, run, on_ready=before,
+                          options=options)
     after = take_snapshot(plan.prefix, skip=skip[:1])
-    return status, log, compare(box["b"], after, plan.prefix)
+    return TrackedResult(**{**vars(res), "changes": compare(box["b"], after, plan.prefix)})

@@ -236,3 +236,76 @@ class ProgressMonitor:
         if self._thread:
             self._thread.join(timeout=2)
         return self.sample()
+
+
+# Heuristic thresholds for "observed activity" (see ActivityObserver). Not proof of anything.
+OBSERVE_MIN_WRITTEN = 1 << 20  # bytes the prefix must have grown by
+OBSERVE_MIN_READ = 1 << 20  # bytes into the payload files a process must have read
+
+
+class ActivityObserver:
+    """Remembers the largest bytes-written and bytes-read seen across a run's samples.
+
+    `observed` is a heuristic: the prefix grew by at least `min_written` AND a process read at
+    least `min_read` bytes into the payload files. It sees only what the samples caught, so a
+    short burst between two samples is missed. It is evidence of activity, not proof that
+    anything was extracted or installed.
+    """
+
+    def __init__(self, min_written: int = OBSERVE_MIN_WRITTEN, min_read: int = OBSERVE_MIN_READ):
+        self.min_written, self.min_read = min_written, min_read
+        self.max_written = 0
+        self.max_read = 0
+        self.samples = 0
+
+    def update(self, sample: Sample) -> None:
+        self.samples += 1
+        self.max_written = max(self.max_written, sample.written_bytes)
+        self.max_read = max(self.max_read, sample.read_bytes)
+
+    @property
+    def measured(self) -> bool:
+        return self.samples > 0
+
+    @property
+    def observed(self) -> bool:
+        return self.max_written >= self.min_written and self.max_read >= self.min_read
+
+
+class StallDetector:
+    """Advisory only: says once that nothing moved for `after_s` seconds. It never acts.
+
+    Activity is any of: the payload read position grew, the prefix's processes used CPU
+    since the last sample, or the run's log file grew. The clock is injected for tests.
+    """
+
+    def __init__(self, after_s: float, log_path: Path | None = None, clock=time.monotonic):
+        if after_s <= 0:
+            raise ValueError("the stall time must be above 0 seconds")
+        self.after_s, self.log_path, self.clock = after_s, log_path, clock
+        self.fired = False
+        self._log_size = 0
+        self._log_size = self._size()
+        self._last_move = clock()
+        self._read = 0
+
+    def _size(self) -> int:
+        try:
+            return os.path.getsize(self.log_path) if self.log_path else 0
+        except OSError:
+            return self._log_size
+
+    def check(self, sample: Sample) -> float | None:
+        """Feed one sample. Returns the idle seconds the first time the limit is passed."""
+        now = self.clock()
+        size = self._size()
+        if sample.read_bytes > self._read or size > self._log_size \
+                or (sample.cpu_pct is not None and sample.cpu_pct > 0):
+            self._last_move = now
+        self._read = max(self._read, sample.read_bytes)
+        self._log_size = max(self._log_size, size)
+        idle = now - self._last_move
+        if not self.fired and idle >= self.after_s:
+            self.fired = True
+            return idle
+        return None

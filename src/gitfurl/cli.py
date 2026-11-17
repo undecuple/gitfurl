@@ -27,6 +27,7 @@ from gitfurl.runner import (
     RunControl,
     RunOptions,
     build_plan,
+    describe_result,
     logs_root,
     run_tracked,
     validate_installer,
@@ -65,6 +66,10 @@ def build_parser() -> argparse.ArgumentParser:
                       help="after the run, guess which new program was installed (local only)")
     inst.add_argument("--progress", action="store_true",
                       help="print progress while the installer runs (payload read, rate, ETA)")
+    inst.add_argument("--stall-after", type=float, default=None, metavar="SECONDS",
+                      help="print one advisory note if nothing moves (no payload read, no CPU "
+                           "use, no log growth) for this long. Off by default. It never stops "
+                           "anything")
     inst.add_argument("--progress-interval", type=float, default=10.0, metavar="SECONDS")
     inst.add_argument("--detailed-log", action="store_true",
                       help="also write a JSON-lines event log next to the log")
@@ -231,6 +236,8 @@ def _real_install(args) -> int:
             validate_wine_debug(args.wine_debug)
         if args.progress_interval <= 0:
             raise ValueError("--progress-interval must be above 0")
+        if args.stall_after is not None and args.stall_after <= 0:
+            raise ValueError("--stall-after must be above 0")
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -268,9 +275,12 @@ def _real_install(args) -> int:
             on_progress=(lambda smp: print(f"[progress] {smp.line()}", flush=True))
             if args.progress else None,
             progress_interval=args.progress_interval,
-            detailed_log=args.detailed_log, wine_debug=args.wine_debug, control=control)
-        status, log_path, changes = run_tracked(
+            detailed_log=args.detailed_log, wine_debug=args.wine_debug, control=control,
+            stall_after_s=args.stall_after,
+            on_note=(lambda note: print(f"[note] {note}", flush=True)))
+        result = run_tracked(
             plan, wine, args.create_prefix, args.show_changes or args.find_exe, options=options)
+        status, log_path, changes = result
     except (RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -284,6 +294,8 @@ def _real_install(args) -> int:
         return 130
     if control.cancelled:
         print("The run was cancelled, not completed.")
+        if describe_result(result):
+            print(describe_result(result))
         print(CANCEL_REMAINS)
         for note in control.notes:
             print(f"note: {note}")
@@ -294,6 +306,8 @@ def _real_install(args) -> int:
         print(f"local log: {log_path} (may contain your username and local paths)")
         return CANCELLED_STATUS
     print(f"installer exited with status {status}")
+    if describe_result(result):
+        print(describe_result(result))
     if args.cleanup != "none":
         if status == 0:
             deleted, problems = perform_cleanup(clean, status)
