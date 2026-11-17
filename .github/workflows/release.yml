@@ -49,7 +49,8 @@ jobs:
           test "$status" = 124 || { echo "window did not stay open (status $status)"; exit 1; }
       - name: name the files and write checksums
         run: |
-          name="gitfurl-${GITHUB_REF_NAME:-dev}-linux-x86_64"
+          ref="${GITHUB_REF_NAME:-dev}"
+          name="gitfurl-${ref//\//-}-linux-x86_64"  # a branch name may contain slashes
           mkdir out
           cp dist/gitfurl "out/$name"
           (cd out && sha256sum "$name" > SHA256SUMS)
