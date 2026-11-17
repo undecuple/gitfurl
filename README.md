@@ -27,8 +27,6 @@ gitfurl is a graphical app (with an optional command line) for running a Windows
 
 *The Library page with demo prefixes (empty folders). No installer was run to make this picture.*
 
-*The Library page. Work in progress.*
-
 ## Why would I want this?
 
 Running a Windows installer under Wine by hand works, until it does not. These are the problems gitfurl is for:
