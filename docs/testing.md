@@ -23,5 +23,13 @@ Result: two user-supplied installers started and stayed open for the whole 120 s
 
 One installer was also started through Proton (GE-Proton) with umu-launcher in the same sandbox, with `SANDBOX_ETC=1`. It stayed open for 120 seconds. Proton's output held one error line whose source was not found.
 
+## The single-file build (release workflow)
+`release.yml` builds one Linux program with PyInstaller. Checked on 2026-11-16 by running the workflow by hand (it builds and uploads only):
+- The checksum file matches. `cli --version` prints 1.0.0 and `cli doctor` runs.
+- The window opens (stays open 6 s under a virtual display) in CI and in a Debian image that has Tk and fonts.
+- On a bare Debian with no fonts it loads its bundled Tk but cannot create a window; the app now prints that reason.
+- On NixOS it stops with `libxcb.so.1: cannot open shared object file`, because the build expects the system's standard X11 libraries.
+Not proven: Fedora, Arch, Wayland-only sessions, older distributions than Ubuntu 22.04.
+
 ## Not tested
 A complete installation, running an installed program, the progress numbers on a real install (tested against fake `/proc` data only), Proton from the app, the Docker image, a non-NixOS system, keyboard navigation and screen readers.

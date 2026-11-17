@@ -78,7 +78,7 @@ As of 2026-11-16, on Linux x86_64, Wine 11.0, tested headless (no GPU, a virtual
 - The app is dark only, with a fixed pixel font. Tab and Return/space work on buttons, switches and the sidebar (added 2026-11-16, lightly tested). Screen readers cannot read it: Tk does not expose its widgets to them.
 - Gitfurl refuses to create prefixes or run installers as root.
 - Proton needs a Proton folder you already have, and umu-run downloads its own runtime on first use if it is missing.
-- There is no packaged release. See the [roadmap](ROADMAP.md).
+- There is no published release yet. The single-file Linux build made by the release workflow starts and runs `cli` here, and its window opens in a Debian image with Tk and fonts. It is **not proven on every desktop**: it expects the system's standard X11 libraries and at least one font. On NixOS it stops with `libxcb.so.1: cannot open shared object file` unless the libraries are provided (for example with nix-ld) or you run from source with `nix develop`. See the [roadmap](ROADMAP.md).
 
 ## What goes online
 Nothing, from gitfurl itself. (Inherited `WINE*` variables from your shell are not passed to the installer, so the plan shows everything that is set.) It makes no network requests, sends no telemetry and uploads nothing. Two things you start yourself can use the network: umu-run downloading its runtime on first use, and anything the installer does. The [sandbox wrapper](docs/development.md#running-an-installer-in-a-sandbox) turns the network off for the installer.
