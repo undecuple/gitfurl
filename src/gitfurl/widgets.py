@@ -1,6 +1,7 @@
 """Small tkinter widgets: rounded cards, buttons, switches, a progress bar and the pixel
-wordmark. Colours follow vim-tictoc, shapes follow libadwaita (12 px cards, pill buttons),
-the wordmark follows the banner in assets/. Needs a display; import only from the GUI."""
+wordmark. Colours follow vim-tictoc (see gitfurl.theme), one corner radius, an orange focus
+ring on everything Tab can reach, the wordmark follows the banner in assets/. Needs a display;
+import only from the GUI."""
 
 from __future__ import annotations
 
@@ -8,11 +9,27 @@ import tkinter as tk
 from tkinter import font as tkfont
 
 from gitfurl.pixelfont import BIG, cells
-
-BG, PANEL, LINE, FG = "#0C1021", "#1a1f36", "#465374", "#F8F8F8"
-ORANGE, AMBER, YELLOW, CYAN, MUTED, RED = "#FF6400", "#FCB439", "#FBDE2D", "#00C1E4", "#AEAEAE", "#E06C5A"
-HOVER, ACCENTS = "#5a6a92", [ORANGE, AMBER, YELLOW, CYAN]
-
+from gitfurl.theme import (  # noqa: F401 - re-exported for gui.py
+    ACCENTS,
+    AMBER,
+    BG,
+    CYAN,
+    DISABLED_ACCENT,
+    DISABLED_FILL,
+    FG,
+    FOCUS_RING,
+    FOCUS_RING_ON_ACCENT,
+    FOCUS_WIDTH,
+    HOVER,
+    LINE,
+    MUTED,
+    ORANGE,
+    PANEL,
+    RADIUS,
+    RED,
+    SIDE,
+    YELLOW,
+)
 
 _FAMILIES: set[str] = set()
 
@@ -52,21 +69,25 @@ def make_focusable(widget, activate, redraw):
     widget.bind("<Button-1>", lambda _e: widget.focus_set(), add="+")
 
 
-def focus_ring(canvas, w, h, r):
+def focus_ring(canvas, w, h, r, colour=FOCUS_RING):
+    """Draw the keyboard focus outline (orange, like the selected card) when the canvas has focus."""
     if getattr(canvas, "_focused", False):
-        rounded(canvas, 1, 1, w - 1, h - 1, r, fill="", outline=YELLOW, width=2)
+        rounded(canvas, 1, 1, w - 1, h - 1, r, fill="", outline=colour, width=FOCUS_WIDTH)
 
 
 class RoundCard(tk.Canvas):
     """A rounded panel. Put children in .body."""
 
-    def __init__(self, master, fill=PANEL, outline=LINE, radius=12, pad=14, outer=BG):
+    def __init__(self, master, fill=PANEL, outline=LINE, radius=RADIUS, pad=14, outer=BG,
+                 activate=None):
         super().__init__(master, bg=outer, highlightthickness=0, bd=0, height=40)
         self.fill, self.outline, self.radius, self.pad = fill, outline, radius, pad
         self.body = tk.Frame(self, bg=fill)
         self._win = self.create_window(pad, pad, window=self.body, anchor="nw")
         self.bind("<Configure>", self._draw)
         self.body.bind("<Configure>", self._fit)
+        if activate is not None:  # a card you can open: Tab reaches it, Enter or space opens it
+            make_focusable(self, activate, self._draw)
 
     def _fit(self, _e=None):
         self.configure(height=self.body.winfo_reqheight() + 2 * self.pad)
@@ -74,8 +95,10 @@ class RoundCard(tk.Canvas):
     def _draw(self, _e=None):
         self.delete("bg")
         w, h = self.winfo_width(), self.winfo_height()
-        rounded(self, 1, 1, w - 1, h - 1, self.radius, fill=self.fill, outline=self.outline,
-                tags="bg")
+        focused = getattr(self, "_focused", False)
+        rounded(self, 1, 1, w - 1, h - 1, self.radius, fill=self.fill,
+                outline=FOCUS_RING if focused else self.outline,
+                width=FOCUS_WIDTH if focused else 1, tags="bg")
         self.tag_lower("bg")
         self.itemconfigure(self._win, width=max(10, w - 2 * self.pad))
 
@@ -128,19 +151,21 @@ class PillButton(tk.Canvas):
         w, h = self.winfo_reqwidth(), self.winfo_reqheight()
         dis = self._state == "disabled"
         if self.style == "accent":
-            fill = "#5a3a22" if dis else (AMBER if self._hover else ORANGE)
+            fill = DISABLED_ACCENT if dis else (AMBER if self._hover else ORANGE)
             fg = MUTED if dis else BG
-            rounded(self, 0, 0, w, h, h / 2, fill=fill, outline=fill)
+            rounded(self, 0, 0, w, h, RADIUS, fill=fill, outline=fill)
         elif self.style == "plain":
-            fill = HOVER if self._hover and not dis else LINE
+            fill = DISABLED_FILL if dis else (HOVER if self._hover else LINE)
             fg = MUTED if dis else FG
-            rounded(self, 0, 0, w, h, 8, fill=fill, outline=fill)
+            rounded(self, 0, 0, w, h, RADIUS, fill=fill, outline=fill)
         else:
-            fg = MUTED if dis else (YELLOW if self._hover else FG)
+            fg = MUTED if dis else FG
             if self._hover and not dis:
-                rounded(self, 0, 0, w, h, 8, fill=HOVER, outline=HOVER)
+                rounded(self, 0, 0, w, h, RADIUS, fill=HOVER, outline=HOVER)
         self.create_text(w / 2, h / 2, text=self.text, fill=fg, font=self._font)
-        focus_ring(self, w, h, h / 2 if self.style == "accent" else 8)
+        # white on the orange pill (an orange ring would vanish there), orange elsewhere
+        focus_ring(self, w, h, RADIUS,
+                   FOCUS_RING_ON_ACCENT if self.style == "accent" and not dis else FOCUS_RING)
 
 
 class Switch(tk.Canvas):
@@ -206,7 +231,7 @@ class Tile(tk.Canvas):
 
     def __init__(self, master, letter, colour, size=44, outer=PANEL):
         super().__init__(master, width=size, height=size, bg=outer, highlightthickness=0, bd=0)
-        rounded(self, 0, 0, size, size, 10, fill=BG, outline=LINE)
+        rounded(self, 0, 0, size, size, RADIUS, fill=BG, outline=LINE)
         g = BIG.get(letter.lower())
         if g is None:  # the block font has only the letters of the wordmark
             self.create_text(size / 2, size / 2, text=(letter or "?").upper(), fill=colour,
