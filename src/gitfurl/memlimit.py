@@ -331,6 +331,8 @@ class MemoryReport:
     high: int | None = None  # memory.events "high", as last read
     changes: list = field(default_factory=list)  # (old, new) soft limit changes
     notes: list = field(default_factory=list)
+    final_read: bool = False  # memory.events was read after the run ended
+    start_failure: str | None = None  # a "Failed to ..." line systemd-run left in the log
 
     @property
     def hit_limit(self) -> bool:
@@ -341,9 +343,21 @@ class MemoryReport:
             count = f" ({self.oom_kill} process(es) by this run's memory.events)" \
                 if self.oom_kill else ""
             out = [(f"Memory limit: the run hit its hard memory limit "
-                    f"({gib(self.budget.max_bytes)}) and the kernel stopped processes in this run "
-                    f"only{count}. Other programs were protected from this run's memory use. "
-                    "The install may be incomplete; read the log.")]
+                    f"({gib(self.budget.max_bytes)}) and the kernel stopped one or more processes "
+                    f"inside this run's scope{count}. The install may be incomplete; read the "
+                    "log. The hard limit was fixed from the memory available when the run "
+                    "started; to retry without it, use --no-memory-limit, or turn the option off "
+                    "in the window.")]
+        elif self.start_failure:
+            out = [("Memory limit: systemd-run may have failed, so the installer may not have "
+                    f"run at all; the exit status may be systemd-run's. The log has: "
+                    f"'{self.start_failure}'. See the log.")]
+        elif not self.final_read:
+            seen = (f"; while the run lasted it showed {self.oom_kill} out-of-memory stop(s)"
+                    if self.oom_kill is not None else "")
+            out = [(f"Memory limit: this run's memory.events could not be read after the run "
+                    f"(the scope may already be gone){seen}, so an out-of-memory stop could not "
+                    f"be checked (hard limit {gib(self.budget.max_bytes)}).")]
         else:
             out = [(f"Memory limit: no out-of-memory stop was seen in this run (hard limit "
                     f"{gib(self.budget.max_bytes)}).")]
@@ -359,6 +373,21 @@ class MemoryReport:
 
 
 EVENT_KEYS = ("high", "max", "oom", "oom_kill")
+ACTIVE_STATES = ("active", "activating", "deactivating")
+START_FAILURE_PREFIX = "Failed to "  # systemd-run's own error lines (seen with systemd 262)
+
+
+def find_start_failure(log_text: str) -> str | None:
+    """The first line of the run's output that looks like a systemd-run error, or None.
+
+    Seen with systemd 262 on 2026-11-17: "Failed to parse MemoryMax= value ...", "Failed to find
+    executable ...", "Failed to connect to user scope bus ...". Only a hint: a program run inside
+    the scope could print such a line too, so callers say "may have failed".
+    """
+    for line in log_text.splitlines():
+        if line.startswith(START_FAILURE_PREFIX):
+            return line.strip()[:200]
+    return None
 
 
 class MemoryScope:
@@ -433,16 +462,18 @@ class MemoryScope:
         except OSError:
             return None
 
-    def read_events(self) -> None:
+    def read_events(self) -> bool:
+        """Read this scope's memory.events; False if it could not be read."""
         text = self._read("memory.events")
         if text is None:
-            return
+            return False
         for line in text.splitlines():
             parts = line.split()
             if len(parts) == 2 and parts[0] in EVENT_KEYS and parts[1].isdigit():
                 self._events[parts[0]] = max(self._events.get(parts[0], 0), int(parts[1]))
         self.report.oom_kill = self._events.get("oom_kill", 0)
         self.report.high = self._events.get("high", 0)
+        return True
 
     def _usage(self) -> int | None:
         text = self._read("memory.current")
@@ -506,26 +537,34 @@ class MemoryScope:
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=15)
-        if self._cgroup is None:
-            self._cgroup = self._find_cgroup()
-        self.read_events()
-        state: dict[str, str] = {}
-        deadline = time.monotonic() + self.settle_s
-        while True:  # a process of the run (e.g. Wine's server) may keep it a few seconds
-            state = self._show("ActiveState", "Result")
-            if state.get("ActiveState") not in ("active", "activating", "deactivating") \
-                    or time.monotonic() >= deadline:
-                break
-            time.sleep(0.2)
-            self.read_events()
-        if state.get("Result") == "oom-kill":
-            self.report.oom_result = True
-        if state.get("ActiveState") == "failed":
-            self._systemctl("reset-failed", self.unit)
-        elif state.get("ActiveState") in ("active", "activating", "deactivating"):
-            self.report.notes.append(
-                f"the run's scope {self.unit} is still active (a process of the run, for "
-                "example Wine's server, is still running in it); its limits stay until it ends")
+        state: dict[str, str] | None = None
+        try:
+            if self._cgroup is None:
+                self._cgroup = self._find_cgroup()
+            if self.read_events():
+                self.report.final_read = True
+            deadline = time.monotonic() + self.settle_s
+            while True:  # a process of the run (e.g. Wine's server) may keep it a few seconds
+                state = self._show("ActiveState", "Result")
+                if state.get("ActiveState") not in ACTIVE_STATES \
+                        or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.2)
+                if self.read_events():
+                    self.report.final_read = True
+        finally:  # also on Ctrl-C or an error above: settle this unit's result
+            if state is None:
+                state = self._show("ActiveState", "Result")
+            if state.get("Result") == "oom-kill":
+                self.report.oom_result = True
+            if state.get("ActiveState") == "failed":
+                self._systemctl("reset-failed", self.unit)
+            elif state.get("ActiveState") in ACTIVE_STATES:
+                self.report.notes.append(
+                    f"the run's scope {self.unit} is still active (a process of the run, for "
+                    "example Wine's server, is still running in it); its limits stay until it "
+                    "ends. If it then stays listed as failed, clear it with: systemctl --user "
+                    f"reset-failed {self.unit}")
         return self.report
 
 

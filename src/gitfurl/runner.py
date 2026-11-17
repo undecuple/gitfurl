@@ -540,6 +540,7 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
                 log.write("".join(f"scan: {ln}\n" for ln in options.scan_summary.splitlines()))
             log.write("---\n")
             log.flush()
+            output_start = log.tell()  # the run's own output starts here
             if monitor:
                 monitor.start()
             if scope is not None:
@@ -558,11 +559,16 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
                                          control=control)
                     started = control.started
             finally:
-                final = monitor.stop() if monitor else None
-                if final is not None:
-                    observer.update(final)
-                if scope is not None:
-                    memory_report = scope.finish()
+                try:
+                    final = monitor.stop() if monitor else None
+                    if final is not None:
+                        observer.update(final)
+                finally:  # the scope's result is read and a failed unit cleared in every case
+                    if scope is not None:
+                        memory_report = scope.finish()
+            if memory_report is not None and proc.returncode != 0 and not control.cancelled \
+                    and not memory_report.hit_limit:
+                memory_report.start_failure = _start_failure(log, log_path, output_start)
             if control.cancelled and plan.portable:
                 control.notes.append("portable run: bwrap's process group was stopped and the "
                                      "sandbox ended with it (--die-with-parent); "
@@ -647,6 +653,20 @@ def run_with_prefix(plan: InstallPlan, wine: str, create_if_missing: bool,
     if on_ready is not None:
         on_ready()  # the prefix exists; e.g. take a "before" snapshot
     return execute(plan, wine, env, run, options)
+
+
+def _start_failure(log, log_path: Path, start: int) -> str | None:
+    """A systemd-run error line in the run's output (up to 64 KiB of it), or None."""
+    from gitfurl.memlimit import find_start_failure
+
+    try:
+        log.flush()
+        with open(log_path, "rb") as fh:
+            fh.seek(start)
+            text = fh.read(64 * 1024).decode("utf-8", errors="replace")
+    except OSError:
+        return None
+    return find_start_failure(text)
 
 
 def _scan_gate(plan: InstallPlan, options: RunOptions) -> RunOptions:

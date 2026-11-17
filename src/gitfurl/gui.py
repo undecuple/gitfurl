@@ -92,11 +92,11 @@ def scan_option_state(clamscan_path: str | None) -> tuple[bool, str]:
     return True, SCAN_NOTE
 
 
-MEMORY_TITLE = "Limit memory (protects the rest of the system)"
+MEMORY_TITLE = "Limit memory (reduces the chance of running out)"
 MEMORY_NOTE = ("On by default. Runs the installer in a systemd user scope with a soft and a hard "
                "memory limit. This reduces the chance that the system runs out of memory; it does "
                "not guarantee that the installer succeeds. Above the soft limit the installer is "
-               "slowed down; at the hard limit the kernel stops processes in this run only.")
+               "slowed down; at the hard limit the kernel stops processes inside this run's scope only. Swap is not limited, and programs already running outside the scope are not covered.")
 
 
 def memory_problem(enabled: bool, avail=None, meminfo: str = "/proc/meminfo") -> str | None:

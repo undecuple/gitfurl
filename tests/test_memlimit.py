@@ -75,10 +75,12 @@ class Fakes:
         self.events = root / "events.template"
         self.state = root / "unit.state"  # what `show -p ActiveState -p Result` prints
         self.state.write_text("ActiveState=inactive\nResult=success\n")
+        self.fail_start = root / "fail.start"  # if present: systemd-run prints it and exits 1
         app = f"{self.cg}{MANAGER_CG}/app.slice"
         self.systemd_run = script(self.bin / "systemd-run", f'''
 if [ "$1" = "--version" ]; then echo "systemd {version} ({version})"; exit 0; fi
 printf "%s\\n" "$@" > "{self.run_rec}"
+if [ -f "{self.fail_start}" ]; then cat "{self.fail_start}" >&2; exit 1; fi
 unit=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -294,6 +296,7 @@ class ExecuteTests(unittest.TestCase):
         return RunOptions(cgroup_root=str(self.f.cg), meminfo=self.meminfo, **kw)
 
     def test_wine_argv_is_wrapped_and_the_result_reported(self):
+        self.f.events.write_text("low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\n")
         res = execute(self.plan, self.wine, self.f.env, options=self.options(detailed_log=True))
         self.assertEqual(res.status, 0)
         got = self.f.run_rec.read_text().splitlines()
@@ -328,8 +331,11 @@ class ExecuteTests(unittest.TestCase):
         self.assertEqual((rep.oom_kill, rep.high), (2, 7))
         text = describe_result(res)
         self.assertIn("hit its hard memory limit", text)
-        self.assertIn("the kernel stopped processes in this run only (2 process(es)", text)
-        self.assertIn("Other programs were protected", text)
+        self.assertIn("the kernel stopped one or more processes inside this run's scope "
+                      "(2 process(es)", text)
+        self.assertNotIn("protected", text)
+        self.assertIn("retry without it, use --no-memory-limit, or turn the option off in the "
+                      "window", text)
         self.assertIn("slowed down at the soft limit", text)
         self.assertNotIn("cannot", text)
         unit = next(x for x in self.f.run_rec.read_text().splitlines()
@@ -341,6 +347,44 @@ class ExecuteTests(unittest.TestCase):
         res = execute(self.plan, self.wine, self.f.env, options=self.options())
         self.assertTrue(res.memory.hit_limit)
         self.assertNotIn("process(es) by", describe_result(res))
+
+    def test_unreadable_memory_events_is_not_reported_as_no_stop(self):
+        # the fake writes no memory.events: the scope's result can not be checked
+        res = execute(self.plan, self.wine, self.f.env, options=self.options())
+        self.assertFalse(res.memory.final_read)
+        text = describe_result(res)
+        self.assertIn("memory.events could not be read after the run", text)
+        self.assertIn("an out-of-memory stop could not be checked", text)
+        self.assertNotIn("no out-of-memory stop was seen", text)
+
+    def test_a_failed_systemd_run_start_is_named(self):
+        self.f.fail_start.write_text("Failed to start transient scope unit: Access denied\n")
+        res = execute(self.plan, self.wine, self.f.env, options=self.options())
+        self.assertEqual(res.status, 1)
+        self.assertFalse(self.wine_rec.exists())  # the installer never ran
+        self.assertEqual(res.memory.start_failure,
+                         "Failed to start transient scope unit: Access denied")
+        text = describe_result(res)
+        self.assertIn("systemd-run may have failed, so the installer may not have run", text)
+        self.assertIn("'Failed to start transient scope unit: Access denied'", text)
+        self.assertNotIn("no out-of-memory stop was seen", text)
+
+    def test_a_plain_non_zero_exit_is_not_called_a_systemd_run_failure(self):
+        self.f.events.write_text("high 0\noom_kill 0\n")
+        script(self.f.bin / "wine", 'echo "wine: some installer output"\nexit 3\n')
+        res = execute(self.plan, self.wine, self.f.env, options=self.options())
+        self.assertEqual(res.status, 3)
+        self.assertIsNone(res.memory.start_failure)
+        self.assertNotIn("systemd-run may have failed", describe_result(res))
+
+    def test_the_scope_is_finished_even_when_progress_stop_raises(self):
+        self.f.state.write_text("ActiveState=failed\nResult=oom-kill\n")
+        with mock.patch("gitfurl.runner.ProgressMonitor.stop", side_effect=RuntimeError("boom")), \
+                self.assertRaises(RuntimeError):
+            execute(self.plan, self.wine, self.f.env,
+                    options=self.options(on_progress=lambda _s: None))
+        self.assertTrue(any(x.startswith("--user reset-failed gitfurl-p1-")
+                            for x in self.f.ctl_lines()), self.f.ctl_lines())
 
     def test_unavailable_refuses_before_anything_runs(self):
         (self.f.cg / MANAGER_CG.lstrip("/") / "cgroup.controllers").write_text("cpu\n")
@@ -459,6 +503,50 @@ class ExecuteTests(unittest.TestCase):
         self.assertEqual(res.status, 130)
         self.assertTrue(control.cancelled)
         self.assertIn("cancelled by user", Path(res.log_path).read_text())
+
+
+class FinishTests(unittest.TestCase):
+    def _scope(self):
+        avail = Availability(True, "", "/x/systemd-run", "/x/systemctl", 262, MANAGER_CG)
+        return MemoryScope(avail, compute_budget(16 * GIB, 10 * GIB), "gitfurl-p1-t-1.scope",
+                           env={}, settle_s=5.0)
+
+    def test_ctrl_c_while_waiting_still_reads_the_result_and_resets_the_unit(self):
+        scope = self._scope()
+        calls = []
+        shows = iter([KeyboardInterrupt(), {"ActiveState": "failed", "Result": "oom-kill"}])
+
+        def show(*_props):
+            item = next(shows)
+            if isinstance(item, BaseException):
+                raise item
+            return item
+
+        with mock.patch.object(scope, "_find_cgroup", return_value=None), \
+                mock.patch.object(scope, "_show", side_effect=show), \
+                mock.patch.object(scope, "_systemctl", side_effect=lambda *a: calls.append(a)), \
+                self.assertRaises(KeyboardInterrupt):
+            scope.finish()
+        self.assertTrue(scope.report.oom_result)
+        self.assertEqual(calls, [("reset-failed", "gitfurl-p1-t-1.scope")])
+
+    def test_a_still_active_scope_names_the_reset_command(self):
+        scope = replace_settle(self._scope())
+        with mock.patch.object(scope, "_find_cgroup", return_value=None), \
+                mock.patch.object(scope, "_show", return_value={"ActiveState": "active"}):
+            rep = scope.finish()
+        self.assertIn("systemctl --user reset-failed gitfurl-p1-t-1.scope", rep.notes[-1])
+
+    def test_find_start_failure(self):
+        self.assertIsNone(memlimit.find_start_failure("wine: hello\nFailed: no\n"))
+        self.assertEqual(memlimit.find_start_failure("x\nFailed to find executable /a: No such "
+                                                     "file or directory\n"),
+                         "Failed to find executable /a: No such file or directory")
+
+
+def replace_settle(scope):
+    scope.settle_s = 0.0
+    return scope
 
 
 class DynamicTests(unittest.TestCase):
@@ -712,7 +800,7 @@ class WindowTests(unittest.TestCase):
         self.assertTrue(r["default_on"])
         self.assertEqual(r["run_off"], "disabled")
         self.assertIn("memory limit: NOT available: test: no systemd-run", r["reason"])
-        self.assertIn("Turn off 'Limit memory (protects the rest of the system)'", r["row"])
+        self.assertIn("Turn off 'Limit memory (reduces the chance of running out)'", r["row"])
         self.assertIn("memory limit: NOT available", r["plan"])
         self.assertEqual((r["run_on"], r["reason_on"]), ("normal", ""))
         self.assertIn("memory limit: off", r["plan_off"])

@@ -67,8 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
                            "not a guarantee); default: off")
     inst.add_argument("--no-memory-limit", action="store_true",
                       help="run without the memory limit. By default the run is put in a "
-                           "systemd user scope with a soft and a hard memory limit, so it is "
-                           "less likely to push the whole system out of memory")
+                           "systemd user scope with a soft and a hard memory limit, which reduces "
+                           "the chance that the run pushes the system out of memory")
     inst.add_argument("--find-exe", action="store_true",
                       help="after the run, guess which new program was installed (local only)")
     inst.add_argument("--progress", action="store_true",
