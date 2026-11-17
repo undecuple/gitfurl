@@ -53,6 +53,7 @@ If the prefix does not exist and "Create the prefix if it does not exist" is on 
 - **Find the installed program.** After the run, gitfurl guesses which new `.exe` is the installed program (largest first, ignoring uninstallers, redistributables, crash handlers and Windows folders) and prints a command you can run yourself. It guesses from names and sizes only. It does not run the program, add it to any launcher, or look anything up online.
 - **Runtime:** `wine` (default) or `proton`. Proton runs through `umu-run` and needs a Proton folder you already have, given with `--proton-path` or the `PROTONPATH` variable. gitfurl never downloads one. `umu-run` itself downloads the Steam Linux Runtime the first time it runs if it is not already on the machine; the confirmation dialog says so. This was tested only as far as starting an installer in a sandbox.
 - **Portable install (reduces changes outside this prefix).** Off by default. Normal install is the default and runs the installer as today. Portable runs the installer inside bubblewrap (`bwrap`) so that, as far as bwrap isolates it, the writable places are the dedicated prefix, a temporary home and `/tmp` that vanish afterwards, the run's log file and `/dev/dri`. The network is off, the environment is filtered to a short allowlist, your home folder, the session and system D-Bus sockets are hidden, and Wine's menu and file-association builder is disabled, so entries in desktop menus, file-type handlers and `~/.cache/wine` are reduced, not guaranteed absent. See "Portable install" below. It is disabled when `bwrap` is not found or the runtime is `proton`, and then it says why.
+- **Scan the installer with ClamAV first.** Off by default. See "ClamAV scan" below. It is disabled, with the reason shown, when `clamscan` is not on PATH.
 - **Delete the original installer after a good run:** `none` (default), `installer` (just the file) or `folder` (**everything in the installer's folder**, including other files and sub-folders). See "Cleanup".
 
 ### Progress
@@ -108,6 +109,9 @@ Options for `install`:
 | `--show-changes` | List what the installer changed afterwards. |
 | `--portable` | Portable install: run the installer in bwrap (see "Portable install"). Off by default. `--dry-run` prints the full bwrap argument list. Needs `bwrap` on PATH and the wine runtime; without them it stops and does not fall back to a normal install. |
 | `--find-exe` | Guess which new program was installed (local only). |
+| `--scan` | Scan the installer and the files beside it with the `clamscan` on PATH before anything runs (see "ClamAV scan"). Off by default. A match or a scan error stops the run. `--dry-run` prints the scan command. |
+| `--allow-scan-hit` | With `--scan`: run even if ClamAV matched a signature. Refused without `--scan`. A scan error is never overridden. |
+| `--scan-timeout SECONDS` | With `--scan`: stop the scan after this long (default 600); a timeout stops the run. |
 | `--runtime wine\|proton` | Runtime to use (default `wine`). `--proton-path DIR` or `PROTONPATH` names the Proton folder. |
 | `--cleanup installer\|folder` | Delete the installer (file or folder) after exit status 0. |
 
@@ -144,6 +148,14 @@ Two modes per run. **Normal install** (default) is the installer's usual behavio
 - Not supported with the `proton` runtime, as root, or when wine itself is installed under your home folder (hidden inside the sandbox).
 
 This reduces what an installer changes outside its prefix, as far as bwrap isolates it. It is **not a guarantee** and not a security boundary: a Wine prefix and bwrap do not contain a hostile installer, and some other host sockets and files remain reachable. **The prefix is kept** after the run, and whatever the installer put there (startup entries in the registry, replaced DLLs, links under `drive_c/users`) runs again, outside any sandbox, whenever you run something in that prefix later. Delete the prefix if you do not trust the installer. Whether an install keeps everything inside the prefix has not been checked against a complete real install. gitfurl's own check that the run has ended cannot see programs inside the sandbox; it relies on bwrap ending them.
+
+## ClamAV scan
+Optional and off by default (`--scan`, or "Scan the installer with ClamAV first" in the app).
+- **What it runs.** The `clamscan` program already on your PATH, nothing else: `clamscan --no-summary --stdout FILE...`, with the absolute path of the installer and of each regular file directly in its folder. Subfolders and symbolic links are not scanned. It is read-only: gitfurl never passes `--remove`, `--move` or `--copy` and writes nothing into the installer's folder. The command is shown in the plan, the dry run and the approval, and the scan runs only after you approve. It runs in its own process group with a timeout (600 s by default); a timeout, Stop or Ctrl-C ends that group only.
+- **The database is yours.** gitfurl never runs `freshclam`, never downloads signatures and never installs ClamAV. Keep the database current yourself (for example with `freshclam` or your distribution's service). The approval and `gitfurl cli doctor` show the database date from `clamscan --version` (a short version check, as for Wine) and warn when it is older than 7 days. The dry run does not run that check.
+- **A match stops the run.** Nothing is run or created. The message names the matched files and signatures. ClamAV often flags game installers and repacks falsely, because packers and self-extractors look like malware to signatures. To run it anyway: `--allow-scan-hit` on the command line, or answer Yes to a second dialog in the app (its default is No).
+- **An error also stops the run.** `clamscan` missing, no database, a timeout, an exit status other than 0 or 1, or output gitfurl cannot read: the run stops with the reason. gitfurl never falls back to running the installer unscanned.
+- **What a clean result means.** "No known signature matched (ClamAV, database dated ...)". It does **not** mean the installer is safe or free of malware: it only means that none of the signatures in your database matched. The result is written to the run's log.
 
 ## Safer runs
 A Wine prefix is **not** a sandbox. The installer can read and write anything your user can. Variables starting with `WINE` in your shell are not passed on, so the plan shows what is set. For an installer you do not fully trust:
