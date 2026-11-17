@@ -17,6 +17,6 @@ A dry run never falls through to real execution.
 - `portable.py`: pure functions that build the bwrap argument list and the plain-text description for the optional portable install (no process started, nothing written); `runner.py` wraps the Wine argv with it only when `InstallPlan.portable` is set.
 - `preflight.py`: advisory checks shown before a run (measured values apart from estimates, never blocking).
 - `runner.py` `RunControl`: stops the run gitfurl started, through its own process group, under a lock; nothing is signalled after the run has ended.
-- `progress.py`: progress from `/proc` (how far processes have read into the payload files) and the prefix size.
+- `progress.py`: progress from `/proc` (how far processes have read into the payload files) and the prefix size; the advisory stall detector and the "observed activity" heuristic (neither acts on the run).
 - `widgets.py`, `pixelfont.py`: the app's rounded widgets and block letters.
 - `theme.py`: colours, spacing, type sizes, the corner radius and the contrast calculation (no tkinter, so it is tested without a display).

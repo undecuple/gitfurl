@@ -103,6 +103,7 @@ Options for `install`:
 | `--yes` | Approve without the typed `yes` prompt. Without a terminal and without this, nothing runs. |
 | `--progress` | Print progress lines while the installer runs. `--progress-interval SECONDS` sets how often (default 10). |
 | `--detailed-log` | Also write the JSON event log. |
+| `--stall-after SECONDS` | Off unless given. Print one advisory note if nothing moves for that long: no growth in how far the installer has read into its payload files, no CPU use by the prefix's processes, and no growth of the log. It never stops or signals anything. Slow phases (a hash check, one huge file) can look like this, so choose a long time such as 600. Also turns on the progress monitor (the `/proc` reads described above). |
 | `--wine-debug CHANNELS` | Set `WINEDEBUG` for the run, for more output in the log (for example `err+all`). |
 | `--show-changes` | List what the installer changed afterwards. |
 | `--portable` | Portable install: run the installer in bwrap (see "Portable install"). Off by default. `--dry-run` prints the full bwrap argument list. Needs `bwrap` on PATH and the wine runtime; without them it stops and does not fall back to a normal install. |
@@ -115,7 +116,9 @@ Exit status: 0 on success, 1 on an error or a non-zero installer status, 2 when 
 ## Logs
 - The log is in `~/.local/state/gitfurl/logs/` (or under `$XDG_STATE_HOME`), one file per run, readable only by you. It holds the command, the prefix, Wine's output and the exit status. It never holds your environment variables.
 - It can contain your user name and local paths. Remove them before sharing a log.
-- With **Detailed log**, `<name>.events.jsonl` has one JSON object per line: start (command, prefix, names of environment variables set), progress samples, exit status and duration. It holds no environment values.
+- With **Detailed log**, `<name>.events.jsonl` has one JSON object per line: start (command, prefix, names of environment variables set), progress samples, exit status and duration. It holds no environment values. With the progress monitor running (`--progress`, `--stall-after`, or the app) it also has a `processes` event (how many programs run in the prefix, and the names other than Wine's own background ones) and a `memory` event (`MemAvailable` from `/proc/meminfo`) with each sample, and one `possibly_stalled` event if the advisory fired. The last event (`exit` or `cancelled`) holds three separate facts: `started` (the installer process was created), `extraction_observed` and `exit_status`. Without the monitor, `observation_measured` is false and `extraction_observed` stays false because nothing was measured.
+
+**What "observed activity" means.** `extraction_observed` is a heuristic and the end text calls it "observed activity", never "extracted". It is true only if the monitor saw the prefix grow by at least 1 MiB and a program read at least 1 MiB into the files beside the installer. It can miss a short burst between two samples, and it can be true for an installer that reads and writes but fails. It does not show that anything was extracted or installed. The exit status is the installer's own; as before, 0 does not prove the install is complete.
 - Logs stay on your machine. gitfurl uploads nothing.
 
 ## Cleanup
