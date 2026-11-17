@@ -1,5 +1,7 @@
 # Contributing
 
+AI agents working in this repository: read [AGENTS.md](AGENTS.md) first.
+
 - Python 3.11 or newer, no runtime dependencies. Enter the dev shell with `nix develop`, or install pytest and ruff yourself.
 - Run `ruff check .` and `PYTHONPATH=src python -m pytest -q` before a pull request.
 - Tests use temporary directories and mocked subprocess calls. They must not need Wine, a network or a real installer.
