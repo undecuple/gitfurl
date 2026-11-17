@@ -1412,6 +1412,22 @@ def os_getpid_other():
     return os.getpid() + 1_000_000  # a pid that is never signalled in the tests that use it
 
 
+class PrefixTimeoutTests(unittest.TestCase):
+    def test_a_wineboot_timeout_is_a_clear_error_not_a_traceback(self):
+        import subprocess
+
+        from gitfurl.prefixes import create_prefix
+
+        def slow(argv, **kw):
+            raise subprocess.TimeoutExpired(argv, kw["timeout"])
+
+        with tempfile.TemporaryDirectory() as d:
+            env = {"XDG_DATA_HOME": d, "HOME": d}
+            with self.assertRaisesRegex(RuntimeError, "timed out.*may still be running"):
+                create_prefix("p1", "/x/wine", env, run=slow)
+            self.assertTrue((Path(d) / "gitfurl" / "prefixes" / "p1").is_dir())  # kept
+
+
 class PreflightTests(unittest.TestCase):
     def test_folder_size_counts_regular_files_and_does_not_follow_symlinks(self):
         from gitfurl.preflight import folder_size

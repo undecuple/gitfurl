@@ -146,8 +146,9 @@ def _prefix_command(args) -> int:
     except FileExistsError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except subprocess.TimeoutExpired:
-        print("error: wine did not finish in time; the prefix directory may be incomplete.",
+    except (RuntimeError, subprocess.TimeoutExpired) as exc:
+        print(f"error: {exc}" if isinstance(exc, RuntimeError) else
+              "error: wine did not finish in time; the prefix directory may be incomplete.",
               file=sys.stderr)
         return 1
     print(f"wine exited with status {status}")

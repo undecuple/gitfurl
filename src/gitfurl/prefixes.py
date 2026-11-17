@@ -72,5 +72,12 @@ def create_prefix(name: str, wine: str, env: dict[str, str] | None = None, run=N
         raise FileExistsError(f"prefix path already exists, not touching it: {path}")
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.mkdir(mode=0o700)
-    proc = run(plan["argv"], env=child_env(os.environ if env is None else env, plan["env_overrides"]), timeout=WINEBOOT_TIMEOUT_S, check=False)
+    try:
+        proc = run(plan["argv"], env=child_env(os.environ if env is None else env, plan["env_overrides"]),
+                   timeout=WINEBOOT_TIMEOUT_S, check=False)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"creating the prefix timed out after {WINEBOOT_TIMEOUT_S} s ({path}). Wine's own "
+            "processes for it (wineboot and helpers) may still be running; gitfurl did not stop "
+            "them. The prefix folder was kept.") from exc
     return proc.returncode
