@@ -9,6 +9,8 @@ from pathlib import Path
 
 from gitfurl import __version__
 from gitfurl.cleanup import MODES, perform_cleanup, plan_cleanup
+from gitfurl.detect import describe as describe_detection
+from gitfurl.detect import detect
 from gitfurl.doctor import format_report, run_doctor
 from gitfurl.prefixes import (
     create_prefix,
@@ -104,6 +106,8 @@ def main(argv: list[str] | None = None) -> int:
     print("needed for a real run:")
     for item in plan.prerequisites:
         print(f"  - {item}")
+    for line in describe_detection(detect(installer)).splitlines():
+        print(line)
     print("preflight (read-only, advisory):")
     for line in measure(installer, plan.prefix).describe().splitlines():
         print(f"  {line}")
@@ -208,6 +212,8 @@ def _real_install(args) -> int:
     print(f"prefix: {plan.prefix}" + (" (will be created first)" if missing else ""))
     print("Wine prefixes are not sandboxes: the installer can reach files you can reach.")
     print("Only run installers you are authorised to use and have chosen to trust.")
+    for line in describe_detection(detect(installer)).splitlines():
+        print(line)
     print("preflight (read-only, advisory):")
     for line in measure(installer, plan.prefix).describe().splitlines():
         print(f"  {line}")

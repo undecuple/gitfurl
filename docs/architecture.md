@@ -13,6 +13,7 @@ A dry run never falls through to real execution.
 - `gui.py`: window and confirmation dialogs. Logic that can be tested without a display (`describe_plan`) is kept in plain functions.
 - `cleanup.py`: optional removal of the installer after a good run, with the guards in the user guide.
 - `changes.py`: optional before and after snapshots of the prefix and a few host places.
+- `detect.py`: read-only format detection from file headers (bounded reads, no process started, nothing written). It produces a guess and a route (Wine/Proton, or unsupported if the file cannot be read as a regular file); it never returns a native route in this version.
 - `preflight.py`: advisory checks shown before a run (measured values apart from estimates, never blocking).
 - `runner.py` `RunControl`: stops the run gitfurl started, through its own process group, under a lock; nothing is signalled after the run has ended.
 - `progress.py`: progress from `/proc` (how far processes have read into the payload files) and the prefix size.

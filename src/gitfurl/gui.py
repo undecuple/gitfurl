@@ -14,6 +14,8 @@ from pathlib import Path
 
 from gitfurl import __version__
 from gitfurl.cleanup import MODES, perform_cleanup, plan_cleanup
+from gitfurl.detect import describe as describe_detection
+from gitfurl.detect import detect
 from gitfurl.doctor import run_doctor
 from gitfurl.prefixes import (
     create_prefix,
@@ -602,6 +604,7 @@ def main(start: str = "library", prefix: str | None = None) -> int:
             if missing else ""
         if cleanup_var.get() != "none":
             extra += "\n\nIf the installer exits with status 0, " + clean.describe()
+        extra += "\n\n" + describe_detection(detect(validate_installer(installer_var.get().strip())))
         extra += "\n\nChecks before the run (read-only, advisory):\n" + measure(
             validate_installer(installer_var.get().strip()), plan.prefix).describe()
         if proton:

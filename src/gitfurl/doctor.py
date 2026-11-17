@@ -69,6 +69,7 @@ def run_doctor() -> dict:
         "wine": probe_tool("wine", ["--version"]),
         "bwrap": probe_tool("bwrap", ["--version"]),
         "umu": probe_tool("umu-run", ["--version"]),
+        "innoextract": probe_tool("innoextract", ["--version"]),
         "tkinter": probe_tkinter(),
     }
 
@@ -77,11 +78,13 @@ def format_report(report: dict) -> str:
     lines = [f"platform: {report['platform']}"]
     if report.get("resources"):
         lines.append(f"machine: {report['resources']}")
-    for key in ("wine", "bwrap", "umu", "tkinter"):
+    for key in ("wine", "bwrap", "umu", "innoextract", "tkinter"):
         t: ToolReport = report[key]
+        note = {"umu": " (optional, for the proton runtime)",
+                "innoextract": " (optional; only noted: this version never runs it to extract)"}
         if t.problem:
-            lines.append(f"{t.name}: unavailable ({t.problem})" + (" (optional, for the proton runtime)" if key == "umu" else ""))
+            lines.append(f"{t.name}: unavailable ({t.problem})" + note.get(key, "") * (key == "umu"))
         else:
-            lines.append(f"{t.name}: {t.version} at {t.path}")
+            lines.append(f"{t.name}: {t.version} at {t.path}" + note.get(key, "") * (key == "innoextract"))
     lines.append("Nothing was installed or changed.")
     return "\n".join(lines)

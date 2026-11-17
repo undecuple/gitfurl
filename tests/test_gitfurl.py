@@ -820,7 +820,7 @@ class ReviewFixTests(unittest.TestCase):
             r = doctor.probe_tkinter()
         self.assertIn("python3-tk", r.problem)
         self.assertIn("tkinter", doctor.format_report(
-            {"platform": "x", "wine": r, "bwrap": r, "umu": r, "tkinter": r}))
+            {"platform": "x", "wine": r, "bwrap": r, "umu": r, "innoextract": r, "tkinter": r}))
 
     def test_version_is_the_same_everywhere(self):
         import tomllib
@@ -1775,6 +1775,172 @@ class PrefixGroupTests(unittest.TestCase):
         with self.assertRaises(subprocess.TimeoutExpired):
             run_in_group([__import__("sys").executable, "-c", "import time; time.sleep(60)"],
                          {"PATH": "/nonexistent"}, 0.5, "wine", grace_s=2)  # bare name and an empty PATH: no wineserver found
+
+
+class DetectTests(unittest.TestCase):
+    """Synthetic bytes built here. No real installer, archive or key is ever used."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def file(self, name, data):
+        p = self.dir / name
+        p.write_bytes(data)
+        return p
+
+    def det(self, name, data):
+        from gitfurl.detect import detect
+
+        return detect(self.file(name, data))
+
+    INNO = b"Inno Setup Setup Data (5.5.0)"
+
+    def test_inno_id_in_a_windows_program_is_likely_and_never_native(self):
+        from gitfurl.detect import ROUTE_NATIVE, ROUTE_WINE, decide
+
+        det = self.det("setup.exe", b"MZ" + b"\0" * 1000 + self.INNO + b"\0" * 40)
+        self.assertEqual([(e.format, e.confidence) for e in det.evidence], [("Inno Setup", "likely")])
+        self.assertIn("byte offset 1002", det.evidence[0].where)
+        self.assertIn("5.5.0", det.evidence[0].detail)
+        verdict = decide(det)
+        self.assertEqual(verdict.route, ROUTE_WINE)
+        self.assertNotEqual(verdict.route, ROUTE_NATIVE)
+
+    def test_inno_variants_and_legacy_id(self):
+        for ident in (b"Inno Setup Setup Data (6.4.0.1)", b"Inno Setup Setup Data (5.5.7) (U)",
+                      b"My Inno Setup Extensions Setup Data (3.0.6.1)", b"i1.2.10--32\x1a"):
+            det = self.det("v.exe", b"MZ" + b"\0" * 10 + ident)
+            self.assertEqual([e.format for e in det.evidence], ["Inno Setup"], ident)
+
+    def test_the_id_without_mz_is_not_detected(self):
+        det = self.det("notes.txt", b"hello " + self.INNO)
+        self.assertEqual(det.evidence, [])
+
+    def test_id_split_across_a_read_boundary_is_found(self):
+        from gitfurl import detect as d
+
+        pad = b"\0" * (d.CHUNK - 10)
+        det = self.det("big.exe", b"MZ" + pad + self.INNO)
+        self.assertEqual([e.format for e in det.evidence], ["Inno Setup"])
+
+    def test_the_scan_is_bounded_and_says_so(self):
+        from gitfurl import detect as d
+
+        with mock.patch.object(d, "MAX_SCAN_BYTES", 4096):
+            det = self.det("late.exe", b"MZ" + b"\0" * 8000 + self.INNO)
+        self.assertEqual(det.evidence, [])
+        self.assertTrue(any("was not searched" in n for n in det.notes))
+
+    def test_truncated_garbage_empty_and_odd_files_are_safe(self):
+        for data in (b"", b"M", b"MZ", b"MZ" + self.INNO[:10], b"\xff" * 100, b"ArC"):
+            det = self.det("x.bin", data)
+            self.assertEqual(det.evidence, [], data)
+            self.assertTrue(det.readable)
+
+    def test_a_length_like_field_is_never_trusted(self):
+        # 4 GiB claimed in the bytes; only real bytes are read
+        det = self.det("liar.exe", b"MZ" + b"\xff\xff\xff\xff" * 4 + self.INNO)
+        self.assertEqual([e.format for e in det.evidence], ["Inno Setup"])
+
+    def test_freearc_signature_at_the_start_is_only_possible(self):
+        det = self.det("a.arc", b"ArC\x01" + b"\0" * 20)
+        self.assertEqual([(e.format, e.confidence) for e in det.evidence], [("FreeArc", "possible")])
+        self.assertIn("unverified", det.evidence[0].detail)
+
+    def test_large_files_beside_the_installer_are_checked_by_their_first_four_bytes(self):
+        from gitfurl import detect as d
+
+        inst = self.file("setup.exe", b"MZ" + b"\0" * 100 + self.INNO)
+        with mock.patch.object(d, "MIN_NEIGHBOUR_BYTES", 64):
+            self.file("p-01.bin", b"ArC\x01" + b"x" * 100)
+            self.file("p-02.bin", b"ArC\x01" + b"x" * 100)
+            self.file("other.dat", b"zzzz" + b"x" * 100)
+            self.file("tiny.bin", b"ArC\x01")  # below the size floor
+            det = d.detect(inst)
+        free = [e for e in det.evidence if e.format == "FreeArc"]
+        self.assertEqual(len(free), 1)
+        self.assertIn("2 large file(s)", free[0].where)
+        self.assertNotIn("other.dat", free[0].detail)
+        self.assertIn("Inno Setup", [e.format for e in det.evidence])
+
+    def test_symlinks_and_directories_are_not_followed_or_opened(self):
+        from gitfurl import detect as d
+
+        (self.dir / "sub").mkdir()
+        target = self.dir / "sub" / "real.bin"
+        target.write_bytes(b"ArC\x01" + b"x" * 100)
+        link = self.dir / "link.exe"
+        link.symlink_to(target)
+        det = d.detect(link)
+        self.assertFalse(det.readable)
+        (self.dir / "adir").mkdir()
+        self.assertFalse(d.detect(self.dir / "adir").readable)
+        self.assertFalse(d.detect(self.dir / "missing.exe").readable)
+        with mock.patch.object(d, "MIN_NEIGHBOUR_BYTES", 8):
+            inst = self.file("setup.exe", b"MZ")
+            os.symlink(target, self.dir / "linked-payload.bin")
+            det = d.detect(inst)
+        self.assertEqual([e for e in det.evidence if e.format == "FreeArc"], [])
+
+    def test_a_fifo_does_not_block(self):
+        from gitfurl import detect as d
+
+        fifo = self.dir / "pipe.exe"
+        os.mkfifo(fifo)
+        self.assertFalse(d.detect(fifo).readable)
+
+    def test_unreadable_file_routes_to_unsupported(self):
+        from gitfurl.detect import ROUTE_UNSUPPORTED, decide, detect
+
+        self.assertEqual(decide(detect(self.dir / "nope.exe")).route, ROUTE_UNSUPPORTED)
+
+    def test_neighbour_count_is_capped_and_names_are_sanitised(self):
+        from gitfurl import detect as d
+
+        inst = self.file("setup.exe", b"MZ")
+        with mock.patch.object(d, "MIN_NEIGHBOUR_BYTES", 8), mock.patch.object(d, "MAX_NEIGHBOURS", 3):
+            for i in range(6):
+                self.file(f"f{i}.bin", b"zzzzzzzzzz")
+            det = d.detect(inst)
+        self.assertTrue(any("first 3 large files" in n for n in det.notes))
+        self.assertEqual(d.clean("a\x1b[31mb\nc"), "a?[31mb?c")
+
+    def test_detection_runs_nothing_and_writes_nothing(self):
+        from gitfurl import detect as d
+
+        inst = self.file("setup.exe", b"MZ" + self.INNO)
+        before = sorted(p.name for p in self.dir.iterdir())
+        with mock.patch("subprocess.Popen", side_effect=AssertionError("no process")), \
+                mock.patch("subprocess.run", side_effect=AssertionError("no process")), \
+                mock.patch("os.system", side_effect=AssertionError("no shell")):
+            text = d.describe(d.detect(inst))
+        self.assertEqual(before, sorted(p.name for p in self.dir.iterdir()))
+        self.assertIn("nothing was run", text)
+        self.assertIn("not a promise", text)
+        self.assertNotIn("SREP", text)
+        self.assertNotIn("Oodle", text)
+
+    def test_the_file_is_never_made_executable_or_modified(self):
+        from gitfurl import detect as d
+
+        inst = self.file("setup.exe", b"MZ" + self.INNO)
+        before = (inst.stat().st_mode, inst.stat().st_mtime_ns, inst.read_bytes())
+        d.detect(inst)
+        after = (inst.stat().st_mode, inst.stat().st_mtime_ns, inst.read_bytes())
+        self.assertEqual(before, after)
+
+    def test_dry_run_prints_the_detection_and_still_creates_nothing(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "setup.exe"
+            f.write_bytes(b"MZ" + self.INNO)
+            with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data}):
+                code, out, _ = run_cli("install", str(f), "--prefix", "p1", "--dry-run")
+            self.assertEqual(code, 0)
+            self.assertIn("Inno Setup: likely", out)
+            self.assertIn("route: wine", out)
+            self.assertFalse((Path(data) / "gitfurl").exists())
 
 
 class PreflightTests(unittest.TestCase):
