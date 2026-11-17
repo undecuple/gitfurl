@@ -109,9 +109,8 @@ class ArgvShapeTests(unittest.TestCase):
                                    "/tmp/.X11-unix", "/dev/dri"})
         joined = " ".join(a)
         for bad in ("/.wine", "dbus", "/run/user/1/bus", "--share-net", "pulse", "pipewire"):
-            self.assertNotIn(bad, joined.replace("--unsetenv DBUS_SESSION_BUS_ADDRESS", "")
-                             .replace("--tmpfs /run/dbus", ""))
-        self.assertIn(("DBUS_SESSION_BUS_ADDRESS",), flag_pairs(a, "--unsetenv", 1))
+            self.assertNotIn(bad, joined.replace("--tmpfs /run/dbus", ""))
+        self.assertIn("--clearenv", a)  # the bus address is not passed: the env starts empty
         self.assertIn(("/run/user",), flag_pairs(a, "--tmpfs", 1))  # session bus hidden
         self.assertIn(("/run/dbus",), flag_pairs(a, "--tmpfs", 1))  # system bus hidden
 
@@ -137,10 +136,64 @@ class ArgvShapeTests(unittest.TestCase):
         ro = flag_pairs(a, "--ro-bind")
         self.assertIn(("/home/u/.Xauth", "/tmp/.gitfurl-xauthority"), ro)
         self.assertIn(("/run/user/1000/wayland-0", "/run/user/1000/wayland-0"), ro)
-        self.assertNotIn(("XDG_RUNTIME_DIR",), flag_pairs(a, "--unsetenv", 1))
+        self.assertEqual(dict(flag_pairs(a, "--setenv"))["XDG_RUNTIME_DIR"], "/run/user/1000")
         a = self.argv()  # no Wayland variables
         self.assertNotIn("WAYLAND_DISPLAY", " ".join(a))
-        self.assertIn(("XDG_RUNTIME_DIR",), flag_pairs(a, "--unsetenv", 1))
+        self.assertNotIn("XDG_RUNTIME_DIR", dict(flag_pairs(a, "--setenv")))
+
+    def test_environment_is_cleared_and_only_the_allowlist_is_set(self):
+        env = dict(ENV, PATH="/usr/bin", LANG="C.UTF-8", LC_TIME="C", TZ="UTC",
+                   GITHUB_TOKEN="ghp_secret", AWS_SECRET_ACCESS_KEY="aws_secret",
+                   SSH_AUTH_SOCK="/run/user/1/ssh", KRB5CCNAME="FILE:/tmp/k",
+                   GPG_AGENT_INFO="/x", WINEARCH="win32", WINEDEBUG="+all")
+        with fake_fs():
+            a = build_portable_argv(self.plan, BWRAP, self.installer, env,
+                                    {**self.plan.env_overrides, "WINEDEBUG": "-all"})
+        clear = a.index("--clearenv")
+        self.assertLess(clear, a.index("--setenv"))  # cleared before anything is set
+        sets = dict(flag_pairs(a, "--setenv"))
+        joined = " ".join(a)
+        for secret in ("ghp_secret", "aws_secret", "/run/user/1/ssh", "FILE:/tmp/k",
+                       "GITHUB_TOKEN", "AWS_SECRET", "SSH_AUTH_SOCK", "KRB5CCNAME",
+                       "GPG_AGENT_INFO", "WINEARCH", "+all"):
+            self.assertNotIn(secret, joined)
+        self.assertEqual(sets["PATH"], "/usr/bin")
+        self.assertEqual((sets["LANG"], sets["LC_TIME"], sets["TZ"]), ("C.UTF-8", "C", "UTC"))
+        self.assertEqual(sets["WINEPREFIX"], str(self.plan.prefix))
+        self.assertEqual(sets["WINEDLLOVERRIDES"], "winemenubuilder.exe=d")
+        self.assertEqual(sets["WINEDEBUG"], "-all")  # the plan's value, not the shell's
+        self.assertEqual(set(sets), {"PATH", "LANG", "LC_TIME", "TZ", "DISPLAY", "HOME",
+                                     "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
+                                     "XDG_CONFIG_HOME", "TMPDIR", "WINEPREFIX",
+                                     "WINEDLLOVERRIDES", "WINEDEBUG"})
+
+    def test_home_must_be_a_clean_absolute_path(self):
+        for home in ("//home/u", "/home/u/../u", "/home//u", "home/u", "/", "", "/home/./u"):
+            with self.subTest(home=home), fake_fs(), self.assertRaises(ValueError):
+                build_portable_argv(self.plan, BWRAP, self.installer, dict(ENV, HOME=home))
+        with fake_fs():  # a trailing slash is the same folder
+            a = build_portable_argv(self.plan, BWRAP, self.installer, dict(ENV, HOME="/home/u/"))
+        self.assertEqual(dict(flag_pairs(a, "--setenv"))["HOME"], "/home/u")
+
+    def test_symlinked_home_hides_the_real_folder(self):
+        link = {"/home/u": "/var/home/u"}
+        with fake_fs(), mock.patch("os.path.realpath", lambda x: link.get(x, x)):
+            a = build_portable_argv(self.plan, BWRAP, self.installer, ENV)
+        self.assertIn(("/var/home/u",), flag_pairs(a, "--tmpfs", 1))
+        self.assertEqual(dict(flag_pairs(a, "--setenv"))["HOME"], "/home/u")
+        p = replace(self.plan, argv=["/var/home/u/bin/wine", str(self.installer)])
+        with fake_fs(), mock.patch("os.path.realpath", lambda x: link.get(x, x)), \
+                self.assertRaises(ValueError):
+            build_portable_argv(p, BWRAP, self.installer, ENV)
+
+    def test_dash_leading_installer_name_comes_after_the_separator(self):
+        odd = self.installer.parent / "--bind"
+        p = replace(self.plan, argv=["/usr/bin/wine", str(odd)])
+        with fake_fs():
+            a = build_portable_argv(p, BWRAP, odd, ENV)
+        sep = a.index("--")
+        self.assertEqual(a[sep + 1:], ["/usr/bin/wine", str(odd)])
+        self.assertNotIn(str(odd), a[:sep])
 
     def test_no_display_is_stated_not_hidden(self):
         with fake_fs():
@@ -201,7 +254,8 @@ class RefusalTests(unittest.TestCase):
 
     def test_wine_symlink_in_home_is_resolved(self):
         p = replace(self.plan, argv=["/home/u/.nix-profile/bin/wine", str(self.installer)])
-        with fake_fs(), mock.patch("os.path.realpath", lambda x: "/nix/store/x/bin/wine"):
+        link = {"/home/u/.nix-profile/bin/wine": "/nix/store/x/bin/wine"}
+        with fake_fs(), mock.patch("os.path.realpath", lambda x: link.get(x, x)):
             a = build_portable_argv(p, BWRAP, self.installer, ENV)
         self.assertEqual(a[a.index("--") + 1], "/nix/store/x/bin/wine")
 
@@ -258,9 +312,12 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 2)  # not approved
         run.assert_not_called()
         popen.assert_not_called()
-        for needle in ("Network: off", "Writable: only the dedicated prefix", "not a guarantee",
+        for needle in ("Network: off", "Writable: the dedicated prefix", "not a guarantee",
                        "not a security boundary", "wineserver -k is not run",
-                       "can still use that connection"):
+                       "can use that connection", "the run's log file", "/dev/dri",
+                       "X authority cookie", "Environment: cleared",
+                       "Delete the prefix if you do not trust the installer",
+                       "Other host sockets may stay reachable"):
             self.assertIn(needle, out)
         self.assertIn(LIMITS, out)
 

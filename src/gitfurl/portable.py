@@ -14,12 +14,22 @@ from pathlib import Path
 
 from gitfurl.safety import running_as_root
 
-TITLE = "Portable install (no changes outside this prefix)"
+TITLE = "Portable install (reduces changes outside this prefix)"
 MENU_OVERRIDE = {"WINEDLLOVERRIDES": "winemenubuilder.exe=d"}
+
+# Host variables passed into the sandbox; everything else is cleared (--clearenv), so tokens,
+# keys and agent sockets in your environment do not reach the installer.
+PASS_ENV = ("PATH", "LANG", "LANGUAGE", "TZ")
+PASS_ENV_PREFIXES = ("LC_",)
 
 LIMITS = (
     "This reduces changes outside the prefix as far as bwrap isolates them. It is not a "
     "guarantee and not a security boundary: a hostile installer is not contained by it."
+)
+PERSIST_WARNING = (
+    "The prefix is kept after the run, and whatever the installer put there (startup "
+    "entries, replaced DLLs, links) runs again, outside this sandbox, whenever you use the "
+    "prefix later. Delete the prefix if you do not trust the installer."
 )
 
 
@@ -34,22 +44,39 @@ def _inside(path: str, folder: str) -> bool:
     return path == folder or path.startswith(folder.rstrip("/") + "/")
 
 
-def _home(env: dict[str, str]) -> str:
+def _home(env: dict[str, str]) -> tuple[str, str]:
+    """(HOME as given, HOME with symlinks resolved). Only a clean absolute path is accepted."""
     home = env.get("HOME", "")
-    if not home or not os.path.isabs(home) or os.path.normpath(home) == "/":
-        raise ValueError("portable install needs HOME to be set to a real folder (not '/')")
-    return os.path.normpath(home)
+    bad = ValueError("portable install needs HOME to be a clean absolute path to a real "
+                     f"folder (not '/'); it is {home!r}")
+    if not home or not home.startswith("/") or home.startswith("//"):
+        raise bad
+    norm = os.path.normpath(home)
+    if norm != home.rstrip("/") or norm == "/":
+        raise bad
+    real = os.path.realpath(norm)
+    if real == "/":
+        raise bad
+    return norm, real
 
 
-def _wine_binary(argv0: str, home: str) -> str:
-    """The wine program to run inside. The home folder is hidden there, so it may not live in it."""
-    if not os.path.isabs(argv0) or not _inside(argv0, home):
+def _real(path) -> str:
+    return os.path.realpath(str(path))
+
+
+def _wine_binary(argv0: str, home: str, home_real: str) -> str:
+    """The wine program to run inside. The home folder is hidden there, so it may not live in it.
+
+    The path is kept as given (a program may depend on the name it was started by) unless it
+    lies under HOME; then the resolved target is used, which must be outside HOME.
+    """
+    if not os.path.isabs(argv0):
         return argv0
-    real = os.path.realpath(argv0)
-    if _inside(real, home):
+    real = _real(argv0)
+    if _inside(real, home_real):
         raise ValueError(f"wine is inside your home folder ({argv0}), which the portable "
                          "sandbox hides; install wine system-wide or use a normal install")
-    return real
+    return real if _inside(argv0, home) or _inside(argv0, home_real) else argv0
 
 
 def check_portable_supported(plan, bwrap_path: str | None, env: dict[str, str] | None = None,
@@ -65,10 +92,10 @@ def check_portable_supported(plan, bwrap_path: str | None, env: dict[str, str] |
         raise ValueError("portable install is refused as root (gitfurl does not run "
                          "installers as root)")
     if env is not None:
-        home = _home(env)
-        _wine_binary(plan.argv[0], home)
-        folder = str(installer_path.parent if installer_path else plan.cwd)
-        if _inside(home, folder):
+        home, home_real = _home(env)
+        _wine_binary(plan.argv[0], home, home_real)
+        folder = _real(installer_path.parent if installer_path else plan.cwd)
+        if _inside(home_real, folder):
             raise ValueError(f"the installer's folder ({folder}) contains your home folder; "
                              "it is mounted read-only as a whole, so move the installer into "
                              "a folder of its own")
@@ -100,27 +127,35 @@ def _display_args(env: dict[str, str], home: str) -> tuple[list[str], list[str]]
     return args, notes
 
 
+def passed_env(env: dict[str, str]) -> dict[str, str]:
+    """The host variables that go into the sandbox. Everything else is cleared."""
+    return {k: v for k, v in env.items()
+            if k in PASS_ENV or k.startswith(PASS_ENV_PREFIXES)}
+
+
 def build_portable_argv(plan, bwrap_path: str, installer_path: Path,
-                        env: dict[str, str]) -> list[str]:
+                        env: dict[str, str], overrides: dict[str, str] | None = None) -> list[str]:
     """The argument list that wraps plan.argv in bwrap. Pure: reads `env` and the file system only.
 
-    `env` is the environment gitfurl was started with (HOME, DISPLAY, ...). The plan's own
-    overrides (WINEPREFIX, WINEDLLOVERRIDES) reach the program through the normal child
-    environment and are not repeated here.
+    `env` is the environment gitfurl was started with (HOME, DISPLAY, ...). The sandbox starts
+    from an empty environment (--clearenv); only the variables named in PASS_ENV, the display
+    variables, the home and XDG folders set here, and the plan's own overrides (`overrides`,
+    by default plan.env_overrides: WINEPREFIX, WINEDLLOVERRIDES, WINEDEBUG...) are set.
     """
     check_portable_supported(plan, bwrap_path, env, installer_path)
-    home = _home(env)
-    prefix = str(plan.prefix)
-    folder = str(Path(installer_path).parent)
+    home, home_real = _home(env)
+    prefix = _real(plan.prefix)
+    folder = _real(Path(installer_path).parent)
     argv: list[str] = [
         bwrap_path,
         "--die-with-parent", "--new-session",
         "--unshare-pid", "--unshare-ipc", "--unshare-uts", "--unshare-net",
+        "--clearenv",
         "--ro-bind", "/", "/",
         "--dev", "/dev", "--dev-bind-try", "/dev/dri", "/dev/dri",
         "--proc", "/proc",
         "--tmpfs", "/tmp",
-        "--tmpfs", home,
+        "--tmpfs", home_real,
     ]
     # Hide the session and system buses (they are sockets under /run, visible through the
     # read-only root otherwise). Only where the folder exists, since a missing one cannot
@@ -135,35 +170,42 @@ def build_portable_argv(plan, bwrap_path: str, installer_path: Path,
         argv += [flag, path, path]
     display, _notes = _display_args(env, home)
     argv += display
-    cache, data, state, config = (f"{home}/.cache", f"{home}/.local/share",
-                                  f"{home}/.local/state", f"{home}/.config")
+    for key, value in sorted(passed_env(env).items()):
+        argv += ["--setenv", key, value]
     argv += ["--setenv", "HOME", home,
-             "--setenv", "XDG_CACHE_HOME", cache, "--setenv", "XDG_DATA_HOME", data,
-             "--setenv", "XDG_STATE_HOME", state, "--setenv", "XDG_CONFIG_HOME", config,
-             "--setenv", "TMPDIR", "/tmp",
-             "--unsetenv", "DBUS_SESSION_BUS_ADDRESS", "--unsetenv", "SSH_AUTH_SOCK"]
-    if "XDG_RUNTIME_DIR" not in " ".join(display):
-        argv += ["--unsetenv", "XDG_RUNTIME_DIR"]
-    argv += ["--chdir", str(plan.cwd), "--", _wine_binary(plan.argv[0], home), *plan.argv[1:]]
+             "--setenv", "XDG_CACHE_HOME", f"{home}/.cache",
+             "--setenv", "XDG_DATA_HOME", f"{home}/.local/share",
+             "--setenv", "XDG_STATE_HOME", f"{home}/.local/state",
+             "--setenv", "XDG_CONFIG_HOME", f"{home}/.config",
+             "--setenv", "TMPDIR", "/tmp"]
+    for key, value in sorted((plan.env_overrides if overrides is None else overrides).items()):
+        argv += ["--setenv", key, value]
+    argv += ["--chdir", _real(plan.cwd), "--", _wine_binary(plan.argv[0], home, home_real),
+             *plan.argv[1:]]
     return argv
 
 
 def describe_portable(plan, bwrap_path: str | None, installer_path: Path,
                       env: dict[str, str], full_argv: bool = False) -> list[str]:
     """Plain-text lines for the plan preview and the approval. Says what is and is not isolated."""
-    home = _home(env) if env.get("HOME") else "your home folder"
+    home = env.get("HOME") or "your home folder"
     lines = [
         f"PORTABLE INSTALL: the installer runs inside bwrap ({bwrap_path or 'not found'}).",
-        (f"  Writable: only the dedicated prefix {plan.prefix}, plus a temporary home and "
-         "/tmp that vanish afterwards."),
-        (f"  Hidden/temporary: {home} (so nothing lands in your home, ~/.cache/wine, desktop "
-         "menus or file-type handlers); the session and system D-Bus sockets are hidden."),
+        (f"  Writable: the dedicated prefix {plan.prefix}, a temporary home and /tmp that "
+         "vanish afterwards, the run's log file (it is the installer's output), and the GPU "
+         "device /dev/dri."),
+        (f"  Hidden/temporary: {home}, so the wrapped installer cannot write your home, "
+         "~/.cache/wine, desktop menus or file-type handlers; the session and system D-Bus "
+         "sockets are hidden. Other host sockets may stay reachable."),
+        ("  Environment: cleared. Only PATH, LANG, LC_*, LANGUAGE, TZ, the display variables, "
+         "the temporary home and XDG folders, and the plan's variables shown above are set; "
+         "tokens and keys in your environment are not passed."),
         "  Network: off. An installer that needs the network will fail.",
         (f"  Read-only: the whole installer folder {Path(installer_path).parent}, and the "
          "rest of the file system, which the installer can still read."),
-        ("  Display: the X11 or Wayland socket is allowed so the installer window can show; "
-         "a hostile installer can still use that connection. Audio and most GPU access are "
-         "not provided (only /dev/dri)."),
+        ("  Display: the X11 or Wayland socket is allowed so the installer window can show, "
+         "and the X authority cookie can be read inside; a hostile installer can use that "
+         "connection. Audio is not provided."),
         ("  Wine's menu and file-association builder is disabled (WINEDLLOVERRIDES="
          "winemenubuilder.exe=d)."),
         "  If the prefix has to be created first, that step runs outside this wrapper.",
@@ -171,11 +213,12 @@ def describe_portable(plan, bwrap_path: str | None, installer_path: Path,
          "run in a session of their own, and bwrap's --die-with-parent and private process "
          "namespace end them when bwrap ends. wineserver -k is not run, because the "
          "sandboxed Wine server lives in a private /tmp."),
+        "  " + PERSIST_WARNING,
         "  " + LIMITS,
     ]
-    if bwrap_path:
+    if bwrap_path and env.get("HOME"):
         try:
-            _args, notes = _display_args(env, home if env.get("HOME") else "/")
+            _args, notes = _display_args(env, env["HOME"])
         except OSError:
             notes = []
         lines += [f"  Note: {n}" for n in notes]

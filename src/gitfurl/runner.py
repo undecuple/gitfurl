@@ -360,17 +360,19 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
     log_path = log_dir / f"{plan.prefix.name}-{stamp}.log"
     argv = [wine, *plan.argv[1:]]
     base_env = os.environ if env is None else env
+    overrides = dict(plan.env_overrides)
+    if options.wine_debug:
+        overrides["WINEDEBUG"] = validate_wine_debug(options.wine_debug)
     if plan.portable:  # no silent fallback: refuse before anything is created or run
         from dataclasses import replace
 
         from gitfurl.portable import build_portable_argv, find_bwrap
 
         bwrap = find_bwrap(base_env)
+        # The sandbox starts from an empty environment; only the allowlist and these
+        # overrides are set inside it (see gitfurl.portable.build_portable_argv).
         argv = build_portable_argv(replace(plan, argv=argv), bwrap or "", Path(plan.argv[-1]),
-                                   dict(base_env))
-    overrides = dict(plan.env_overrides)
-    if options.wine_debug:
-        overrides["WINEDEBUG"] = validate_wine_debug(options.wine_debug)
+                                   dict(base_env), overrides)
     child_env = build_child_env(os.environ if env is None else env, overrides)
     events = None
     if options.detailed_log:

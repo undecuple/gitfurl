@@ -46,8 +46,8 @@ WARNING = (
 
 
 PORTABLE_NOTE = (
-    "Runs the installer in bwrap: only this prefix is writable, the network is off and Wine's "
-    "menu entries are disabled. Reduces changes outside the prefix; not a guarantee.")
+    "Runs the installer in bwrap with the network off, your environment cleared and Wine's "
+    "menu entries disabled. Reduces changes outside the prefix; not a guarantee.")
 
 
 def short_path(path: Path) -> str:
@@ -660,7 +660,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         portable_switch["w"] = w.Switch(p, portable_var, command=lambda: refresh_plan())
         return portable_switch["w"]
 
-    portable_row = row(c, "Portable install (no changes outside this prefix)", PORTABLE_NOTE,
+    portable_row = row(c, "Portable install (reduces changes outside this prefix)", PORTABLE_NOTE,
                        portable_widget)
 
     def refresh_portable():
