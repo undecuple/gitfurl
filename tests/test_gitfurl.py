@@ -905,6 +905,15 @@ class ActivityTests(unittest.TestCase):
         self.assertIn("quiet: it may be waiting", quiet.line())
         self.assertNotIn("process(es)", Sample(60, 0, 0, 0, 0.0).line())
 
+    def test_sample_line_strips_control_characters_from_program_names(self):
+        from gitfurl.progress import Sample
+
+        odd = Sample(60, 0, 0, 0, 0.0, procs=1, helpers=("evil\x1b[2J\rname", "ok.exe"))
+        line = odd.line()
+        self.assertNotIn("\x1b", line)
+        self.assertNotIn("\r", line)
+        self.assertIn("evil?[2J?name, ok.exe", line)
+
     def test_monitor_computes_cpu_between_samples(self):
         from gitfurl.progress import ProgressMonitor
 

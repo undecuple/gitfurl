@@ -18,6 +18,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from gitfurl.detect import clean
+
 MIN_PAYLOAD_BYTES = 1 << 20
 # Wine's own background processes: not interesting to show as "what the installer is doing".
 WINE_INFRA = {"wineserver", "services.exe", "winedevice.exe", "explorer.exe", "plugplay.exe",
@@ -169,7 +171,8 @@ class Sample:
             if self.cpu_pct is not None:
                 busy += f", CPU {self.cpu_pct:.0f}%"
             if self.helpers:
-                busy += " (" + ", ".join(self.helpers[:4]) + ")"
+                # names come from /proc and are chosen by the installer: printable only
+                busy += " (" + ", ".join(clean(str(h), 40) for h in self.helpers[:4]) + ")"
             parts.append(busy)
             if self.cpu_pct is not None and self.cpu_pct < 3 and self.rate_bps <= 0:
                 parts.append("quiet: it may be waiting, or finishing; slow phases are normal")
