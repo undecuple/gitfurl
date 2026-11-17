@@ -609,7 +609,7 @@ class CliTests(Fixture):
         os.unlink(self.clamscan)
         self.make_prefix()
         with mock.patch.dict("os.environ", self.env):
-            code, _, err = run_cli("install", str(self.installer), "--prefix", "p1", "--scan",
+            code, _, err = run_cli("install", str(self.installer), "--prefix", "p1", "--no-memory-limit", "--scan",
                                    "--yes")
         self.assertEqual(code, 1)
         self.assertIn("clamscan was not found on PATH", err)
@@ -620,7 +620,7 @@ class CliTests(Fixture):
         self.make_prefix()
         with mock.patch.dict("os.environ", self.env), \
                 mock.patch("sys.stdin.isatty", return_value=False):
-            code, out, _ = run_cli("install", str(self.installer), "--prefix", "p1", "--scan")
+            code, out, _ = run_cli("install", str(self.installer), "--prefix", "p1", "--no-memory-limit", "--scan")
         self.assertEqual(code, 2)  # not approved
         self.assertIn("scan command:", out)
         self.assertIn("dated 2025-10-02", out)
@@ -634,7 +634,7 @@ class CliTests(Fixture):
         p = self.plan()
         self.respond([f"{p.files[0]}: Win.Test FOUND", f"{p.files[1]}: OK"], 1)
         with mock.patch.dict("os.environ", self.env):
-            code, _, err = run_cli("install", str(self.installer), "--prefix", "p1", "--scan",
+            code, _, err = run_cli("install", str(self.installer), "--prefix", "p1", "--no-memory-limit", "--scan",
                                    "--yes")
         self.assertEqual(code, 1)
         self.assertIn("Win.Test", err)
@@ -642,7 +642,7 @@ class CliTests(Fixture):
         self.assertFalse(self.wine_rec.exists())
         self.assertFalse((self.t / "state").exists())
         with mock.patch.dict("os.environ", self.env):
-            code, out, _ = run_cli("install", str(self.installer), "--prefix", "p1", "--scan",
+            code, out, _ = run_cli("install", str(self.installer), "--prefix", "p1", "--no-memory-limit", "--scan",
                                    "--allow-scan-hit", "--yes")
         self.assertEqual(code, 0)
         self.assertTrue(self.wine_rec.exists())
