@@ -491,11 +491,16 @@ def main(start: str = "library", prefix: str | None = None) -> int:
         wine_path["value"] = shutil.which("wine")
         wine_path["umu"] = shutil.which("umu-run")
         wr, br = report["wine"], report["bwrap"]
-        env_wine.configure(text=f"wine {wr.version or 'missing'}",
+        env_wine.configure(text=wr.version or "wine missing",
                            fg=w.CYAN if not wr.problem else w.RED)
         ur = report["umu"]
-        env_umu.configure(text=f"umu-run {'ok' if not ur.problem else 'not installed'}",
-                          fg=w.CYAN if not ur.problem else w.MUTED)
+        if not ur.problem:
+            umu_text = "umu-run ok"
+        elif "not found" in ur.problem:
+            umu_text = "umu-run not installed"
+        else:
+            umu_text = f"umu-run: {ur.problem}"
+        env_umu.configure(text=umu_text, fg=w.CYAN if not ur.problem else w.MUTED)
         wine_note.configure(
             text="" if not wr.problem else
             "Wine was not found. Install it with your package manager (for example the "

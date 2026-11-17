@@ -16,7 +16,7 @@
 
 gitfurl is a graphical app (with an optional command line) for running a Windows installer on Linux through Wine. **You supply the installer.** Gitfurl does not find, download or include any.
 
-> **Status: experimental, version 0.0.1, as of 2026-11-16.** The app, the command line and the tests exist. Installers have been *started* in a sandbox; a complete install has not been tested. Not audited. Details under [Status](#status).
+> **Status: experimental, version 1.0.0 (the first release, not yet published), as of 2026-11-16.** The app, the command line and the tests exist. Installers have been *started* in a sandbox; a complete install has not been tested. Not audited. Details under [Status](#status).
 
 ![The Library page: a list of Wine prefixes](docs/screenshot.png)
 
@@ -42,7 +42,7 @@ Running a Windows installer under Wine by hand works, until it does not. These a
 
 ## Getting started
 
-There is no release yet. Run it from source. You need Linux, Python 3.11 or newer, tkinter (`python3-tk` on Debian and Ubuntu) and Wine.
+There is no published release yet; 1.0.0 will be the first. Until then, run it from source. You need Linux, Python 3.11 or newer, tkinter (`python3-tk` on Debian and Ubuntu) and Wine.
 
 1. **Get the code.** `git clone https://github.com/undecuple/gitfurl.git && cd gitfurl`
 2. **Check your setup.** `python -m gitfurl cli doctor` reports Wine, tkinter, bubblewrap and umu-run. With Nix, `nix develop .#wine` gives you Python with tkinter and Wine.

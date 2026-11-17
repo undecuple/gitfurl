@@ -3,6 +3,8 @@
 All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
+The first release will be 1.0.0 (version set in `pyproject.toml` and `gitfurl.__version__`; not tagged or published).
+
 ### Added (after review)
 - `release.yml`: builds the graphical app as one Linux program on a `v*` tag and attaches it, with SHA256SUMS, to a draft release. Not yet run.
 - `Dockerfile`, `compose.yaml`, `docs/docker.md`: a container with the network off and a read-only installer folder. Builds and starts under Podman.
@@ -11,6 +13,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - `docs/testing.md`, Python 3.11 and 3.12 in CI, shellcheck, a check for tracked installers and large files, and dependabot for the action pins.
 
 ### Changed (after review)
+- The sidebar shows the real reason when umu-run cannot be probed, and the README screenshot is retaken with nothing missing or failing.
 - `WINE*` variables inherited from your shell are no longer passed to the installer.
 - Cleanup `folder` mode refuses `~/Downloads`, `~/Desktop`, `~/Documents` and similar general folders.
 - `tools/sandbox.sh` exits with a clear message outside NixOS.
