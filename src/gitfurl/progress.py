@@ -19,6 +19,45 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MIN_PAYLOAD_BYTES = 1 << 20
+# Wine's own background processes: not interesting to show as "what the installer is doing".
+WINE_INFRA = {"wineserver", "services.exe", "winedevice.exe", "explorer.exe", "plugplay.exe",
+              "rpcss.exe", "svchost.exe", "conhost.exe", "wineboot.exe", "winedbg.exe", "start.exe"}
+
+
+def prefix_activity(prefix: Path, proc_root: str = "/proc") -> tuple[int, list[str], int]:
+    """Processes of this user that run in the prefix: (count, program names, CPU ticks).
+
+    A process counts when its environment says WINEPREFIX=<prefix>. Only that one variable
+    is looked at; nothing else from the environment is kept. CPU ticks are user plus system
+    time since the process started, summed.
+    """
+    want = f"WINEPREFIX={prefix}".encode()
+    count, ticks, names = 0, 0, []
+    try:
+        pids = [p for p in os.listdir(proc_root) if p.isdigit()]
+    except OSError:
+        return 0, [], 0
+    for pid in pids:
+        try:
+            with open(os.path.join(proc_root, pid, "environ"), "rb") as fh:
+                if want not in fh.read().split(b"\0"):
+                    continue
+            with open(os.path.join(proc_root, pid, "stat"), encoding="ascii", errors="replace") as fh:
+                stat = fh.read()
+        except OSError:
+            continue
+        # "pid (comm) state ...": comm may contain spaces and parentheses, so split at the last ")".
+        head, _, rest = stat.rpartition(")")
+        fields = rest.split()
+        try:
+            ticks += int(fields[11]) + int(fields[12])  # utime, stime
+        except (IndexError, ValueError):
+            continue
+        name = head.partition("(")[2]
+        count += 1
+        if name not in WINE_INFRA and name not in names:
+            names.append(name)
+    return count, sorted(names), ticks
 
 
 def payload_files(installer: Path) -> list[Path]:
@@ -95,6 +134,9 @@ class Sample:
     total_bytes: int
     written_bytes: int  # growth of the prefix since the run started
     rate_bps: float  # smoothed payload read rate
+    procs: int = 0  # processes running in the prefix
+    cpu_pct: float | None = None  # their CPU use since the last sample (100 = one core)
+    helpers: tuple = ()  # program names other than Wine's own background processes
 
     @property
     def percent(self) -> float | None:
@@ -122,6 +164,15 @@ class Sample:
         else:
             parts.append("no payload files found beside the installer")
         parts.append(f"written to prefix {gb(self.written_bytes)}")
+        if self.procs:
+            busy = f"{self.procs} process(es) running"
+            if self.cpu_pct is not None:
+                busy += f", CPU {self.cpu_pct:.0f}%"
+            if self.helpers:
+                busy += " (" + ", ".join(self.helpers[:4]) + ")"
+            parts.append(busy)
+            if self.cpu_pct is not None and self.cpu_pct < 3 and self.rate_bps <= 0:
+                parts.append("quiet: it may be waiting, or finishing; slow phases are normal")
         return ", ".join(parts)
 
 
@@ -146,6 +197,7 @@ class ProgressMonitor:
         self._base = 0
         self._last: tuple[float, int] | None = None
         self._rate = 0.0
+        self._cpu_last: tuple[float, int] | None = None
         self.last: Sample | None = None
 
     def sample(self) -> Sample:
@@ -155,8 +207,14 @@ class ProgressMonitor:
             inst = max(0.0, (read - self._last[1]) / (now - self._last[0]))
             self._rate = inst if self._rate == 0 else 0.7 * self._rate + 0.3 * inst
         self._last = (now, read)
+        procs, names, ticks = prefix_activity(self.prefix, self.proc_root)
+        cpu = None
+        if self._cpu_last is not None and now > self._cpu_last[0]:
+            hz = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+            cpu = max(0.0, 100.0 * (ticks - self._cpu_last[1]) / hz / (now - self._cpu_last[0]))
+        self._cpu_last = (now, ticks)
         s = Sample(now - self._t0, read, self.total, max(0, tree_size(self.prefix) - self._base),
-                   self._rate)
+                   self._rate, procs, cpu, tuple(names))
         self.last = s
         return s
 

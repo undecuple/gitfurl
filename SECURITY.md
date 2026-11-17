@@ -9,6 +9,7 @@ Gitfurl runs a Windows installer you chose, through Wine, as your user.
 - **No network.** Gitfurl makes no network requests, sends no telemetry and uploads nothing. Logs stay in `$XDG_STATE_HOME/gitfurl/logs` (mode 0600) and may hold your user name and local paths.
 - **Your own prefix is not used.** Gitfurl uses its own prefixes under `$XDG_DATA_HOME/gitfurl/prefixes`, never `~/.wine` as the prefix. Wine and the installer can still write elsewhere (for example `~/.cache/wine`, menu entries, file-type handlers). The optional changes report lists some of that.
 - **Environment.** Variables starting with `WINE` that your shell sets are not passed to the installer. Gitfurl sets what the plan shows.
+- **What the progress display reads.** While an installer runs and progress is on, gitfurl reads `/proc` for processes of your own user only: which file offsets they have open on the files beside the installer, and, to tell this prefix's processes from others, each process's environment, looking for the single entry `WINEPREFIX=<this prefix>`. From those processes it keeps only a match, the program name and CPU time. Nothing else from the environment is kept, shown, logged or sent anywhere, and it reads no file contents.
 
 To report a vulnerability, open a private security advisory on the repository. Please do not use a public issue.
 

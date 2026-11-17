@@ -99,7 +99,7 @@ The code has no runtime dependencies. For tests and lint, enter `nix develop`, o
 ## How it works, briefly
 - **Core:** plain Python that builds an execution plan (argument list, prefix, environment) and shows it before anything runs.
 - **Interfaces:** the app and the command line are thin layers over that core, with the same approvals.
-- **Progress:** reads, through `/proc`, how far running processes are into the big files beside the installer. It reads no file contents.
+- **Progress:** reads, through `/proc`, how far running processes are into the big files beside the installer, and which of your processes run in the prefix (see [SECURITY.md](SECURITY.md) for exactly what is read). It does not read the contents of your files.
 - More in [docs/architecture.md](docs/architecture.md).
 
 ## Related projects

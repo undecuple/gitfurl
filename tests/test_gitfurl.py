@@ -1,4 +1,5 @@
 import io
+import os
 import subprocess
 import tempfile
 import unittest
@@ -827,3 +828,75 @@ class StartupFailureTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         self.assertIn("could not open a window", proc.stdout)
         self.assertNotIn("Traceback", proc.stderr)
+
+
+class ActivityTests(unittest.TestCase):
+    def _proc(self, root, pid, comm, prefix, utime, stime, env_extra=b""):
+        d = Path(root) / str(pid)
+        d.mkdir()
+        (d / "environ").write_bytes(b"HOME=/x\0WINEPREFIX=" + str(prefix).encode() + b"\0" + env_extra)
+        fields = ["S"] + ["0"] * 10 + [str(utime), str(stime)] + ["0"] * 10
+        (d / "stat").write_text(f"{pid} ({comm}) " + " ".join(fields))
+
+    def test_counts_only_processes_in_the_prefix_and_names_helpers(self):
+        from gitfurl.progress import prefix_activity
+
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as pre:
+            self._proc(root, 10, "wineserver", pre, 5, 5)
+            self._proc(root, 11, "setup.exe", pre, 100, 20)
+            self._proc(root, 12, "my helper (x)", pre, 50, 30)  # name with space and parentheses
+            self._proc(root, 13, "other.exe", "/elsewhere", 999, 999)
+            count, names, ticks = prefix_activity(Path(pre), root)
+        self.assertEqual(count, 3)
+        self.assertEqual(names, ["my helper (x)", "setup.exe"])  # wineserver is infrastructure
+        self.assertEqual(ticks, 10 + 120 + 80)
+
+    def test_nothing_is_kept_from_the_environment_but_the_match(self):
+        from gitfurl.progress import prefix_activity
+
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as pre:
+            self._proc(root, 11, "setup.exe", pre, 1, 1, env_extra=b"SECRET_TOKEN=abc\0")
+            result = prefix_activity(Path(pre), root)
+        self.assertNotIn("abc", repr(result))
+        self.assertNotIn("SECRET_TOKEN", repr(result))
+
+    def test_sample_line_shows_cpu_and_helpers_and_a_quiet_hint(self):
+        from gitfurl.progress import Sample
+
+        busy = Sample(60, 0, 0, 0, 0.0, procs=3, cpu_pct=240.0, helpers=("decomp.exe", "setup.exe"))
+        self.assertIn("3 process(es) running, CPU 240% (decomp.exe, setup.exe)", busy.line())
+        self.assertNotIn("quiet", busy.line())
+        quiet = Sample(60, 0, 0, 0, 0.0, procs=2, cpu_pct=0.5)
+        self.assertIn("quiet: it may be waiting", quiet.line())
+        self.assertNotIn("process(es)", Sample(60, 0, 0, 0, 0.0).line())
+
+    def test_monitor_computes_cpu_between_samples(self):
+        from gitfurl.progress import ProgressMonitor
+
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as pre, \
+                tempfile.TemporaryDirectory() as inst:
+            (Path(inst) / "setup.exe").write_bytes(b"x")
+            self._proc(root, 11, "setup.exe", pre, 0, 0)
+            mon = ProgressMonitor(Path(inst) / "setup.exe", Path(pre), lambda s: None, proc_root=root)
+            mon._t0 = 0.0
+            with mock.patch("time.monotonic", side_effect=[10.0, 20.0]):
+                first = mon.sample()
+                self._proc(root, 12, "x", pre, 0, 0)  # a second process appears
+                (Path(root) / "11" / "stat").write_text(
+                    "11 (setup.exe) " + " ".join(["S"] + ["0"] * 10 + ["500", "500"] + ["0"] * 10))
+                second = mon.sample()
+        self.assertIsNone(first.cpu_pct)
+        self.assertEqual(second.procs, 2)
+        hz = os.sysconf("SC_CLK_TCK")
+        self.assertAlmostEqual(second.cpu_pct, 100.0 * 1000 / hz / 10.0, places=3)
+
+    def test_doctor_reports_machine_resources(self):
+        from gitfurl.doctor import machine_resources
+
+        with tempfile.NamedTemporaryFile("w", suffix=".meminfo") as fh:
+            fh.write("MemTotal: 16000000 kB\nMemAvailable: 8388608 kB\n")
+            fh.flush()
+            text = machine_resources(fh.name)
+        self.assertIn("8.0 GB memory available", text)
+        self.assertIn("CPU threads", text)
+        self.assertIn("memory unknown", machine_resources("/nonexistent/meminfo"))

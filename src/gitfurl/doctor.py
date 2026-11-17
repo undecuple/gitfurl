@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import shutil
 import subprocess
@@ -49,8 +50,21 @@ def probe_tkinter() -> ToolReport:
     return ToolReport("tkinter", "importable", "available", None)
 
 
+def machine_resources(meminfo: str = "/proc/meminfo") -> str:
+    """Available memory and CPU threads: heavy decompression installers can need both."""
+    cpus = os.cpu_count() or 0
+    try:
+        with open(meminfo, encoding="ascii") as fh:
+            kb = next(int(line.split()[1]) for line in fh if line.startswith("MemAvailable:"))
+        mem = f"{kb / 1048576:.1f} GB memory available"
+    except (OSError, StopIteration, ValueError):
+        mem = "memory unknown"
+    return f"{cpus} CPU threads, {mem}"
+
+
 def run_doctor() -> dict:
     return {
+        "resources": machine_resources(),
         "platform": f"{platform.system()} {platform.release()} ({platform.machine()})",
         "wine": probe_tool("wine", ["--version"]),
         "bwrap": probe_tool("bwrap", ["--version"]),
@@ -61,6 +75,8 @@ def run_doctor() -> dict:
 
 def format_report(report: dict) -> str:
     lines = [f"platform: {report['platform']}"]
+    if report.get("resources"):
+        lines.append(f"machine: {report['resources']}")
     for key in ("wine", "bwrap", "umu", "tkinter"):
         t: ToolReport = report[key]
         if t.problem:
