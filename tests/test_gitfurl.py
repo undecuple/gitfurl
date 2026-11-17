@@ -207,6 +207,16 @@ class PrefixCreateTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["env"]["WINEPREFIX"], str(target))
         self.assertNotIn("shell", run.call_args.kwargs)
 
+    def test_ctrl_c_during_prefix_creation_is_a_message_and_status_130(self):
+        with tempfile.TemporaryDirectory() as data, mock.patch.dict(
+            "os.environ", {"XDG_DATA_HOME": data}
+        ), mock.patch("shutil.which", return_value="/x/wine"), mock.patch(
+            "gitfurl.prefixes.run_in_group", side_effect=KeyboardInterrupt
+        ):
+            code, _, err = run_cli("prefix", "create", "abc", "--yes")
+        self.assertEqual(code, 130)
+        self.assertIn("interrupted", err)
+
     def test_existing_path_is_not_touched(self):
         with tempfile.TemporaryDirectory() as data, mock.patch.dict(
             "os.environ", {"XDG_DATA_HOME": data}

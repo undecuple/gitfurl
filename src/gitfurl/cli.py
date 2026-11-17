@@ -146,6 +146,11 @@ def _prefix_command(args) -> int:
     except FileExistsError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    except KeyboardInterrupt:
+        print("interrupted: the processes gitfurl started for the prefix were stopped, and the "
+              "prefix's Wine server was asked to exit. The prefix folder was kept and may be "
+              "incomplete.", file=sys.stderr)
+        return 130
     except (RuntimeError, subprocess.TimeoutExpired) as exc:
         print(f"error: {exc}" if isinstance(exc, RuntimeError) else
               "error: wine did not finish in time; the prefix directory may be incomplete.",
