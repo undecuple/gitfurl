@@ -1,0 +1,124 @@
+<p align="center">
+  <img src="assets/banner.svg" alt="gitfurl" width="660">
+</p>
+
+<h1 align="center">gitfurl</h1>
+
+<p align="center"><b>Run a Windows installer you already have on Linux, in its own Wine environment, with a plan you approve first.</b></p>
+
+<p align="center">
+  <a href="https://github.com/undecuple/gitfurl/actions/workflows/ci.yml"><img src="https://github.com/undecuple/gitfurl/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+</p>
+
+<p align="center"><a href="#getting-started">Getting started</a> · <a href="#why-would-i-want-this">Why would I want this?</a> · <a href="#status">Status</a> · <a href="#known-issues">Known issues</a> · <a href="docs/user-guide.md">User guide</a> · <a href="#building">Building</a> · <a href="https://github.com/undecuple/gitfurl/issues/new/choose">Report a bug</a></p>
+
+---
+
+gitfurl is a graphical app (with an optional command line) for running a Windows installer on Linux through Wine. **You supply the installer.** Gitfurl does not find, download or include any.
+
+> **Status: experimental, version 0.0.1, as of 2026-11-16.** The app, the command line and the tests exist. Installers have been *started* in a sandbox; a complete install has not been tested. Not audited. Details under [Status](#status).
+
+![The Library page: a list of Wine prefixes](docs/screenshot.png)
+
+*The Library page. Work in progress.*
+
+## Why would I want this?
+
+Running a Windows installer under Wine by hand works, until it does not. These are the problems gitfurl is for:
+
+- **You do not want it to use your main Wine prefix.** Run `wine setup.exe` with no setup and it uses `~/.wine`. Gitfurl makes a separate prefix for each thing you install and never uses `~/.wine` as the prefix. (Wine and the installer can still write elsewhere, for example `~/.cache/wine` and menu entries; the optional changes report shows some of that.)
+- **You want to see what will happen before it happens.** Gitfurl shows the exact command, prefix, folder and environment variable first, and nothing runs until you approve.
+- **Big installers look frozen.** Some installers sit for a long time with a bar that does not move. Gitfurl watches how far the installer has read into the large files beside it and shows a percentage, a rate and a rough time left, without relying on the installer's own display.
+- **You want to know what it changed.** An optional report lists new files and registry keys in the prefix, and changes in a few places outside it (menu entries, autostart, your home folder's top level).
+- **You want a log you can read.** Each run gets a log. An optional JSON event log and Wine debug output are there when you need more.
+- **You want to tidy up afterwards.** An optional, guarded step deletes the original installer after a run that exits cleanly. It is off by default.
+- **You want to try Proton instead of Wine.** One setting switches the runtime, through umu-run, with a Proton folder you already have.
+- **You want a stricter box.** The repository includes a bubblewrap wrapper that runs an installer with no network and an empty home folder. It is a manual script, tested on NixOS only, and it opens no window.
+
+### When you probably do not need it
+- If you are happy running Wine yourself, you do not.
+- Gitfurl is for the installer step. It is **not** a game launcher or a library manager, and it does not claim to run any particular installer. Tools built for managing prefixes or launching games cover more than this does.
+- Wine prefixes are not sandboxes. Gitfurl makes the run visible and tidy; it does not make an untrusted installer safe.
+
+## Getting started
+
+There is no release yet. Run it from source. You need Linux, Python 3.11 or newer, tkinter (`python3-tk` on Debian and Ubuntu) and Wine.
+
+1. **Get the code.** `git clone https://github.com/undecuple/gitfurl.git && cd gitfurl`
+2. **Check your setup.** `python -m gitfurl cli doctor` reports Wine, tkinter, bubblewrap and umu-run. With Nix, `nix develop .#wine` gives you Python with tkinter and Wine.
+3. **Open the app.** `python -m gitfurl`, then press **+ New prefix**, name it, and open it.
+4. **Choose your installer and run it.** Pick the file, read the plan, press **Run installer** and confirm. The installer's own window opens; use it as normal.
+5. **Check the result.** Gitfurl shows the exit status and where the log is. The [user guide](docs/user-guide.md) explains every option.
+
+Prefer a terminal? `python -m gitfurl cli --help`. The command line uses the same code and the same approvals.
+
+## Status
+
+As of 2026-11-16, on Linux x86_64, Wine 11.0, tested headless (no GPU, a virtual display):
+
+| Setup | How it runs | State | Tested on |
+|---|---|---|---|
+| Unit tests | `pytest`, mocks only | verified | passing at the last commit; see [docs/testing.md](docs/testing.md) |
+| Graphical app | tkinter | verified (renders and starts) | headless screenshot; never used by a person on a real desktop here |
+| Installer start, Wine | `gitfurl cli install`, in a no-network bubblewrap sandbox | verified: two user-supplied installers started and stayed open 120 s | Wine 11.0; then stopped. No install was completed. The installers are not published (see [docs/testing.md](docs/testing.md)) |
+| Installer start, Proton | `umu-run` with GE-Proton, same sandbox | verified: one installer started and stayed open 120 s | one error line in Proton's output, source not found |
+| Complete install, then running the result | any runtime | **not tested** | - |
+| Progress numbers on a real install | `/proc` read offsets | implemented | tested only against fake `/proc` data |
+| Proton from the app | runtime setting | implemented | not run end to end |
+| Docker image and compose file | - | planned, after the first release | - |
+| Flatpak | - | planned | - |
+
+"verified" means a run with a named setup. "implemented" means the code is in but not run there. "planned" means neither.
+
+## Known issues
+- Compatibility with any particular installer is unverified.
+- Progress and the "installed program" guess are heuristics. They can be wrong or show nothing for installers that read their files in another way.
+- The app is dark only, with a fixed pixel font. Tab and Return/space work on buttons, switches and the sidebar (added 2026-11-16, lightly tested). Screen readers cannot read it: Tk does not expose its widgets to them.
+- Gitfurl refuses to create prefixes or run installers as root.
+- Proton needs a Proton folder you already have, and umu-run downloads its own runtime on first use if it is missing.
+- There is no packaged release. See the [roadmap](ROADMAP.md).
+
+## What goes online
+Nothing, from gitfurl itself. (Inherited `WINE*` variables from your shell are not passed to the installer, so the plan shows everything that is set.) It makes no network requests, sends no telemetry and uploads nothing. Two things you start yourself can use the network: umu-run downloading its runtime on first use, and anything the installer does. The [sandbox wrapper](docs/development.md#running-an-installer-in-a-sandbox) turns the network off for the installer.
+
+## Where your data goes
+- Prefixes: `~/.local/share/gitfurl/prefixes/` (or under `$XDG_DATA_HOME`).
+- Logs: `~/.local/state/gitfurl/logs/` (or under `$XDG_STATE_HOME`), readable only by you. They can contain your user name and local paths; remove those before sharing one.
+- Nothing is written to `~/.wine`.
+
+## Building
+The code has no runtime dependencies. For tests and lint, enter `nix develop`, or install `pytest` and `ruff`, then `PYTHONPATH=src python -m pytest -q` and `ruff check .`. See [docs/development.md](docs/development.md).
+
+## How it works, briefly
+- **Core:** plain Python that builds an execution plan (argument list, prefix, environment) and shows it before anything runs.
+- **Interfaces:** the app and the command line are thin layers over that core, with the same approvals.
+- **Progress:** reads, through `/proc`, how far running processes are into the big files beside the installer. It reads no file contents.
+- More in [docs/architecture.md](docs/architecture.md).
+
+## Related projects
+- **[Wine](https://www.winehq.org/):** the compatibility layer gitfurl drives.
+- **[umu-launcher](https://github.com/Open-Wine-Components/umu-launcher):** used for the optional Proton runtime.
+
+Gitfurl is not affiliated with these projects or with any software publisher.
+
+## Roadmap
+First a release that has been tested on a complete install, then a runtime choice in the app with Proton checked end to end, then a Docker image and compose file. See [ROADMAP.md](ROADMAP.md).
+
+## Contributing
+See [CONTRIBUTING.md](CONTRIBUTING.md). Security problems: [SECURITY.md](SECURITY.md).
+
+## Repository layout
+```
+src/gitfurl/   the app, command line and core
+tests/         mock-based tests (no Wine, no network, no installers)
+docs/          user guide, scope, architecture, development
+tools/         sandbox wrapper and the asset generator
+assets/        banner, icon, favicon, social preview
+.github/       CI and issue forms
+```
+
+## Licence
+Copyright (C) 2026 undecuple. GPL-3.0-or-later; see [LICENSE](LICENSE). The images in `assets/` are generated by `tools/make_assets.py` and are under the same licence. The licence covers gitfurl only, not any installer or software you run with it.
+
+## Disclaimer
+Gitfurl comes with no warranty, as in section 15 of the GPL. You are responsible for what you run and for being authorised to use it. Names of other products belong to their owners; gitfurl is not affiliated with them. Running an installer can harm your system; a Wine prefix is not a sandbox.

@@ -1,0 +1,24 @@
+# Security
+
+Gitfurl runs a Windows installer you chose, through Wine, as your user.
+
+- **A Wine prefix is not a sandbox.** The installer can read and write anything your user can. Run installers you trust and are authorised to use. For untrusted ones, use a separate account, a VM, or a bubblewrap wrapper with the network off.
+- **Dry run first.** `gitfurl cli install FILE --dry-run` shows the command, prefix and environment and changes nothing.
+- **Approval.** Creating a prefix and running an installer each need a typed `yes` (or `--yes`). Without a terminal and without `--yes` nothing happens.
+- **Never as root.** Gitfurl refuses to create prefixes or run installers as root. Do not run an installer as root to get around a permission problem.
+- **No network.** Gitfurl makes no network requests, sends no telemetry and uploads nothing. Logs stay in `$XDG_STATE_HOME/gitfurl/logs` (mode 0600) and may hold your user name and local paths.
+- **Your own prefix is not used.** Gitfurl uses its own prefixes under `$XDG_DATA_HOME/gitfurl/prefixes`, never `~/.wine` as the prefix. Wine and the installer can still write elsewhere (for example `~/.cache/wine`, menu entries, file-type handlers). The optional changes report lists some of that.
+- **Environment.** Variables starting with `WINE` that your shell sets are not passed to the installer. Gitfurl sets what the plan shows.
+
+To report a vulnerability, open a private security advisory on the repository. Please do not use a public issue.
+
+**Cleanup.** The option to delete the original installer is off by default and needs an installer exit status of 0. An exit status of 0 does not prove the install was complete, so keep the files until you have checked the result.
+
+## Status and threat model
+Gitfurl is experimental and has not been audited. Only the latest commit is supported.
+
+What it tries to prevent: a run or a deletion you did not approve, a run in your main Wine prefix, silent network use by gitfurl itself, and a log or report that leaks your environment.
+
+What it does not prevent: a malicious or buggy installer acting as your user. It is not a sandbox. The optional wrapper `tools/sandbox.sh` (NixOS only, manual) and the container files in `docs/docker.md` add layers; neither is a guarantee.
+
+If private vulnerability reporting is off for the repository, open an issue that says only that you have a security report, with no details, and ask for a contact.

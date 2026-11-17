@@ -1,0 +1,35 @@
+name: Bug report
+description: Something does not work as described
+labels: [bug, needs-triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not attach installers, game files, keys or archives. Logs and screenshots only.
+        Before attaching a log, remove your user name and home-folder paths.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+  - type: input
+    id: version
+    attributes:
+      label: gitfurl version or commit
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: Linux distribution, Wine version
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log (user name and paths removed)

@@ -1,0 +1,22 @@
+.git
+.github
+.githooks
+tests
+docs
+assets
+tools
+__pycache__
+*.pyc
+.venv
+# Never put installers, archives or keys in an image.
+*.exe
+*.msi
+*.bin
+*.iso
+*.zip
+*.7z
+*.rar
+*.tar
+*.gz
+*.pem
+*.key

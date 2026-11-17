@@ -1,0 +1,42 @@
+# Run gitfurl in a container with the network off and the installer folder read-only.
+# Set INSTALLER_DIR to the folder that holds your installer, for example:
+#   INSTALLER_DIR=$HOME/Downloads/my-installer docker compose run --rm cli install \
+#       /installer/setup.exe --prefix demo --create-prefix --progress
+# See docs/docker.md for what this does and does not protect.
+services:
+  cli:
+    build: .
+    image: gitfurl:dev
+    network_mode: none          # the installer cannot reach the network
+    read_only: true             # the container's own filesystem is read-only
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      HEADLESS: "1"             # a virtual display; no window on your screen
+    volumes:
+      - ${INSTALLER_DIR:?set INSTALLER_DIR to the folder holding your installer}:/installer:ro
+      - gitfurl-work:/work      # prefixes and logs live here, not on your host
+    command: ["cli", "doctor"]
+
+  # The window on your own screen. This gives the container access to your X11 display,
+  # which is a real trade-off: a program in it can see and control other windows.
+  gui:
+    profiles: ["gui"]
+    build: .
+    image: gitfurl:dev
+    network_mode: none
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      DISPLAY: ${DISPLAY:?run this from a graphical session}
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix:ro
+      - ${INSTALLER_DIR:?set INSTALLER_DIR to the folder holding your installer}:/installer:ro
+      - gitfurl-work:/work
+    command: []
+
+volumes:
+  gitfurl-work:
