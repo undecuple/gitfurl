@@ -21,7 +21,7 @@
 
 gitfurl is a graphical app (with an optional command line) for running a Windows installer on Linux through Wine. **You supply the installer.** Gitfurl does not find, download or include any.
 
-> **Status: version 1.1.0, released on 2026-11-17 (the first release, 1.0.0, was on 2026-11-16).** It means the app, the command line and the safety checks are complete for the scope below. It does **not** mean any particular installer works: compatibility is unverified. Installers have been *started* in a sandbox, but a complete install has not been tested, and the code has not been audited. Details under [Status](#status).
+> **Status: version 1.2.0, released on 2026-11-17 (the first release, 1.0.0, was on 2026-11-16).** It means the app, the command line and the safety checks are complete for the scope below. It does **not** mean any particular installer works: compatibility is unverified. Installers have been *started* in a sandbox, but a complete install has not been tested, and the code has not been audited. Details under [Status](#status).
 
 ![The Library page: a list of Wine prefixes](docs/screenshot.png)
 
@@ -72,6 +72,8 @@ As of 2026-11-16, on Linux x86_64, Wine 11.0, tested headless (no GPU, a virtual
 | Complete install, then running the result | any runtime | **not tested** | - |
 | Progress numbers on a real install | `/proc` read offsets | implemented | tested only against fake `/proc` data |
 | Proton from the app | runtime setting | implemented | not run end to end |
+| ClamAV scan (optional) | `clamscan` on PATH | implemented | tested with a stand-in `clamscan` only; a real `clamscan` was never run |
+| Memory limit (on by default) | `systemd-run --user --scope` | implemented | stand-ins, and test programs in a real scope on one NixOS machine (systemd 262); never with Wine, Proton or an installer |
 | Docker image and compose file | - | planned, after the first release | - |
 | Flatpak | - | planned | - |
 
@@ -82,8 +84,9 @@ As of 2026-11-16, on Linux x86_64, Wine 11.0, tested headless (no GPU, a virtual
 - Progress and the "installed program" guess are heuristics. They can be wrong or show nothing for installers that read their files in another way.
 - The app is dark only, with a fixed pixel font. Tab and Return/space work on buttons, switches and the sidebar (added 2026-11-16, lightly tested). Screen readers cannot read it: Tk does not expose its widgets to them.
 - Gitfurl refuses to create prefixes or run installers as root.
+- The memory limit is on by default. Without a user systemd manager, or without the memory controller delegated to it, runs are refused until you turn the limit off (`--no-memory-limit`, or the option in the window). Swap is not limited.
 - Proton needs a Proton folder you already have, and umu-run downloads its own runtime on first use if it is missing.
-- The single-file Linux build in the 1.0.0 release starts and runs `cli` here, and its window opens in a Debian image with Tk and fonts. The 1.1.0 build is made by the same workflow and has not been checked separately. It is **not proven on every desktop**: it expects the system's standard X11 libraries and at least one font. On NixOS it stops with `libxcb.so.1: cannot open shared object file` unless the libraries are provided (for example with nix-ld) or you run from source with `nix develop`. See the [roadmap](ROADMAP.md).
+- The single-file Linux build in the 1.0.0 release starts and runs `cli` here, and its window opens in a Debian image with Tk and fonts. The 1.1.0 and 1.2.0 builds are made by the same workflow and have not been checked separately. It is **not proven on every desktop**: it expects the system's standard X11 libraries and at least one font. On NixOS it stops with `libxcb.so.1: cannot open shared object file` unless the libraries are provided (for example with nix-ld) or you run from source with `nix develop`. See the [roadmap](ROADMAP.md).
 
 ## What goes online
 Nothing, from gitfurl itself. (Inherited `WINE*` variables from your shell are not passed to the installer, so the plan shows everything that is set.) It makes no network requests, sends no telemetry and uploads nothing. Two things you start yourself can use the network: umu-run downloading its runtime on first use, and anything the installer does. The [sandbox wrapper](docs/development.md#running-an-installer-in-a-sandbox) turns the network off for the installer.
