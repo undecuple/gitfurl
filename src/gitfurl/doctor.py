@@ -70,6 +70,7 @@ def run_doctor() -> dict:
         "bwrap": probe_tool("bwrap", ["--version"]),
         "umu": probe_tool("umu-run", ["--version"]),
         "innoextract": probe_tool("innoextract", ["--version"]),
+        "clamscan": probe_tool("clamscan", ["--version"]),
         "tkinter": probe_tkinter(),
     }
 
@@ -86,5 +87,19 @@ def format_report(report: dict) -> str:
             lines.append(f"{t.name}: unavailable ({t.problem})" + note.get(key, "") * (key == "umu"))
         else:
             lines.append(f"{t.name}: {t.version} at {t.path}" + note.get(key, "") * (key == "innoextract"))
+    scan = report.get("clamscan")
+    if scan is not None:
+        lines.extend(_clamscan_lines(scan))
     lines.append("Nothing was installed or changed.")
     return "\n".join(lines)
+
+
+def _clamscan_lines(t: ToolReport) -> list[str]:
+    """clamscan is optional (for --scan). The version probe holds the database date."""
+    note = " (optional, for --scan; gitfurl never updates its database)"
+    if t.problem:
+        return [f"clamscan: unavailable ({t.problem}){note}"]
+    from gitfurl.scan import describe_database, parse_version
+
+    info = parse_version(t.version or "")
+    return [f"clamscan: at {t.path}{note}", *(f"  {ln}" for ln in describe_database(info))]

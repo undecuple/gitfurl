@@ -14,6 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from gitfurl import __version__
+from gitfurl import scan as scanmod
 from gitfurl.cleanup import MODES, perform_cleanup, plan_cleanup
 from gitfurl.detect import describe as describe_detection
 from gitfurl.detect import detect
@@ -75,17 +76,33 @@ def portable_option_state(runtime: str, bwrap_path: str | None) -> tuple[bool, s
     return True, PORTABLE_NOTE
 
 
+SCAN_NOTE = ("Runs the clamscan on your PATH on the installer and the files beside it before "
+             "anything else, read-only. A match or a scan error stops the run. A clean result "
+             "only means no known signature matched. gitfurl never updates the database.")
+
+
+def scan_option_state(clamscan_path: str | None) -> tuple[bool, str]:
+    """(available, reason) for the ClamAV scan toggle. The reason is shown next to it."""
+    if not clamscan_path:
+        return False, ("Not available: clamscan was not found on PATH. gitfurl does not "
+                       "install ClamAV.")
+    return True, SCAN_NOTE
+
+
 def describe_plan(installer: str, prefix: str, runtime: str = "wine",
-                  proton_path: str | None = None, portable: bool = False
-                  ) -> tuple[str, str | None]:
-    """Return (preview text, error). No side effects."""
+                  proton_path: str | None = None, portable: bool = False,
+                  scan: bool = False) -> tuple[str, str | None]:
+    """Return (preview text, error). No side effects: the scan is described, never run."""
     if not installer.strip():
         return "", "Choose an installer file."
     if not prefix.strip():
         return "", "Choose or create a prefix."
     try:
+        scan_plan = scanmod.build_scan_plan(validate_installer(installer.strip()),
+                                            scanmod.find_clamscan()) if scan else None
         plan = build_plan(validate_installer(installer.strip()), prefix.strip(),
-                          runtime=runtime, proton_path=proton_path, portable=portable)
+                          runtime=runtime, proton_path=proton_path, portable=portable,
+                          scan=scan_plan)
         portable_lines = []
         if portable:
             from gitfurl.portable import check_portable_supported, describe_portable, find_bwrap
@@ -106,7 +123,9 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
         + "".join(f"env:         {k}={v}\n" for k, v in plan.env_overrides.items())
     )
     if portable_lines:
-        text += "\n".join(portable_lines)
+        text += "\n".join(portable_lines) + "\n"
+    if scan_plan is not None:
+        text += "\n".join(scanmod.describe_scan_plan(scan_plan))
     return text.rstrip(), None
 
 
@@ -270,6 +289,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     runtime_var = tk.StringVar(value="wine")
     find_var = tk.BooleanVar(value=False)
     portable_var = tk.BooleanVar(value=False)
+    scan_var = tk.BooleanVar(value=False)
     progress_var = tk.StringVar(value="Shown while an installer runs: payload read, rate, rough ETA.")
     pending = {"cleanup": None, "control": None, "proton": False}
     proton_var = tk.StringVar(value=os.environ.get("PROTONPATH", ""))
@@ -676,6 +696,27 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     runtime_var.trace_add("write", lambda *_: refresh_portable())
     refresh_portable()
 
+    scan_switch = {}
+
+    def scan_widget(p):
+        scan_switch["w"] = w.Switch(p, scan_var, command=lambda: refresh_plan())
+        return scan_switch["w"]
+
+    scan_row = row(c, "Scan the installer with ClamAV first", SCAN_NOTE, scan_widget)
+    scan_reason = {"text": SCAN_NOTE}
+
+    def refresh_scan():
+        ok, reason = scan_option_state(scanmod.find_clamscan())
+        if not ok:
+            scan_var.set(False)
+        scan_switch["w"].set_enabled(ok)
+        scan_reason["text"] = reason
+        for child in scan_row.winfo_children()[-1:]:  # the title and note frame
+            for lab in child.winfo_children()[-1:]:
+                lab.configure(text=reason)
+
+    refresh_scan()
+
     row(c, "Delete the original installer after a good run",
         "installer = the file, folder = everything beside it. Only when it exits with status 0.",
         segmented_for(cleanup_var, MODES))
@@ -762,7 +803,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             sub_var.set("invalid name")
         runtime = runtime_var.get()
         text, err = describe_plan(installer_var.get(), name, runtime, proton_dir(),
-                                  portable_var.get())
+                                  portable_var.get(), scan_var.get())
         set_text(plan_box, text or (err or ""))
         tool = wine_path["umu"] if runtime == "proton" else wine_path["value"]
         rows = plan_checklist(installer_problem(installer_var.get()), prefix_error, exists,
@@ -842,6 +883,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         label(r, "Platform", T["body"], False, FG, w.PANEL).pack(side="left")
         label(r, report["platform"], T["body"], False, w.MUTED, w.PANEL).pack(side="right")
         report_cache["text"] = describe_environment(report)
+        refresh_scan()
         refresh_plan()
         refresh_footer()
 
@@ -880,7 +922,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     def run_clicked():
         proton = runtime_var.get() == "proton"
         text, err = describe_plan(installer_var.get(), selected_prefix(), runtime_var.get(),
-                                  proton_dir(), portable_var.get())
+                                  proton_dir(), portable_var.get(), scan_var.get())
         if err:
             messagebox.showerror("Cannot run", err)
             return
@@ -889,9 +931,16 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             messagebox.showerror("Runtime not found", f"{'umu-run' if proton else 'Wine'} is not on "
                                  "PATH. Nothing was run.")
             return
+        try:
+            scan_plan = scanmod.build_scan_plan(validate_installer(installer_var.get().strip()),
+                                                scanmod.find_clamscan()) \
+                if scan_var.get() else None
+        except ValueError as exc:
+            messagebox.showerror("Cannot scan", f"{exc}. Nothing was run.")
+            return
         plan = build_plan(validate_installer(installer_var.get().strip()), selected_prefix(),
                           runtime=runtime_var.get(), proton_path=proton_dir(),
-                          portable=portable_var.get())
+                          portable=portable_var.get(), scan=scan_plan)
         missing = not plan.prefix.is_dir()
         if missing and not create_var.get():
             messagebox.showerror("Prefix missing", f"{plan.prefix} does not exist. Create it first, "
@@ -918,6 +967,12 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                 extra += " (checked places only)"
         if find_var.get():
             extra += "\n\nA guess at the installed program will be shown afterwards."
+        if scan_plan is not None:  # a bounded version probe for the database date, as doctor
+            extra += "\n\n" + "\n".join(scanmod.describe_database(
+                scanmod.database_info(scan_plan.clamscan)))
+            extra += ("\n\nThe ClamAV scan runs first, after you approve. A match stops the run "
+                      "(you are then asked a second time whether to run it anyway); a scan error "
+                      "always stops it.")
         if not messagebox.askyesno("Run this installer?", f"{text}{extra}\n\n{WARNING}",
                                    icon="warning", default="no"):
             return
@@ -935,12 +990,38 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         pending["control"], pending["proton"] = control, proton
         pending["portable"] = plan.portable
         options = RunOptions(on_progress=ui_updates.put, progress_interval=3.0,
-                             detailed_log=detail_var.get(), control=control)
+                             detailed_log=detail_var.get(), control=control,
+                             on_note=lambda m: pending.__setitem__("note", m))
+        pending["note"] = ""
+        if scan_plan is not None:
+            status_var.set("Scanning the installer with ClamAV first...")
+        launch(plan, tool, create, track, options, ctx)
+
+    def launch(plan, tool, create, track, options, ctx):
+        """Start the approved run in a thread (the scan, if any, runs first inside it)."""
+        pending["rerun"] = (plan, tool, create, track, options, ctx)
         stop_btn.state(["!disabled"])  # a Stop from an earlier run must not leave it disabled
         stop_btn.pack(side="left", padx=(0, SP["md"]), before=create_btn)
         run_in_thread(lambda: run_tracked(plan, tool, create, track,
                                           options=options), results)
         poll("install", ctx)
+
+    def scan_hit_override(blocked) -> bool:
+        """After a ClamAV match: a second, explicit confirmation (default No). True = run."""
+        plan, tool, create, track, options, ctx = pending["rerun"]
+        if not messagebox.askyesno(
+                "Run it anyway?", f"{blocked}\n\nThis is a second confirmation. Run the "
+                "installer even though ClamAV matched a signature?", icon="warning",
+                default="no"):
+            return False
+        control = RunControl()
+        pending["control"] = control
+        start_busy("Installer running (ClamAV match overridden). Close its window when it is "
+                   "done.", "install")
+        launch(plan, tool, create, track,
+               replace(options, control=control, scan_result=blocked.result,
+                       allow_scan_hit=True), ctx)
+        return True
 
     def stop_clicked():
         control = pending["control"]
@@ -1008,6 +1089,15 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             status_label.configure(fg=w.AMBER)
             pending["cleanup"] = None
             return
+        if state == "error" and isinstance(value, scanmod.ScanBlocked):
+            status_var.set(f"Not run. {value}")
+            status_label.configure(fg=w.AMBER)
+            hit = value.result is not None and value.result.status == scanmod.HIT
+            if hit and not (control is not None and control.cancelled) \
+                    and scan_hit_override(value):
+                return
+            pending["cleanup"] = None
+            return
         if state == "error":
             status_var.set(f"Failed: {value}")
             status_label.configure(fg=w.RED)
@@ -1032,6 +1122,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                     extra = "\nCleanup skipped: the installer did not exit with status 0."
             facts = describe_result(value)
             extra += f"\n{facts}" if facts else ""
+            extra += f"\n{pending['note']}" if pending.get("note") else ""
             status_var.set(f"Installer exited with status {status}{note}{extra}\n"
                            f"Local log: {log} (may contain your user name and paths)")
             status_label.configure(fg=w.CYAN if status == 0 else w.AMBER)
@@ -1106,6 +1197,9 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                     "new_btn": new_btn,
                     "prefix_var": prefix_var,
                     "set_banners": set_banners,
+                    "scan_var": scan_var,
+                    "scan_switch": scan_switch,
+                    "scan_reason": scan_reason,
                 }
                 driver(root, ui)
             except BaseException:  # noqa: BLE001 - reported on stderr, the exit status says it

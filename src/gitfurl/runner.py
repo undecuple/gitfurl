@@ -28,6 +28,7 @@ class InstallPlan:
     prerequisites: list[str] = field(default_factory=list)
     runtime: str = "wine"
     portable: bool = False  # run inside bwrap (see gitfurl.portable); off by default
+    scan: object = None  # a gitfurl.scan.ScanPlan: ClamAV scan before the run; off by default
 
     def preview(self) -> str:
         """Readable preview only. The real call would use argv, never a shell string."""
@@ -68,7 +69,7 @@ def runtime_env(runtime: str, proton_path: str | None) -> dict[str, str]:
 
 def build_plan(installer: Path, prefix_name: str, env: dict[str, str] | None = None,
                runtime: str = "wine", proton_path: str | None = None,
-               portable: bool = False) -> InstallPlan:
+               portable: bool = False, scan=None) -> InstallPlan:
     prefix = prefix_path(prefix_name, env)
     extra = runtime_env(runtime, proton_path)
     if portable:
@@ -85,6 +86,9 @@ def build_plan(installer: Path, prefix_name: str, env: dict[str, str] | None = N
         needs = ["wine available on PATH (run 'gitfurl doctor')"]
     if portable:
         needs.append("bwrap (bubblewrap) available on PATH (portable install)")
+    if scan is not None:
+        needs.append("clamscan on PATH and its signature database (ClamAV scan first; gitfurl "
+                     "never updates the database)")
     return InstallPlan(
         argv=["umu-run" if runtime == "proton" else "wine", str(installer)],
         prefix=prefix,
@@ -93,6 +97,7 @@ def build_plan(installer: Path, prefix_name: str, env: dict[str, str] | None = N
         prerequisites=[*needs, f"dedicated prefix at {prefix}, created with approval"],
         runtime=runtime,
         portable=portable,
+        scan=scan,
     )
 
 
@@ -331,6 +336,9 @@ class RunOptions:
     clock: object = time.monotonic  # injected in tests
     proc_root: str = "/proc"  # injected in tests
     meminfo: str = "/proc/meminfo"  # injected in tests
+    allow_scan_hit: bool = False  # run even if the ClamAV scan matched a signature
+    scan_result: object = None  # a ScanResult already obtained (the app's second confirmation)
+    scan_summary: str | None = None  # set by run_with_prefix; written to the log
 
 
 _WINEDEBUG_OK = None
@@ -494,7 +502,10 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
     fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "w") as log:
-            log.write(f"command: {shlex.join(argv)}\ncwd: {plan.cwd}\nprefix: {plan.prefix}\n---\n")
+            log.write(f"command: {shlex.join(argv)}\ncwd: {plan.cwd}\nprefix: {plan.prefix}\n")
+            if options.scan_summary:
+                log.write("".join(f"scan: {ln}\n" for ln in options.scan_summary.splitlines()))
+            log.write("---\n")
             log.flush()
             if monitor:
                 monitor.start()
@@ -558,6 +569,8 @@ def run_with_prefix(plan: InstallPlan, wine: str, create_if_missing: bool,
 
         base = os.environ if env is None else env
         check_portable_supported(plan, find_bwrap(base), dict(base), Path(plan.argv[-1]))
+    if plan.scan is not None:  # before anything is created; a hit or an error raises ScanBlocked
+        options = _scan_gate(plan, options or RunOptions())
     if not plan.prefix.is_dir():
         if not create_if_missing:
             raise FileNotFoundError(
@@ -571,6 +584,25 @@ def run_with_prefix(plan: InstallPlan, wine: str, create_if_missing: bool,
     if on_ready is not None:
         on_ready()  # the prefix exists; e.g. take a "before" snapshot
     return execute(plan, wine, env, run, options)
+
+
+def _scan_gate(plan: InstallPlan, options: RunOptions) -> RunOptions:
+    """Run the plan's ClamAV scan (or use the result the caller already has) and decide."""
+    from dataclasses import replace
+
+    from gitfurl.scan import ScanBlocked, decide, run_scan
+
+    result = options.scan_result
+    if result is None:
+        control = options.control
+        result = run_scan(plan.scan,
+                          should_stop=(lambda: control.cancelled) if control else None)
+    proceed, message = decide(result, options.allow_scan_hit)
+    if not proceed:
+        raise ScanBlocked(message, result)
+    if options.on_note is not None:
+        options.on_note(message)
+    return replace(options, scan_summary=message)
 
 
 def run_tracked(plan: InstallPlan, wine: str, create_if_missing: bool, track: bool,

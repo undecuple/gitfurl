@@ -34,6 +34,7 @@ from gitfurl.runner import (
     validate_wine_debug,
 )
 from gitfurl.safety import ROOT_MESSAGE, running_as_root
+from gitfurl.scan import DEFAULT_TIMEOUT_S as SCAN_TIMEOUT_S
 
 DEFAULT_PREFIX = "default"
 
@@ -80,6 +81,15 @@ def build_parser() -> argparse.ArgumentParser:
     inst.add_argument("--cleanup", choices=MODES, default="none",
                       help="after a successful install (exit status 0), delete the installer "
                            "file or its whole folder; default: none")
+    inst.add_argument("--scan", action="store_true",
+                      help="scan the installer and the files beside it with the clamscan on PATH "
+                           "first; a match or a scan error stops the run. Off by default. "
+                           "gitfurl never updates the ClamAV database")
+    inst.add_argument("--allow-scan-hit", action="store_true",
+                      help="with --scan: run even if ClamAV matched a signature (false positives "
+                           "are common for game installers)")
+    inst.add_argument("--scan-timeout", type=float, default=SCAN_TIMEOUT_S, metavar="SECONDS",
+                      help=f"with --scan: stop the scan after this long (default {SCAN_TIMEOUT_S:g})")
     inst.add_argument("--yes", action="store_true", help="approve the run without prompting")
     pre = sub.add_parser("prefix", help="manage dedicated prefixes")
     pre_sub = pre.add_subparsers(dest="prefix_command", required=True)
@@ -101,8 +111,9 @@ def main(argv: list[str] | None = None) -> int:
         return _real_install(args)
     try:
         installer = validate_installer(args.installer)
+        scan_plan = _scan_plan(args, installer)
         plan = build_plan(installer, args.prefix or DEFAULT_PREFIX, runtime=args.runtime,
-                          proton_path=args.proton_path, portable=args.portable)
+                          proton_path=args.proton_path, portable=args.portable, scan=scan_plan)
         portable_lines = _portable_lines(plan, installer, shutil.which("wine") or "wine",
                                          full=True) if args.portable else []
     except ValueError as exc:
@@ -119,6 +130,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  - {item}")
     for line in portable_lines:
         print(line)
+    if scan_plan is not None:
+        from gitfurl.scan import describe_scan_plan
+
+        for line in describe_scan_plan(scan_plan):
+            print(line)
+        print("  database date: not checked in a dry run (see 'gitfurl cli doctor')")
     for line in describe_detection(detect(installer)).splitlines():
         print(line)
     print("preflight (read-only, advisory):")
@@ -126,6 +143,19 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {line}")
     print("Running an installer can expose files the current user can access.")
     return 0
+
+
+def _scan_plan(args, installer):
+    """The ClamAV scan plan when --scan is given, else None. Runs nothing. Raises ValueError."""
+    if not args.scan:
+        if args.allow_scan_hit:
+            raise ValueError("--allow-scan-hit only has a meaning together with --scan")
+        return None
+    from gitfurl.scan import build_scan_plan, find_clamscan
+
+    if args.scan_timeout <= 0:
+        raise ValueError("--scan-timeout must be above 0")
+    return build_scan_plan(installer, find_clamscan(), args.scan_timeout)
 
 
 def _portable_lines(plan, installer, wine: str, full: bool) -> list[str]:
@@ -206,12 +236,13 @@ def _real_install(args) -> int:
         return 1
     try:
         installer = validate_installer(args.installer)
+        scan_plan = _scan_plan(args, installer)
         plan = build_plan(installer, args.prefix, runtime=args.runtime,
-                          proton_path=args.proton_path, portable=args.portable)
+                          proton_path=args.proton_path, portable=args.portable, scan=scan_plan)
         if args.portable and args.runtime != "wine":
             raise ValueError("portable install is only supported with the wine runtime")
     except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        print(f"error: {exc}. Nothing was run.", file=sys.stderr)
         return 1
     tool = "umu-run" if args.runtime == "proton" else "wine"
     wine = shutil.which(tool)
@@ -259,6 +290,16 @@ def _real_install(args) -> int:
     print("preflight (read-only, advisory):")
     for line in measure(installer, plan.prefix).describe().splitlines():
         print(f"  {line}")
+    if scan_plan is not None:
+        from gitfurl.scan import database_info, describe_scan_plan
+
+        # A bounded version probe (as doctor runs), for the database date. The scan itself
+        # runs only after approval.
+        for line in describe_scan_plan(scan_plan, database_info(scan_plan.clamscan)):
+            print(line)
+        print("The scan runs first, after you approve. A match stops the run"
+              + (" unless --allow-scan-hit is given" if args.allow_scan_hit else "")
+              + "; a scan error always stops it.")
     print("Ctrl-C stops this run gracefully (see docs/user-guide.md for what it leaves behind).")
     if args.cleanup != "none":
         print("After the installer exits with status 0, " + clean.describe())
@@ -277,7 +318,8 @@ def _real_install(args) -> int:
             progress_interval=args.progress_interval,
             detailed_log=args.detailed_log, wine_debug=args.wine_debug, control=control,
             stall_after_s=args.stall_after,
-            on_note=(lambda note: print(f"[note] {note}", flush=True)))
+            on_note=(lambda note: print(f"[note] {note}", flush=True)),
+            allow_scan_hit=args.allow_scan_hit)
         result = run_tracked(
             plan, wine, args.create_prefix, args.show_changes or args.find_exe, options=options)
         status, log_path, changes = result
@@ -285,7 +327,10 @@ def _real_install(args) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt as exc:
-        if hasattr(exc, "notes"):  # interrupted while the prefix was being created
+        if getattr(exc, "scan_interrupted", False):
+            print("interrupted during the ClamAV scan. " + "; ".join(exc.notes) + ". Nothing "
+                  "was run or created.", file=sys.stderr)
+        elif hasattr(exc, "notes"):  # interrupted while the prefix was being created
             print(_prefix_interrupt_message(exc), file=sys.stderr)
             print("The installer was not started.", file=sys.stderr)
         else:
