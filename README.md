@@ -131,6 +131,8 @@ Gitfurl is not affiliated with these projects or with any software publisher.
 First a release that has been tested on a complete install, then a runtime choice in the app with Proton checked end to end, then a Docker image and compose file. See [ROADMAP.md](ROADMAP.md).
 
 ## Community
+[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/W8fMT78Q7k)
+
 Questions and discussion: the gitfurl forum on the [undecuple Discord server](https://discord.gg/W8fMT78Q7k). Bugs still go to [GitHub issues](https://github.com/undecuple/gitfurl/issues/new/choose), and security problems to [private advisories](SECURITY.md). Do not post logs there without removing your user name and local paths.
 
 ## Contributing
