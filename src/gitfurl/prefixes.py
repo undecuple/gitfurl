@@ -60,24 +60,81 @@ def plan_create(name: str, wine: str, env: dict[str, str] | None = None,
     }
 
 
+def _wineserver_for(wine: str) -> str | None:
+    """wineserver beside an absolute wine path, else on PATH. Never relative to the cwd."""
+    import shutil
+
+    if os.path.isabs(wine):
+        beside = Path(wine).with_name("wineserver")
+        if beside.is_file():
+            return str(beside)
+    return shutil.which("wineserver")
+
+
+def run_in_group(argv: list[str], env: dict[str, str], timeout: float, wine: str,
+                 grace_s: float = 5.0):
+    """Run argv in its own process group and wait up to `timeout` seconds.
+
+    On a timeout or Ctrl-C only that group is signalled (TERM, then KILL after `grace_s`),
+    and then this prefix's own Wine server is asked to exit (`wineserver -k`, WINEPREFIX
+    from `env`). Nothing is found by name. A program that left the group is out of reach.
+    Raises subprocess.TimeoutExpired after the cleanup, or re-raises KeyboardInterrupt.
+    """
+    import signal
+    import subprocess
+    import time
+
+    proc = subprocess.Popen(argv, env=env, start_new_session=True)
+    try:
+        return subprocess.CompletedProcess(argv, proc.wait(timeout))
+    except BaseException:
+        # The leader has not been reaped (wait() raised), so its group id is still ours.
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(proc.pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+            end = time.monotonic() + grace_s
+            while time.monotonic() < end and proc.poll() is None:
+                time.sleep(0.05)
+            if proc.poll() is not None:
+                break
+        server = _wineserver_for(wine)
+        if server:
+            try:
+                subprocess.run([server, "-k"], env=env, timeout=30, check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        if proc.poll() is None:
+            proc.wait()
+        raise
+
+
 def create_prefix(name: str, wine: str, env: dict[str, str] | None = None, run=None,
                   extra_env: dict[str, str] | None = None) -> int:
-    """Create a dedicated prefix. Refuses to touch an existing path. Returns wine's exit status."""
+    """Create a dedicated prefix. Refuses to touch an existing path. Returns wine's exit status.
+
+    Without an injected `run` (tests), wineboot runs in its own process group so a timeout
+    or Ctrl-C can end it and its helpers (see run_in_group).
+    """
     import subprocess
 
-    run = run or subprocess.run
     plan = plan_create(name, wine, env, extra_env)
     path: Path = plan["path"]
     if path.exists():
         raise FileExistsError(f"prefix path already exists, not touching it: {path}")
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     path.mkdir(mode=0o700)
+    child = child_env(os.environ if env is None else env, plan["env_overrides"])
     try:
-        proc = run(plan["argv"], env=child_env(os.environ if env is None else env, plan["env_overrides"]),
-                   timeout=WINEBOOT_TIMEOUT_S, check=False)
+        if run is None:
+            proc = run_in_group(plan["argv"], env=child, timeout=WINEBOOT_TIMEOUT_S, wine=wine)
+        else:
+            proc = run(plan["argv"], env=child, timeout=WINEBOOT_TIMEOUT_S, check=False)
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
-            f"creating the prefix timed out after {WINEBOOT_TIMEOUT_S} s ({path}). Wine's own "
-            "processes for it (wineboot and helpers) may still be running; gitfurl did not stop "
-            "them. The prefix folder was kept.") from exc
+            f"creating the prefix timed out after {WINEBOOT_TIMEOUT_S} s ({path}). gitfurl "
+            "stopped the processes it started for it and asked this prefix's Wine server to "
+            "exit. The prefix folder was kept; it may be incomplete.") from exc
     return proc.returncode

@@ -23,7 +23,8 @@ def run_cli(*argv):
 def patched_runs(result=None):
     """One mock for both subprocess.run (prefix creation) and the installer launcher."""
     run = mock.Mock(return_value=result or subprocess.CompletedProcess([], 0))
-    with mock.patch("subprocess.run", run), mock.patch("gitfurl.runner._run_in_group", run):
+    with mock.patch("subprocess.run", run), mock.patch("gitfurl.prefixes.run_in_group", run), \
+            mock.patch("gitfurl.runner._run_in_group", run):
         yield run
 
 
@@ -192,7 +193,7 @@ class PrefixCreateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as data, mock.patch.dict(
             "os.environ", {"XDG_DATA_HOME": data}
         ), mock.patch("shutil.which", return_value="/x/wine"), mock.patch(
-            "subprocess.run", return_value=done
+            "gitfurl.prefixes.run_in_group", return_value=done
         ) as run:
             code, _, _ = run_cli("prefix", "create", "abc", "--yes")
             target = Path(data) / "gitfurl" / "prefixes" / "abc"
@@ -350,7 +351,7 @@ class CreateIfMissingTests(unittest.TestCase):
                 tempfile.TemporaryDirectory() as state:
             f, env = self._env(d, data, state)
             with env, mock.patch("shutil.which", return_value="/x/wine"), \
-                    mock.patch("subprocess.run", return_value=done) as run:
+                    mock.patch("gitfurl.prefixes.run_in_group", return_value=done) as run:
                 code, _, err = run_cli("install", str(f), "--prefix", "new", "--create-prefix", "--yes")
         self.assertEqual(code, 1)
         self.assertIn("installer was not run", err)
@@ -1469,9 +1470,155 @@ class PrefixTimeoutTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d:
             env = {"XDG_DATA_HOME": d, "HOME": d}
-            with self.assertRaisesRegex(RuntimeError, "timed out.*may still be running"):
+            with self.assertRaisesRegex(RuntimeError, "timed out.*stopped the processes"):
                 create_prefix("p1", "/x/wine", env, run=slow)
             self.assertTrue((Path(d) / "gitfurl" / "prefixes" / "p1").is_dir())  # kept
+
+
+class PrefixGroupTests(unittest.TestCase):
+    """wineboot runs in its own group; dummy processes and a fake wineserver only."""
+
+    CHILD = (
+        "import os, subprocess, sys, time\n"
+        "out = sys.argv[1]\n"
+        "if len(sys.argv) > 2:\n"
+        "    open(out, 'a').write(f'child {os.getpid()}\\n'); time.sleep(120)\n"
+        "else:\n"
+        "    open(out, 'a').write(f'leader {os.getpid()}\\n')\n"
+        "    subprocess.Popen([sys.executable, __file__, out, 'x']); time.sleep(120)\n"
+    )
+
+    def setUp(self):
+        import sys
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        t = Path(self.tmp.name)
+        (t / "d.py").write_text(self.CHILD)
+        (t / "wine").write_text("#!/bin/sh\nexit 0\n")
+        (t / "wineserver").write_text(
+            f'#!/bin/sh\necho "$@ WINEPREFIX=$WINEPREFIX" >> "{t}/server.txt"\n')
+        for n in ("wine", "wineserver"):
+            (t / n).chmod(0o755)
+        self.argv = [sys.executable, str(t / "d.py"), str(t / "pids.txt")]
+        self.env = {"WINEPREFIX": str(t / "p"), "PATH": "/nonexistent"}
+        self.stray = []
+        self.addCleanup(self._kill)
+
+    def _kill(self):
+        import signal
+
+        for pid in self.stray:
+            if pid_alive(pid):
+                os.kill(pid, signal.SIGKILL)
+
+    def _pids(self):
+        import time
+
+        out = Path(self.tmp.name) / "pids.txt"
+        end = time.monotonic() + 15
+        while time.monotonic() < end:
+            if out.exists() and len(out.read_text().split()) >= 4:
+                got = [int(x) for x in out.read_text().split()[1::2]]
+                self.stray.extend(got)
+                return got
+            time.sleep(0.05)
+        self.fail("dummy processes did not start")
+
+    def test_normal_exit_returns_the_status_and_runs_no_cleanup(self):
+        from gitfurl.prefixes import run_in_group
+
+        with mock.patch("os.killpg") as killpg:
+            res = run_in_group(["/bin/sh", "-c", "exit 3"], {}, 10, str(Path(self.tmp.name) / "wine"))
+        self.assertEqual(res.returncode, 3)
+        killpg.assert_not_called()
+        self.assertFalse((Path(self.tmp.name) / "server.txt").exists())
+
+    def test_timeout_ends_the_whole_group_and_asks_this_prefixs_server_to_exit(self):
+        import subprocess
+        import threading
+
+        from gitfurl.prefixes import run_in_group
+
+        box = {}
+
+        def work():
+            try:
+                run_in_group(self.argv, self.env, 2, str(Path(self.tmp.name) / "wine"), grace_s=2)
+            except subprocess.TimeoutExpired as exc:
+                box["exc"] = exc
+
+        th = threading.Thread(target=work)
+        th.start()
+        pids = self._pids()
+        th.join(30)
+        self.assertIn("exc", box)
+        for pid in pids:
+            end = __import__("time").monotonic() + 5
+            while pid_alive(pid) and __import__("time").monotonic() < end:
+                __import__("time").sleep(0.05)
+            self.assertFalse(pid_alive(pid), pid)
+        server = (Path(self.tmp.name) / "server.txt").read_text().strip()
+        self.assertEqual(server, f"-k WINEPREFIX={Path(self.tmp.name) / 'p'}")
+
+    def test_ctrl_c_ends_the_group_and_reraises(self):
+        import signal
+        import threading
+
+        from gitfurl.prefixes import run_in_group
+
+        def press():
+            self._pids()
+            os.kill(os.getpid(), signal.SIGINT)  # our own process only
+
+        th = threading.Thread(target=press)
+        th.start()
+        with self.assertRaises(KeyboardInterrupt):
+            run_in_group(self.argv, self.env, 60, str(Path(self.tmp.name) / "wine"), grace_s=2)
+        th.join(10)
+        for pid in self.stray:
+            end = __import__("time").monotonic() + 5
+            while pid_alive(pid) and __import__("time").monotonic() < end:
+                __import__("time").sleep(0.05)
+            self.assertFalse(pid_alive(pid), pid)
+
+    def test_only_the_leaders_group_is_signalled_and_nothing_by_name(self):
+        import subprocess
+        import threading
+
+        from gitfurl.prefixes import run_in_group
+
+        calls = []
+        real = os.killpg
+
+        def spy(pgid, sig):
+            calls.append(pgid)
+            return real(pgid, sig)
+
+        box = {}
+
+        def work():
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                run_in_group(self.argv, self.env, 1, str(Path(self.tmp.name) / "wine"), grace_s=2)
+            box["done"] = True
+
+        with mock.patch("os.killpg", side_effect=spy), mock.patch("os.kill") as kill:
+            th = threading.Thread(target=work)
+            th.start()
+            leader = self._pids()[0]
+            th.join(30)
+        kill.assert_not_called()
+        self.assertTrue(calls)
+        self.assertEqual(set(calls), {leader})
+
+    def test_a_missing_wineserver_does_not_hide_the_timeout(self):
+        import subprocess
+
+        from gitfurl.prefixes import run_in_group
+
+        with self.assertRaises(subprocess.TimeoutExpired):
+            run_in_group([__import__("sys").executable, "-c", "import time; time.sleep(60)"],
+                         {"PATH": "/nonexistent"}, 0.5, "wine", grace_s=2)  # bare name and an empty PATH: no wineserver found
 
 
 class PreflightTests(unittest.TestCase):
