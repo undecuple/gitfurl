@@ -33,6 +33,7 @@ MAX_SCAN_BYTES = 32 * 1024 * 1024  # how far into the installer the Inno ID is l
 CHUNK = 1024 * 1024
 OVERLAP = 256
 MAX_NEIGHBOURS = 16  # large files beside the installer whose first 4 bytes are read
+MAX_ENTRIES = 1000  # directory entries examined at all (a huge folder is not walked in full)
 MIN_NEIGHBOUR_BYTES = 1 << 20
 
 MZ = b"MZ"
@@ -144,38 +145,48 @@ def detect(path: Path) -> Detection:
 
 
 def _neighbours(det: Detection) -> None:
-    """Read only the first 4 bytes of large regular files beside the installer."""
+    """Read only the first 4 bytes of large regular files beside the installer.
+
+    At most MAX_ENTRIES directory entries are examined and at most MAX_NEIGHBOURS files are
+    opened; the listing is never sorted as a whole, so a huge folder costs a bounded amount.
+    """
+    hits, looked, seen, partial = [], 0, 0, False
     try:
-        entries = sorted(os.scandir(det.path.parent), key=lambda e: e.name)
+        it = os.scandir(det.path.parent)
     except OSError:
         return
-    hits, looked, skipped = [], 0, False
-    for e in entries:
-        try:
-            if e.name == det.path.name or not e.is_file(follow_symlinks=False) \
-                    or e.stat(follow_symlinks=False).st_size < MIN_NEIGHBOUR_BYTES:
+    with it:
+        for e in it:
+            seen += 1
+            if seen > MAX_ENTRIES:
+                partial = True
+                break
+            try:
+                if e.name == det.path.name or not e.is_file(follow_symlinks=False) \
+                        or e.stat(follow_symlinks=False).st_size < MIN_NEIGHBOUR_BYTES:
+                    continue
+            except OSError:
                 continue
-        except OSError:
-            continue
-        if looked >= MAX_NEIGHBOURS:
-            skipped = True
-            break
-        looked += 1
-        try:
-            fh, _ = _open_regular(Path(e.path))
-            with fh:
-                if fh.read(4) == FREEARC_SIGNATURE:
-                    hits.append(e.name)
-        except OSError:
-            continue
+            if looked >= MAX_NEIGHBOURS:
+                partial = True
+                break
+            looked += 1
+            try:
+                fh, _ = _open_regular(Path(e.path))
+                with fh:
+                    if fh.read(4) == FREEARC_SIGNATURE:
+                        hits.append(e.name)
+            except OSError:
+                continue
     if hits:
+        hits.sort()
         shown = ", ".join(clean(n, 60) for n in hits[:3]) + (", ..." if len(hits) > 3 else "")
         det.evidence.append(Evidence(
             "FreeArc", CONF_POSSIBLE, f"{len(hits)} large file(s) beside the installer",
             f"start with the 4 bytes 'ArC' 0x01 (signature unverified): {shown}"))
-    if skipped:
-        det.notes.append(f"only the first {MAX_NEIGHBOURS} large files beside the installer "
-                         "were looked at")
+    if partial:
+        det.notes.append("not all files beside the installer were looked at (at most "
+                         f"{MAX_ENTRIES} entries and {MAX_NEIGHBOURS} large files are examined)")
 
 
 def decide(det: Detection) -> Verdict:

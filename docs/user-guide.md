@@ -57,7 +57,7 @@ The dry run and the approval step show a read-only preflight. Everything is advi
 - **Estimate:** the installed size. gitfurl cannot know how much space an install needs, so it says "unknown" and does not multiply the installer's size. It warns only when free space is smaller than the files in the installer's folder (an estimate: the install may not fit) and when under 2 GB of memory is available (an estimate). You can still go ahead.
 
 ### What gitfurl guesses about the installer
-Before you approve a run, the preview shows what the installer looks like from a few bytes of its files: an Inno Setup ID string ("likely"), and the FreeArc signature at the start of the installer or of large files beside it ("possible", unverified). This reads files only: nothing is run, opened as an archive or extracted, and the route stays Wine/Proton. It never looks inside a payload. A guess can be wrong or missing, and it says nothing about whether the installer will work.
+Before you approve a run, the preview shows what the installer looks like from a few bytes of its files: an Inno Setup ID string ("likely"), and the FreeArc signature at the start of the installer or of large files beside it ("possible", unverified). This reads files only: nothing is run, opened as an archive or extracted, and the route stays Wine/Proton. (`doctor` separately runs `innoextract --version` if that program is installed.) It never looks inside a payload. A guess can be wrong or missing, and it says nothing about whether the installer will work.
 
 ### Stopping a run
 While an installer runs, the **Stop** button (and **Ctrl-C** on the command line) stops it. A confirmation explains what happens, with "No" as the default.

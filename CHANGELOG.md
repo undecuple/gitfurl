@@ -10,7 +10,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - The progress line shows how many processes run in the prefix, their CPU use and helper names, with a "quiet" hint; `doctor` reports CPU threads and available memory.
 
 ### Changed
-- Before a run, the plan preview, the approval dialog and `gitfurl cli install --dry-run` show a read-only guess at the installer's format (Inno Setup, FreeArc), from file headers only. Nothing is extracted and the route is always Wine/Proton; `doctor` also notes whether `innoextract` is on PATH.
+- Before a run, the plan preview, the approval dialog and `gitfurl cli install --dry-run` show a read-only guess at the installer's format (Inno Setup, FreeArc), from file headers only. Nothing is extracted and the route is always Wine/Proton; `doctor` also notes whether `innoextract` is on PATH by running its `--version` (a bounded probe, as for `wine`); nothing runs it to extract.
 - The README, the user guide and SECURITY.md state exactly what the progress display reads from `/proc`, including the process environment (only to find the prefix).
 
 ## [1.0.0] - 2026-11-16

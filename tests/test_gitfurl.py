@@ -1904,8 +1904,35 @@ class DetectTests(unittest.TestCase):
             for i in range(6):
                 self.file(f"f{i}.bin", b"zzzzzzzzzz")
             det = d.detect(inst)
-        self.assertTrue(any("first 3 large files" in n for n in det.notes))
+        self.assertTrue(any("not all files" in n for n in det.notes))
         self.assertEqual(d.clean("a\x1b[31mb\nc"), "a?[31mb?c")
+
+    def test_a_huge_folder_is_not_walked_and_only_capped_files_are_opened(self):
+        from gitfurl import detect as d
+
+        inst = self.file("setup.exe", b"MZ")
+        for i in range(30):
+            self.file(f"f{i:02}.bin", b"ArC\x01" + b"x" * 20)
+        opened = []
+        real_open = d._open_regular
+
+        def counting(path):
+            opened.append(path)
+            return real_open(path)
+
+        with mock.patch.object(d, "MIN_NEIGHBOUR_BYTES", 8), mock.patch.object(d, "MAX_ENTRIES", 10), \
+                mock.patch.object(d, "MAX_NEIGHBOURS", 4), mock.patch.object(d, "_open_regular", counting):
+            det = d.detect(inst)
+        self.assertLessEqual(len(opened), 1 + 4)  # the installer itself plus at most 4 neighbours
+        self.assertTrue(any("not all files" in n for n in det.notes))
+
+    def test_listing_is_never_sorted_as_a_whole(self):
+        from gitfurl import detect as d
+
+        inst = self.file("setup.exe", b"MZ")
+        self.file("a.bin", b"zzzz" * 10)
+        with mock.patch("builtins.sorted", side_effect=AssertionError("full sort")):
+            d.detect(inst)
 
     def test_detection_runs_nothing_and_writes_nothing(self):
         from gitfurl import detect as d
