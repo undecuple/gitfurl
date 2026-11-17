@@ -36,9 +36,7 @@ from gitfurl.runner import (
     runtime_env,
     validate_installer,
 )
-
-# vim-tictoc colours (same as the assets and gitfurl.widgets)
-FG, MUTED = "#F8F8F8", "#AEAEAE"
+from gitfurl.theme import FG, MUTED, RADIUS, SIDE, SPACE, TYPE  # noqa: F401
 
 WARNING = (
     "A Wine prefix is not a sandbox: the installer can reach files your user can reach.\n"
@@ -82,6 +80,90 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
     return text.rstrip(), None
 
 
+def installer_problem(installer: str) -> str | None:
+    """Why this installer text cannot be used, or None. Reads nothing but file metadata."""
+    if not installer.strip():
+        return "Choose an installer file."
+    try:
+        validate_installer(installer.strip())
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
+def plan_checklist(installer_error: str | None, prefix_error: str | None, prefix_exists: bool,
+                   will_create: bool, runtime: str, runtime_found: bool,
+                   plan_error: str | None = None) -> list[tuple[str, bool, str]]:
+    """What Run needs, as (key, ok, text) rows in screen order. No side effects.
+
+    Run is allowed only when every row is ok. A row that is not ok says what is missing in
+    words, so the state never depends on colour alone. `plan_error` is a problem the plan
+    itself reports after the other rows pass (for example a missing Proton folder).
+    """
+    tool = "umu-run" if runtime == "proton" else "Wine"
+    rows = [
+        ("installer", installer_error is None,
+         "Installer file chosen" if installer_error is None else installer_error),
+        ("runtime", runtime_found,
+         f"{tool} found" if runtime_found else f"{tool} not found on PATH"),
+    ]
+    if prefix_error is not None:
+        rows.append(("prefix", False, prefix_error))
+    elif prefix_exists:
+        rows.append(("prefix", True, "Prefix exists"))
+    elif will_create:
+        rows.append(("prefix", True, "Prefix does not exist yet and will be created first"))
+    else:
+        rows.append(("prefix", False, ("Prefix does not exist: press Create now, or turn on "
+                                       "'Create the prefix if it does not exist'")))
+    if plan_error is not None and all(ok for _k, ok, _t in rows):
+        rows.append(("plan", False, plan_error))
+    return rows
+
+
+def run_reason(rows: list[tuple[str, bool, str]], busy: bool) -> str:
+    """Text for a disabled Run button, or "" when Run is allowed."""
+    if busy:
+        return "Run is off: something is already running."
+    missing = [text for _k, ok, text in rows if not ok]
+    if not missing:
+        return ""
+    more = f" (and {len(missing) - 1} more, see the checklist)" if len(missing) > 1 else ""
+    return f"Run is off: {missing[0]}{more}"
+
+
+def create_reason(prefix_error: str | None, prefix_exists: bool, busy: bool) -> str:
+    """Text for a disabled Create now button, or "" when it is allowed."""
+    if busy:
+        return "Create is off: something is already running."
+    if prefix_error is not None:
+        return f"Create is off: {prefix_error}"
+    if prefix_exists:
+        return "Create is off: the prefix already exists."
+    return ""
+
+
+def env_summary(wine_ok: bool, umu_ok: bool) -> str:
+    return f"Wine: {'ok' if wine_ok else 'missing'}    umu-run: {'ok' if umu_ok else 'missing'}"
+
+
+def key_hints(page: str) -> str:
+    if page == "library":
+        return "Tab: move    Up/Down: choose a prefix    Enter/Space: open"
+    if page == "details":
+        return "Tab: move    Enter/Space: activate    Esc: back to Library"
+    return "Tab: move    Enter/Space: activate"
+
+
+def run_state_text(kind: str | None, stopping: bool) -> str:
+    """The footer's run state. kind is None, "prefix" or "install"."""
+    if kind is None:
+        return "Idle"
+    if stopping:
+        return "Stopping..."
+    return "Creating prefix" if kind == "prefix" else "Installer running"
+
+
 def run_in_thread(fn, results: queue.Queue) -> None:
     def work():
         try:
@@ -91,6 +173,9 @@ def run_in_thread(fn, results: queue.Queue) -> None:
 
     threading.Thread(target=work, daemon=True).start()
 
+
+WINE_MISSING = ("Wine was not found. Install it with your package manager (for example the "
+                "'wine' package), then press Check again.")
 
 RUNTIME_DOWNLOAD_NOTE = ("\n\nProton runs through umu-run. If its runtime is not already on this "
                          "machine, umu-run downloads it on first use (a network download).")
@@ -105,7 +190,9 @@ def stop_applies(pending: dict, control) -> bool:
     return control is not None and pending.get("control") is control and not control.cancelled
 
 
-def main(start: str = "library", prefix: str | None = None) -> int:
+def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
+    """Open the window. `driver` is for tests: called once as driver(root, ui) when the window
+    is up (ui is a dict of the window's parts) and expected to end by calling root.destroy()."""
     try:
         import tkinter as tk
         from tkinter import filedialog, messagebox, simpledialog
@@ -131,7 +218,7 @@ def main(start: str = "library", prefix: str | None = None) -> int:
     root.title("gitfurl")
     root.configure(bg=w.BG)
     root.minsize(900, 620)
-    root.geometry("1040x740")
+    root.geometry("1080x760")
     try:
         icon = Path(__file__).resolve().parent / "icon.png"
         if icon.is_file():
@@ -141,7 +228,7 @@ def main(start: str = "library", prefix: str | None = None) -> int:
     def F(size=10, bold=False):
         return w.pick_font(root, size, bold)
 
-    SIDE = "#10152a"
+    SP, T = SPACE, TYPE
 
     results: queue.Queue = queue.Queue()
     ui_updates: queue.Queue = queue.Queue()
@@ -156,6 +243,9 @@ def main(start: str = "library", prefix: str | None = None) -> int:
     pending = {"cleanup": None, "control": None, "proton": False}
     proton_var = tk.StringVar(value=os.environ.get("PROTONPATH", ""))
     busy = {"on": False}
+    run = {"kind": None, "stopping": False}  # kind: None, "prefix" or "install"
+    banners: list = []
+    nav_state = {"page": start}
     wine_path = {"value": None, "umu": None}
     extra_names: list[str] = ["default"]
     report_cache = {"text": ""}
@@ -168,7 +258,7 @@ def main(start: str = "library", prefix: str | None = None) -> int:
     def text_box(parent, height):
         return tk.Text(parent, height=height, bg=w.BG, fg=FG, relief="flat", wrap="word",
                        highlightthickness=1, highlightbackground=w.LINE, state="disabled",
-                       font=("monospace", 10), padx=10, pady=8)
+                       font=("monospace", T["body"]), padx=10, pady=SP["sm"])
 
     def set_text(box, value):
         box.configure(state="normal")
@@ -179,35 +269,67 @@ def main(start: str = "library", prefix: str | None = None) -> int:
     def entry(parent, var):
         return tk.Entry(parent, textvariable=var, bg=w.BG, fg=FG, insertbackground=FG, relief="flat",
                         highlightthickness=1, highlightbackground=w.LINE, highlightcolor=w.ORANGE,
-                        font=F(10))
+                        font=F(T["body"]))
 
     def heading(parent, text):
-        label(parent, text.upper(), 9, True, w.MUTED).pack(anchor="w", pady=(14, 6), padx=4)
+        label(parent, text.upper(), T["caption"], True, w.MUTED
+              ).pack(anchor="w", pady=(SP["lg"], SP["sm"] - 2), padx=SP["xs"])
 
     def row(card, title, subtitle=None, widget=None, first=False):
         """One row of a boxed list: title and subtitle left, a control right."""
         if not first:
-            tk.Frame(card.body, bg=w.LINE, height=1).pack(fill="x", pady=6)
+            tk.Frame(card.body, bg=w.LINE, height=1).pack(fill="x", pady=SP["sm"] - 2)
         r = tk.Frame(card.body, bg=w.PANEL)
         r.pack(fill="x")
         if widget:  # packed first so a narrow window clips the text, never the control
-            widget(r).pack(side="right", padx=(12, 0))
+            widget(r).pack(side="right", padx=(SP["md"], 0))
         left = tk.Frame(r, bg=w.PANEL)
         left.pack(side="left", fill="x", expand=True)
-        label(left, title, 10, False, FG, w.PANEL).pack(anchor="w")
+        label(left, title, T["body"], False, FG, w.PANEL).pack(anchor="w")
         if subtitle:
-            label(left, subtitle, 9, False, w.MUTED, w.PANEL, wraplength=440, justify="left"
-                  ).pack(anchor="w")
+            sub = label(left, subtitle, T["caption"], False, w.MUTED, w.PANEL, justify="left")
+            sub.pack(anchor="w")
+            autowrap(sub, left, minimum=160)
         return r
+
+    # ---- footer: environment, key hints and run state, like the launcher's bottom bar ----
+    footer = tk.Frame(root, bg=SIDE)
+    footer.pack(side="bottom", fill="x")  # packed first so it always keeps its row
+    tk.Frame(footer, bg=w.LINE, height=1).pack(fill="x")
+    foot = tk.Frame(footer, bg=SIDE)
+    foot.pack(fill="x", padx=SP["lg"], pady=SP["sm"])
+    foot_env = label(foot, "", T["caption"], True, w.MUTED, SIDE)
+    foot_env.pack(side="left")
+    foot_state = label(foot, "", T["caption"], True, w.MUTED, SIDE)
+    foot_state.pack(side="right")
+    foot_hints = label(foot, "", T["caption"], False, w.MUTED, SIDE)
+    foot_hints.pack(side="left", expand=True)
+
+    def refresh_footer():
+        found = bool(wine_path["value"])
+        foot_env.configure(text=env_summary(found, bool(wine_path["umu"])),
+                           fg=w.CYAN if found else w.RED)
+        foot_hints.configure(text=key_hints(nav_state["page"]))
+        colour = w.AMBER if run["stopping"] else (w.CYAN if run["kind"] else w.MUTED)
+        foot_state.configure(text=run_state_text(run["kind"], run["stopping"]), fg=colour)
+
+    def autowrap(lbl, parent, margin=0, minimum=200):
+        """Re-wrap a label to the width of `parent`, so text follows the window size."""
+        def fit(_e=None):
+            width = parent.winfo_width() - margin
+            if width > 1:
+                lbl.configure(wraplength=max(minimum, width))
+        parent.bind("<Configure>", fit, add="+")
 
     # ---- sidebar: pages, like rc's navigation split view ----
     side = tk.Frame(root, bg=SIDE, width=230)
     side.pack(side="left", fill="y")
     side.pack_propagate(False)
     w.Wordmark(side, cell=5, outer=SIDE).pack(anchor="w", padx=18, pady=(20, 2))
-    label(side, f"v{__version__}  first release", 9, False, w.MUTED, SIDE).pack(anchor="w", padx=20)
+    label(side, f"v{__version__}  first release", T["caption"], False, w.MUTED, SIDE
+          ).pack(anchor="w", padx=20)
     nav = tk.Frame(side, bg=SIDE)
-    nav.pack(fill="x", pady=(22, 0), padx=10)
+    nav.pack(fill="x", pady=(SP["xl"], 0), padx=10)
 
     def nav_item(key, text):
         c = tk.Canvas(nav, height=38, bg=SIDE, highlightthickness=0, bd=0, cursor="hand2")
@@ -222,10 +344,11 @@ def main(start: str = "library", prefix: str | None = None) -> int:
             width = c.winfo_width()
             on = nav_state["page"] == key or (key == "library" and nav_state["page"] == "details")
             if on:
-                w.rounded(c, 0, 0, width, 38, 8, fill=w.LINE, outline=w.LINE)
+                w.rounded(c, 0, 0, width, 38, RADIUS, fill=w.LINE, outline=w.LINE)
             c.create_rectangle(14, 15, 22, 23, fill=w.ORANGE if on else w.LINE, outline="")
-            c.create_text(36, 19, text=text, anchor="w", fill=FG if on else w.MUTED, font=F(10, on))
-            w.focus_ring(c, width, 38, 8)
+            c.create_text(36, 19, text=text, anchor="w", fill=FG if on else w.MUTED,
+                          font=F(T["body"], on))
+            w.focus_ring(c, width, 38, RADIUS)
 
         c.bind("<Configure>", draw)
         c.bind("<Button-1>", lambda _e: go())
@@ -233,23 +356,21 @@ def main(start: str = "library", prefix: str | None = None) -> int:
         c.redraw = draw
         nav_items[key] = c
 
-    nav_state = {"page": start}
     nav_item("library", "Library")
     nav_item("settings", "Settings")
-    env_umu = label(side, "", 9, False, w.MUTED, SIDE, justify="left", anchor="w")
-    env_umu.pack(side="bottom", fill="x", padx=20, pady=(0, 16))
-    env_wine = label(side, "", 9, False, w.MUTED, SIDE, justify="left", anchor="w")
-    env_wine.pack(side="bottom", fill="x", padx=20)
 
     content = tk.Frame(root, bg=w.BG)
     content.pack(side="left", fill="both", expand=True)
 
     canvases: dict[str, tk.Canvas] = {}
+    inners: dict[str, tk.Frame] = {}
 
     def wheel(direction):
         def handler(e):
-            if e.widget.winfo_toplevel() is not root or isinstance(e.widget, tk.Text):
+            if not isinstance(e.widget, tk.Misc) or e.widget.winfo_toplevel() is not root:
                 return
+            if isinstance(e.widget, tk.Text) and e.widget.yview() != (0.0, 1.0):
+                return  # a text box with its own scroll keeps the wheel
             cv = canvases.get(nav_state["page"])
             if cv is not None:
                 cv.yview_scroll(direction * 3, "units")
@@ -259,17 +380,39 @@ def main(start: str = "library", prefix: str | None = None) -> int:
     root.bind_all("<Button-5>", wheel(1))
     root.bind_all("<MouseWheel>", lambda e: wheel(-1 if e.delta > 0 else 1)(e))
 
+    def reveal(e):
+        """Keyboard focus moved: scroll the page so the focused widget is on screen."""
+        page = nav_state["page"]
+        cv, inner = canvases.get(page), inners.get(page)
+        wd = e.widget
+        if cv is None or not isinstance(wd, tk.Misc) or not str(wd).startswith(str(cv) + "."):
+            return
+        margin = SP["lg"]
+        top = wd.winfo_rooty() - inner.winfo_rooty()
+        bottom = top + wd.winfo_height()
+        view_top, view_h = cv.canvasy(0), cv.winfo_height()
+        total = max(1, inner.winfo_height())
+        if top < view_top + margin:
+            cv.yview_moveto(max(0, top - margin) / total)
+        elif bottom > view_top + view_h - margin:
+            cv.yview_moveto((bottom + margin - view_h) / total)
+
+    root.bind_all("<FocusIn>", reveal, add="+")
+
     def scroll_page(name):
+        """A scrolling page. Row 1 of the page's frame is free for a fixed bar."""
         outer = tk.Frame(content, bg=w.BG)
+        outer.grid_rowconfigure(0, weight=1)
+        outer.grid_columnconfigure(0, weight=1)
         cv = tk.Canvas(outer, bg=w.BG, highlightthickness=0, bd=0)
-        cv.pack(fill="both", expand=True)
+        cv.grid(row=0, column=0, sticky="nsew")
         inner = tk.Frame(cv, bg=w.BG)
         win = cv.create_window(0, 0, window=inner, anchor="nw")
         cv.bind("<Configure>", lambda e: cv.itemconfigure(win, width=e.width))
         inner.bind("<Configure>", lambda _e: cv.configure(scrollregion=cv.bbox("all")))
-        canvases[name] = cv
+        canvases[name], inners[name] = cv, inner
         pad = tk.Frame(inner, bg=w.BG)
-        pad.pack(fill="both", expand=True, padx=28, pady=22)
+        pad.pack(fill="both", expand=True, padx=SP["xl"], pady=SP["xl"])
         pages[name] = outer
         return pad
 
@@ -284,21 +427,45 @@ def main(start: str = "library", prefix: str | None = None) -> int:
             refresh_list()
         elif name == "details":
             refresh_plan()
+        refresh_footer()
+
+    def go_back(_e=None):
+        if nav_state["page"] == "details":
+            show("library")
+
+    root.bind("<Escape>", go_back)
+
+    # ---- a banner for a missing tool: amber card, message, Check again ----
+    def make_banner(parent, pady):
+        slot = tk.Frame(parent, bg=w.BG, height=1)
+        slot.pack(fill="x")
+        card = w.RoundCard(slot, outline=w.AMBER, pad=SP["md"])
+        card.pady = pady
+        msg = tk.Label(card.body, text=WINE_MISSING, bg=w.PANEL, fg=w.AMBER, font=F(T["body"]),
+                       justify="left", anchor="w")
+        btn = w.PillButton(card.body, "Check again", lambda: refresh_env(), "plain",
+                           F(T["caption"]), outer=w.PANEL, pad=(SP["md"], 6))
+        btn.pack(side="right", padx=(SP["md"], 0))
+        msg.pack(side="left", fill="x", expand=True)
+        autowrap(msg, card.body, margin=130)
+        banners.append((slot, card))
 
     # ---- Library page ----
     lib = scroll_page("library")
     top = tk.Frame(lib, bg=w.BG)
     top.pack(fill="x")
-    label(top, "Library", 22, True).pack(side="left")
-    new_btn = w.PillButton(top, "+  New prefix", lambda: new_prefix(), "accent", F(10, True))
+    label(top, "Library", T["title"], True).pack(side="left")
+    new_btn = w.PillButton(top, "+  New prefix", lambda: new_prefix(), "accent", F(T["body"], True))
     new_btn.pack(side="right")
-    label(lib, "Each prefix is a separate, dedicated Wine environment. Your own ~/.wine is never used.",
-          10, False, w.MUTED).pack(anchor="w", pady=(2, 8))
-    wine_note = label(lib, "", 10, False, w.AMBER, wraplength=640, justify="left")
-    wine_note.pack(anchor="w", pady=(0, 8))
+    lib_note = label(lib, "Each prefix is a separate, dedicated Wine environment. Your own ~/.wine "
+                     "is never used.", T["body"], False, w.MUTED, justify="left")
+    lib_note.pack(anchor="w", pady=(2, SP["sm"]))
+    autowrap(lib_note, lib)
+    make_banner(lib, (0, SP["sm"]))
     list_area = tk.Frame(lib, bg=w.BG)
     list_area.pack(fill="x")
     names: list[str] = []
+    cards: list = []
 
     def open_prefix(name):
         if busy["on"]:
@@ -306,27 +473,39 @@ def main(start: str = "library", prefix: str | None = None) -> int:
         prefix_var.set(name)
         show("details")
 
+    def move_card(delta):
+        if nav_state["page"] != "library" or not cards:
+            return
+        cur = root.focus_get()
+        idx = cards.index(cur) + delta if cur in cards else 0
+        cards[max(0, min(len(cards) - 1, idx))].focus_set()
+
+    root.bind("<Down>", lambda _e: move_card(1))
+    root.bind("<Up>", lambda _e: move_card(-1))
+
     def refresh_list(_select=None):
         for child in list_area.winfo_children():
             child.destroy()
+        cards.clear()
         existing = list_prefixes()
         names[:] = sorted(set(existing) | set(extra_names))
         for i, n in enumerate(names):
-            c = w.RoundCard(list_area, pad=12)
-            c.pack(fill="x", pady=5)
+            c = w.RoundCard(list_area, pad=SP["md"], activate=lambda n=n: open_prefix(n))
+            c.pack(fill="x", pady=SP["xs"] + 1)
+            cards.append(c)
             r = tk.Frame(c.body, bg=w.PANEL)
             r.pack(fill="x")
             w.Tile(r, n[:1] or "g", w.ACCENTS[i % 4]).pack(side="left")
             ready = n in existing
-            label(r, "ready" if ready else "not created yet", 9, True,
+            label(r, "ready" if ready else "not created yet", T["caption"], True,
                   w.CYAN if ready else w.AMBER, w.PANEL).pack(side="right", padx=6)
             mid = tk.Frame(r, bg=w.PANEL)
-            mid.pack(side="left", padx=14, fill="x", expand=True)
-            label(mid, n, 12, True, FG, w.PANEL).pack(anchor="w")
-            label(mid, short_path(prefixes_root() / n), 9, False, w.MUTED, w.PANEL,
+            mid.pack(side="left", padx=SP["md"], fill="x", expand=True)
+            label(mid, n, T["lead"], True, FG, w.PANEL).pack(anchor="w")
+            label(mid, short_path(prefixes_root() / n), T["caption"], False, w.MUTED, w.PANEL,
                   wraplength=400, justify="left").pack(anchor="w")
             for widget in [c, c.body, r, mid, *mid.winfo_children(), *r.winfo_children()]:
-                widget.bind("<Button-1>", lambda _e, n=n: open_prefix(n))
+                widget.bind("<Button-1>", lambda _e, n=n: open_prefix(n), add="+")
                 widget.configure(cursor="hand2")
         refresh_plan()
 
@@ -334,25 +513,44 @@ def main(start: str = "library", prefix: str | None = None) -> int:
     det = scroll_page("details")
     dtop = tk.Frame(det, bg=w.BG)
     dtop.pack(fill="x")
-    w.PillButton(dtop, "<  Library", lambda: show("library"), "ghost", F(10)).pack(anchor="w")
+    w.PillButton(dtop, "<  Library", lambda: show("library"), "ghost", F(T["body"])).pack(anchor="w")
     dhead = tk.Frame(det, bg=w.BG)
-    dhead.pack(fill="x", pady=(8, 0))
+    dhead.pack(fill="x", pady=(SP["sm"], 0))
     title_var, sub_var = tk.StringVar(), tk.StringVar()
-    run_btn = w.PillButton(dhead, "Run installer", lambda: run_clicked(), "accent", F(11, True),
-                           pad=(22, 10))
-    run_btn.pack(side="right")
-    create_btn = w.PillButton(dhead, "Create now", lambda: create_clicked(), "plain", F(10))
-    create_btn.pack(side="right", padx=10)
-    stop_btn = w.PillButton(dhead, "Stop", lambda: stop_clicked(), "plain", F(10))  # shown during a run
-    tk.Label(dhead, textvariable=title_var, bg=w.BG, fg=FG, font=F(22, True)).pack(side="left", anchor="n")
-    tk.Label(det, textvariable=sub_var, bg=w.BG, fg=w.MUTED, font=F(9), wraplength=640,
-             justify="left").pack(anchor="w")
-    hint_var = tk.StringVar()
-    tk.Label(det, textvariable=hint_var, bg=w.BG, fg=w.AMBER, font=F(10), justify="left",
-             wraplength=640).pack(anchor="w", pady=(4, 0))
-    status_label = tk.Label(det, textvariable=status_var, bg=w.BG, fg=w.CYAN, font=F(10),
-                            justify="left", wraplength=640)
-    status_label.pack(anchor="w", pady=(4, 0))
+    tk.Label(dhead, textvariable=title_var, bg=w.BG, fg=FG, font=F(T["title"], True)
+             ).pack(side="left", anchor="n")
+    sub_label = tk.Label(det, textvariable=sub_var, bg=w.BG, fg=w.MUTED, font=F(T["caption"]),
+                         justify="left")
+    sub_label.pack(anchor="w")
+    autowrap(sub_label, det)
+    make_banner(det, (SP["md"], 0))
+
+    heading(det, "Checklist")
+    c = w.RoundCard(det)
+    c.pack(fill="x")
+    check_rows: dict[str, tuple[tk.Frame, tk.Label, tk.Label]] = {}
+    for key in ("installer", "runtime", "prefix", "plan"):
+        rr = tk.Frame(c.body, bg=w.PANEL)
+        mark = tk.Label(rr, text="", bg=w.PANEL, fg=FG, font=F(T["body"], True), width=2)
+        mark.pack(side="left", anchor="n")
+        msg = tk.Label(rr, text="", bg=w.PANEL, fg=FG, font=F(T["body"]), justify="left",
+                       anchor="w")
+        msg.pack(side="left", fill="x", expand=True)
+        autowrap(msg, rr, margin=30)
+        check_rows[key] = (rr, mark, msg)
+    status_slot = tk.Frame(det, bg=w.BG)
+    status_slot.pack(fill="x")
+    status_label = tk.Label(status_slot, textvariable=status_var, bg=w.BG, fg=w.CYAN,
+                            font=F(T["body"]), justify="left")
+    autowrap(status_label, status_slot)
+
+    def show_status(*_):  # no empty gap while there is nothing to say
+        if status_var.get():
+            status_label.pack(anchor="w", pady=(SP["sm"], 0))
+        else:
+            status_label.pack_forget()
+
+    status_var.trace_add("write", show_status)
 
     heading(det, "Installer")
     c = w.RoundCard(det)
@@ -367,7 +565,8 @@ def main(start: str = "library", prefix: str | None = None) -> int:
             installer_var.set(path)
 
     entry(ir, installer_var).pack(side="left", fill="x", expand=True, ipady=6)
-    w.PillButton(ir, "Browse...", browse, "plain", F(10), outer=w.PANEL).pack(side="left", padx=(10, 0))
+    w.PillButton(ir, "Browse...", browse, "plain", F(T["body"]), outer=w.PANEL
+                 ).pack(side="left", padx=(10, 0))
 
     def segmented_for(var, choices, after=None):
         def build(parent):
@@ -387,8 +586,8 @@ def main(start: str = "library", prefix: str | None = None) -> int:
                     after()
 
             for key in choices:
-                b = w.PillButton(f, key, lambda k=key: pick(k), "plain", F(9), outer=w.PANEL,
-                                 pad=(10, 5))
+                b = w.PillButton(f, key, lambda k=key: pick(k), "plain", F(T["caption"]),
+                                 outer=w.PANEL, pad=(10, 5))
                 b.pack(side="left", padx=2)
                 buttons[key] = b
             paint()
@@ -418,7 +617,7 @@ def main(start: str = "library", prefix: str | None = None) -> int:
         entry(f, proton_var).pack(side="left", ipady=4)
         w.PillButton(f, "Folder...", lambda: proton_var.set(
             filedialog.askdirectory(title="Choose the Proton folder") or proton_var.get()),
-            "plain", F(9), outer=w.PANEL, pad=(10, 5)).pack(side="left", padx=(8, 0))
+            "plain", F(T["caption"]), outer=w.PANEL, pad=(10, 5)).pack(side="left", padx=(8, 0))
         return f
 
     row(c, "Proton folder", "Only used with the proton runtime. Defaults to PROTONPATH.", proton_row)
@@ -438,21 +637,48 @@ def main(start: str = "library", prefix: str | None = None) -> int:
     c.pack(fill="x")
     bar = w.Bar(c.body)
     bar.pack(fill="x")
-    tk.Label(c.body, textvariable=progress_var, bg=w.PANEL, fg=w.MUTED, font=F(9), justify="left",
-             anchor="w", wraplength=640).pack(fill="x", pady=(8, 0))
-    tk.Label(det, text=WARNING, bg=w.BG, fg=w.YELLOW, font=F(9), justify="left"
-             ).pack(anchor="w", pady=(14, 0))
+    progress_label = tk.Label(c.body, textvariable=progress_var, bg=w.PANEL, fg=w.MUTED,
+                              font=F(T["caption"]), justify="left", anchor="w")
+    progress_label.pack(fill="x", pady=(SP["sm"], 0))
+    autowrap(progress_label, c.body)
+    warn_label = tk.Label(det, text=WARNING, bg=w.BG, fg=w.YELLOW, font=F(T["caption"]),
+                          justify="left")
+    warn_label.pack(anchor="w", pady=(SP["lg"], 0))
+    autowrap(warn_label, det)
+
+    # The action bar stays on screen whatever the scroll position. It is built last so that
+    # Tab reaches it after the options, which is also where it is on screen.
+    action = tk.Frame(pages["details"], bg=SIDE)
+    action.grid(row=1, column=0, sticky="ew")
+    tk.Frame(action, bg=w.LINE, height=1).pack(fill="x")
+    action_in = tk.Frame(action, bg=SIDE)
+    action_in.pack(fill="x", padx=SP["xl"], pady=SP["md"])
+    buttons_box = tk.Frame(action_in, bg=SIDE)
+    buttons_box.pack(side="right")
+    reason_var = tk.StringVar()
+    reason_label = tk.Label(action_in, textvariable=reason_var, bg=SIDE, fg=w.AMBER,
+                            font=F(T["body"]), justify="left", anchor="w")
+    reason_label.pack(side="left", fill="x", expand=True, padx=(0, SP["md"]))
+    autowrap(reason_label, action_in, margin=330)
+    stop_btn = w.PillButton(buttons_box, "Stop", lambda: stop_clicked(), "plain", F(T["body"]),
+                            outer=SIDE)  # packed only during a run
+    create_btn = w.PillButton(buttons_box, "Create now", lambda: create_clicked(), "plain",
+                              F(T["body"]), outer=SIDE)
+    create_btn.pack(side="left", padx=(0, SP["md"]))
+    run_btn = w.PillButton(buttons_box, "Run installer", lambda: run_clicked(), "accent",
+                           F(T["lead"], True), outer=SIDE, pad=(22, 10))
+    run_btn.pack(side="left")
 
     # ---- Settings page ----
     st = scroll_page("settings")
-    label(st, "Settings", 22, True).pack(anchor="w")
+    label(st, "Settings", T["title"], True).pack(anchor="w")
     heading(st, "Environment")
     env_card = w.RoundCard(st)
     env_card.pack(fill="x")
     env_rows = tk.Frame(env_card.body, bg=w.PANEL)
     env_rows.pack(fill="x")
-    w.PillButton(env_card.body, "Check again", lambda: refresh_env(), "plain", F(9), outer=w.PANEL,
-                 pad=(12, 6)).pack(anchor="w", pady=(8, 0))
+    w.PillButton(env_card.body, "Check again", lambda: refresh_env(), "plain", F(T["caption"]),
+                 outer=w.PANEL, pad=(SP["md"], 6)).pack(anchor="w", pady=(SP["sm"], 0))
     heading(st, "About")
     c = w.RoundCard(st)
     c.pack(fill="x")
@@ -474,29 +700,53 @@ def main(start: str = "library", prefix: str | None = None) -> int:
         title_var.set(name or "No prefix")
         try:
             path = prefixes_root() / validate_prefix_name(name)
-            exists = path.is_dir()
+            exists, prefix_error = path.is_dir(), None
             sub_var.set(f"{short_path(path)}   {'ready' if exists else 'not created yet'}")
-        except ValueError:
-            exists = False
+        except ValueError as exc:
+            exists, prefix_error = False, ("Choose or create a prefix." if not name.strip()
+                                           else str(exc))
             sub_var.set("invalid name")
-        text, err = describe_plan(installer_var.get(), name, runtime_var.get(), proton_dir())
+        runtime = runtime_var.get()
+        text, err = describe_plan(installer_var.get(), name, runtime, proton_dir())
         set_text(plan_box, text or (err or ""))
-        hint_var.set("" if not err or busy["on"] else f"Run is off: {err}")
-        ok = not err and not busy["on"]
-        run_btn.state(["!disabled"] if ok else ["disabled"])
-        create_btn.state(["!disabled"] if (not exists and not busy["on"]) else ["disabled"])
+        tool = wine_path["umu"] if runtime == "proton" else wine_path["value"]
+        rows = plan_checklist(installer_problem(installer_var.get()), prefix_error, exists,
+                              create_var.get(), runtime, bool(tool), err)
+        for key, (frame, mark, msg) in check_rows.items():
+            hit = next((r for r in rows if r[0] == key), None)
+            if hit is None:
+                frame.pack_forget()
+                continue
+            _k, ok, line = hit
+            mark.configure(text="\u2713" if ok else "\u2717", fg=w.CYAN if ok else w.RED)
+            msg.configure(text=line, fg=FG if ok else w.RED)
+            if not frame.winfo_manager():
+                frame.pack(fill="x", pady=2)
+        reason = run_reason(rows, busy["on"])
+        c_reason = create_reason(prefix_error, exists, busy["on"])
+        if busy["on"]:
+            reason_var.set(run_state_text(run["kind"], run["stopping"]) + ".")
+        else:
+            reason_var.set("\n".join(r for r in (reason, c_reason) if r))
+        run_btn.state(["disabled"] if reason else ["!disabled"])
+        create_btn.state(["disabled"] if c_reason else ["!disabled"])
 
-    def start_busy(message):
+    def start_busy(message, kind):
         busy["on"] = True
+        run["kind"], run["stopping"] = kind, False
         status_var.set(message)
         create_btn.state(["disabled"])
         run_btn.state(["disabled"])
         new_btn.state(["disabled"])
+        refresh_plan()
+        refresh_footer()
 
     def end_busy():
         busy["on"] = False
+        run["kind"], run["stopping"] = None, False
         new_btn.state(["!disabled"])
         refresh_plan()
+        refresh_footer()
 
     def new_prefix():
         name = simpledialog.askstring("New prefix", "Name for the new prefix:", parent=root)
@@ -510,38 +760,35 @@ def main(start: str = "library", prefix: str | None = None) -> int:
         extra_names.append(name.strip())
         open_prefix(name.strip())
 
+    def set_banners(wine_missing: bool):
+        for slot, card in banners:
+            if wine_missing:
+                card.pack(fill="x", pady=card.pady)
+            else:
+                card.pack_forget()
+                slot.configure(height=1)  # an emptied frame would otherwise keep its old size
+
     def refresh_env():
         report = run_doctor()
         wine_path["value"] = shutil.which("wine")
         wine_path["umu"] = shutil.which("umu-run")
         wr, br = report["wine"], report["bwrap"]
-        env_wine.configure(text=wr.version or "wine missing",
-                           fg=w.CYAN if not wr.problem else w.RED)
-        ur = report["umu"]
-        if not ur.problem:
-            umu_text = "umu-run ok"
-        elif "not found" in ur.problem:
-            umu_text = "umu-run not installed"
-        else:
-            umu_text = f"umu-run: {ur.problem}"
-        env_umu.configure(text=umu_text, fg=w.CYAN if not ur.problem else w.MUTED)
-        wine_note.configure(
-            text="" if not wr.problem else
-            "Wine was not found. Install it with your package manager (for example the "
-            "'wine' package), then press Check again in Settings.")
+        set_banners(bool(wr.problem))
         for child in env_rows.winfo_children():
             child.destroy()
         for _i, (n, t) in enumerate((("Wine", wr), ("Bubblewrap", br), ("umu-run (optional)", report["umu"]))):
             r = tk.Frame(env_rows, bg=w.PANEL)
             r.pack(fill="x", pady=3)
-            label(r, n, 10, False, FG, w.PANEL).pack(side="left")
-            label(r, t.version if not t.problem else f"unavailable ({t.problem})", 10, False,
-                  w.CYAN if not t.problem else w.RED, w.PANEL).pack(side="right")
+            label(r, n, T["body"], False, FG, w.PANEL).pack(side="left")
+            label(r, t.version if not t.problem else f"unavailable ({t.problem})", T["body"],
+                  False, w.CYAN if not t.problem else w.RED, w.PANEL).pack(side="right")
         r = tk.Frame(env_rows, bg=w.PANEL)
         r.pack(fill="x", pady=3)
-        label(r, "Platform", 10, False, FG, w.PANEL).pack(side="left")
-        label(r, report["platform"], 10, False, w.MUTED, w.PANEL).pack(side="right")
+        label(r, "Platform", T["body"], False, FG, w.PANEL).pack(side="left")
+        label(r, report["platform"], T["body"], False, w.MUTED, w.PANEL).pack(side="right")
         report_cache["text"] = describe_environment(report)
+        refresh_plan()
+        refresh_footer()
 
     def create_clicked():
         name = selected_prefix()
@@ -571,7 +818,7 @@ def main(start: str = "library", prefix: str | None = None) -> int:
             default="no",
         ):
             return
-        start_busy("Creating prefix (this can take a minute)...")
+        start_busy("Creating prefix (this can take a minute)...", "prefix")
         run_in_thread(lambda: create_prefix(name, tool, extra_env=extra_env), results)
         poll("prefix")
 
@@ -619,7 +866,8 @@ def main(start: str = "library", prefix: str | None = None) -> int:
         pending["cleanup"] = clean
         cleanup_var.set("none")  # one run at a time; choose again for the next
         start_busy("Preparing the prefix, then running the installer. Close its window when done."
-                   if missing else "Installer running. Close its window when it is done.")
+                   if missing else "Installer running. Close its window when it is done.",
+                   "install")
         create, track = create_var.get(), changes_var.get() or find_var.get()
         ctx = {"prefix": selected_prefix_path(), "changes": changes_var.get(), "find": find_var.get()}
         bar.set(0)
@@ -629,7 +877,7 @@ def main(start: str = "library", prefix: str | None = None) -> int:
         options = RunOptions(on_progress=ui_updates.put, progress_interval=3.0,
                              detailed_log=detail_var.get(), control=control)
         stop_btn.state(["!disabled"])  # a Stop from an earlier run must not leave it disabled
-        stop_btn.pack(side="right", padx=10)
+        stop_btn.pack(side="left", padx=(0, SP["md"]), before=create_btn)
         run_in_thread(lambda: run_tracked(plan, tool, create, track,
                                           options=options), results)
         poll("install", ctx)
@@ -654,7 +902,10 @@ def main(start: str = "library", prefix: str | None = None) -> int:
         if not stop_applies(pending, control):  # the run ended while the dialog was open
             return
         stop_btn.state(["disabled"])
+        run["stopping"] = True
         status_var.set("Stopping the installer...")
+        refresh_plan()
+        refresh_footer()
         threading.Thread(target=control.request_stop, daemon=True).start()
 
     def show_report(title, body):
@@ -747,8 +998,61 @@ def main(start: str = "library", prefix: str | None = None) -> int:
     root.protocol("WM_DELETE_WINDOW", on_close)
     root.report_callback_exception = on_exception
     installer_var.trace_add("write", refresh_plan)
+    create_var.trace_add("write", refresh_plan)
     proton_var.trace_add("write", refresh_plan)
     refresh_env()
     show(start)
+    failed = {"on": False}
+    if driver is not None:
+        def drive():
+            import traceback
+
+            try:
+                ui = {
+                    "root": root,
+                    "show": show,
+                    "pages": pages,
+                    "nav_items": nav_items,
+                    "nav_state": nav_state,
+                    "cards": cards,
+                    "canvases": canvases,
+                    "inners": inners,
+                    "run_btn": run_btn,
+                    "create_btn": create_btn,
+                    "stop_btn": stop_btn,
+                    "foot_env": foot_env,
+                    "foot_hints": foot_hints,
+                    "foot_state": foot_state,
+                    "reason_var": reason_var,
+                    "check_rows": check_rows,
+                    "banners": banners,
+                    "wine_path": wine_path,
+                    "refresh_plan": refresh_plan,
+                    "refresh_footer": refresh_footer,
+                    "action": action,
+                    "installer_var": installer_var,
+                    "create_var": create_var,
+                    "run": run,
+                    "busy": busy,
+                    "plan_box": plan_box,
+                    "new_btn": new_btn,
+                    "prefix_var": prefix_var,
+                    "set_banners": set_banners,
+                }
+                driver(root, ui)
+            except BaseException:  # noqa: BLE001 - reported on stderr, the exit status says it
+                traceback.print_exc()
+                failed["on"] = True
+                root.destroy()
+
+        def driver_error(*exc):
+            import traceback
+
+            traceback.print_exception(*exc)
+            failed["on"] = True
+            root.destroy()
+
+        root.report_callback_exception = driver_error
+        root.after(50, drive)
     root.mainloop()
-    return 0
+    return 1 if failed["on"] else 0
