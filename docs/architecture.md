@@ -18,3 +18,4 @@ A dry run never falls through to real execution.
 - `runner.py` `RunControl`: stops the run gitfurl started, through its own process group, under a lock; nothing is signalled after the run has ended.
 - `progress.py`: progress from `/proc` (how far processes have read into the payload files) and the prefix size.
 - `widgets.py`, `pixelfont.py`: the app's rounded widgets and block letters.
+- `theme.py`: colours, spacing, type sizes, the corner radius and the contrast calculation (no tkinter, so it is tested without a display).
