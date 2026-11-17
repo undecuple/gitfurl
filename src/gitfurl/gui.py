@@ -95,16 +95,25 @@ def main(start: str = "library", prefix: str | None = None) -> int:
     try:
         import tkinter as tk
         from tkinter import filedialog, messagebox, simpledialog
-    except ImportError:
+    except ImportError as exc:
         print(
-            "The graphical interface needs tkinter, which is not installed.\n"
+            f"The graphical interface could not load tkinter ({exc}).\n"
             "Install your distribution's tkinter package (python3-tk), or use the "
             "command line: gitfurl cli --help"
         )
         return 1
     from gitfurl import widgets as w
 
-    root = tk.Tk()
+    try:
+        root = tk.Tk()
+        w.pick_font(root)  # also fails early when no usable font is installed
+    except tk.TclError as exc:
+        print(
+            f"The graphical interface could not open a window ({exc}).\n"
+            "It needs a running graphical session (a DISPLAY) and at least one installed font. "
+            "You can still use the command line: gitfurl cli --help"
+        )
+        return 1
     root.title("gitfurl")
     root.configure(bg=w.BG)
     root.minsize(900, 620)

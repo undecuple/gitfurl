@@ -810,3 +810,20 @@ class ReviewFixTests(unittest.TestCase):
             proc = subprocess.run(["xvfb-run", "-a", "timeout", "5", sys.executable, "-m", "gitfurl"],
                                   env=env, capture_output=True, text=True, check=False, timeout=60)
         self.assertEqual(proc.returncode, 124, proc.stderr[-500:])  # still open when timeout stopped it
+
+
+class StartupFailureTests(unittest.TestCase):
+    def test_no_display_gives_a_message_not_a_traceback(self):
+        import sys
+
+        try:
+            import tkinter  # noqa: F401
+        except ImportError:
+            self.skipTest("tkinter not installed")
+        env = {k: v for k, v in __import__("os").environ.items() if k != "DISPLAY"}
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parent.parent / "src")
+        proc = subprocess.run([sys.executable, "-m", "gitfurl"], env=env, capture_output=True,
+                              text=True, check=False, timeout=60)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("could not open a window", proc.stdout)
+        self.assertNotIn("Traceback", proc.stderr)
