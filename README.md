@@ -45,6 +45,21 @@ Running a Windows installer under Wine by hand works, until it does not. These a
 - Gitfurl is for the installer step. It is **not** a game launcher or a library manager, and it does not claim to run any particular installer. Tools built for managing prefixes or launching games cover more than this does.
 - Wine prefixes are not sandboxes. Gitfurl makes the run visible and tidy; it does not make an untrusted installer safe.
 
+## Screenshots
+These were made with gitfurl 1.2.0 under a virtual display, in a demo home folder (`/home/demo`) with empty example prefixes. No real installer and no real Wine were run: a small stand-in script took Wine's place.
+
+![A prefix's page with an installer chosen: the checklist, the installer field and the options, with the memory limit on](docs/screenshot-plan.png)
+
+*Before a run: the checklist, the chosen installer and the options. Nothing runs until you approve the plan.*
+
+![A run in progress: the progress bar at 58 percent, with payload read, rate, estimate, data written and the process count](docs/screenshot-run.png)
+
+*During a run. The numbers are real readings from `/proc`, but of the stand-in, which slowly read 0.21 GB of example files (sparse files of zeros) and wrote the same amount into the prefix. That is why the process shown is `python3.14`.*
+
+![The Settings page: Wine, bubblewrap, umu-run and platform, and the About card](docs/screenshot-settings.png)
+
+*Settings, made on the maintainer's machine: the bubblewrap version and the platform line are real, the Wine version is the stand-in's.*
+
 ## Getting started
 
 The [latest release](https://github.com/undecuple/gitfurl/releases/latest) has a single-file Linux program and a `SHA256SUMS` file (check it with `sha256sum -c SHA256SUMS`). It is not proven on every desktop; see Known issues. Or run it from source. Either way you need Linux and Wine; from source you also need Python 3.11 or newer and tkinter (`python3-tk` on Debian and Ubuntu).
