@@ -2,8 +2,8 @@
 
 gitfurl only runs the `clamscan` program that is already on PATH. It never installs ClamAV,
 never runs `freshclam` and makes no network request: you keep the signature database up to
-date yourself. The scan is read-only. No option that removes, moves or copies files is ever
-passed, and nothing is written into the installer's folder.
+date yourself. gitfurl passes no option that changes files: nothing that removes, moves or
+copies a file is ever passed (clamscan itself may still write its own temporary files).
 
 What is scanned: the installer file and the regular files directly beside it in its folder,
 named one by one on the command line. Subfolders and symbolic links are not scanned.
@@ -16,13 +16,16 @@ The result lines ("PATH: OK", "PATH: SIGNAME FOUND", "PATH: Empty file", "PATH: 
 and the version line ("ClamAV ENGINE/DBVERSION/" followed by ctime() of the daily database)
 come from ClamAV's source (clamscan/manager.c, common/misc.c), not from the man page.
 
-A hit blocks the run unless the user overrides it. A scan error also blocks it: there is no
-silent fallback to running unscanned. Output that cannot be read counts as an error, never as
-a clean result. A clean result means only that no known signature matched.
+A hit blocks the run unless the user overrides it. A scan error always blocks it and can not
+be overridden: there is no silent fallback to running unscanned. A hit in a scan that also had
+an error (a file that could not be scanned or a result that could not be read) is an error,
+not an overridable hit. Output that cannot be read counts as an error, never as a clean
+result. A clean result means only that no known signature matched.
 """
 
 from __future__ import annotations
 
+import math
 import os
 import shutil
 import signal
@@ -95,8 +98,8 @@ def build_scan_plan(installer: Path, clamscan: str | None,
                          "install it yourself, or turn the scan off")
     if not os.path.isabs(clamscan):
         raise ValueError("clamscan must be an absolute path")
-    if not timeout_s or timeout_s <= 0:
-        raise ValueError("the scan timeout must be above 0")
+    if not timeout_s or not math.isfinite(timeout_s) or timeout_s <= 0:
+        raise ValueError("the scan timeout must be a finite number above 0")
     installer = Path(installer).resolve()
     files, skipped, seen = [], 0, 0
     try:
@@ -123,9 +126,12 @@ def build_scan_plan(installer: Path, clamscan: str | None,
     files.insert(0, str(installer))
     large = []
     for f in files:
-        if "\n" in f or "\r" in f:
-            raise ValueError(f"a file name contains a line break ({clean(Path(f).name, 60)}); "
-                             "its scan result could not be read reliably")
+        # The result is read line by line with str.splitlines(), which also splits on \v, \f,
+        # \x1c-\x1e, \x85, \u2028 and \u2029; a path containing any of them is refused.
+        if len(f.splitlines()) != 1:
+            raise ValueError(f"a file name or folder name contains a line break or another "
+                             f"line-separator character ({clean(f, 120)}); its scan result could "
+                             "not be read reliably")
         try:
             if os.stat(f, follow_symlinks=False).st_size > LIMIT_BYTES:
                 large.append(f)
@@ -183,16 +189,19 @@ def parse_version(text: str) -> DbInfo:
 
 def database_info(clamscan: str, runner=subprocess.run) -> DbInfo:
     """Run `clamscan --version` (a bounded probe, as `doctor` does for wine). Never raises."""
-    try:
-        proc = runner([clamscan, "--version"], capture_output=True, text=True,
+    try:  # bytes, decoded below with replacement: odd output cannot raise
+        proc = runner([clamscan, "--version"], capture_output=True,
                       timeout=VERSION_TIMEOUT_S, check=False, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return DbInfo("", problem=f"version check timed out after {VERSION_TIMEOUT_S}s")
-    except OSError as exc:
-        return DbInfo("", problem=f"could not run: {exc.strerror or exc}")
+    except (OSError, ValueError) as exc:
+        return DbInfo("", problem=f"could not run: {getattr(exc, 'strerror', None) or exc}")
     if proc.returncode != 0:
         return DbInfo("", problem=f"version check exited with status {proc.returncode}")
-    return parse_version(proc.stdout or "")
+    out = proc.stdout or b""
+    if isinstance(out, bytes):
+        out = out.decode("utf-8", "replace")
+    return parse_version(out)
 
 
 def describe_database(info: DbInfo, now: datetime | None = None) -> list[str]:
@@ -214,8 +223,9 @@ def describe_scan_plan(plan: ScanPlan, db: DbInfo | None = None,
     """Plain text for the dry run, the plan preview and the approval text."""
     n = len(plan.files)
     lines = [
-        ("ClamAV scan first (read-only; a hit or a scan error stops the run before anything "
-         "is run or created):"),
+        ("ClamAV scan first (gitfurl passes no option that changes files; a hit or a scan "
+         "error stops the run before anything is run or created; a scan error can not be "
+         "overridden):"),
         f"  scan command: {_shown_argv(plan)}",
         (f"  scans the installer and {n - 1} other regular file(s) directly in its folder; "
          f"subfolders and symbolic links are not scanned ({plan.skipped} skipped). Timeout "
@@ -290,10 +300,19 @@ def interpret(code: int | None, stdout: str, files: tuple[str, ...], truncated: 
         if not hits:
             return ScanResult(ERROR, "clamscan reported a match (exit status 1) but gitfurl could "
                               "not read which file matched", hits, code)
-        res = ScanResult(HIT, "a known signature matched", hits, code)
-        if errors or bad:
-            res.notes.append("some files could not be scanned or their result was not readable")
-        return res
+        missing = [f for f in files if f not in covered]
+        if errors or bad or missing:
+            # A partial scan with a match is an error, never an overridable hit: what was not
+            # scanned or not read is unknown.
+            if errors:
+                problem = "clamscan reported an error: " + clean(errors[0], 200)
+            elif bad:
+                problem = "clamscan printed lines gitfurl could not read: " + clean(bad[0], 200)
+            else:
+                problem = "clamscan reported no result for " + clean(missing[0], 200)
+            return ScanResult(ERROR, f"a known signature matched ({hit_list(hits)}) and some "
+                              f"files could not be scanned or read ({problem})", hits, code)
+        return ScanResult(HIT, "a known signature matched", hits, code)
     if code == 0:
         if hits:
             return ScanResult(ERROR, "clamscan exited 0 but printed a match; the output is "
@@ -314,6 +333,12 @@ def interpret(code: int | None, stdout: str, files: tuple[str, ...], truncated: 
         return ScanResult(ERROR, f"clamscan reported an error (exit status 2){detail}", hits,
                           code)
     return ScanResult(ERROR, f"clamscan exited with unexpected status {code}", hits, code)
+
+
+def hit_list(hits: list[tuple[str, str]], limit: int = 5) -> str:
+    """Matched files and signatures on one line, cleaned of control characters."""
+    shown = "; ".join(f"{clean(p, 200)}: {clean(s, 120)}" for p, s in hits[:limit])
+    return shown + (f"; and {len(hits) - limit} more" if len(hits) > limit else "")
 
 
 def _reader(stream, box: list, cap: int):
@@ -366,7 +391,9 @@ def _decode(data: bytes) -> str:
 
 def run_scan(plan: ScanPlan, should_stop=None, env: dict[str, str] | None = None) -> ScanResult:
     """Run the approved scan in its own process group, with a timeout. Never raises for a
-    scan problem (that is an ERROR result); re-raises KeyboardInterrupt after stopping it.
+    scan problem (that is an ERROR result). Any exception after clamscan has started
+    (Ctrl-C, a reader thread that could not start) first stops the scan's own process group,
+    then is re-raised with `scan_interrupted` and `notes` set.
 
     Only the scan's own group is ever signalled. `should_stop` (a callable) lets a Stop button
     end the scan early; the result is then an ERROR.
@@ -379,6 +406,7 @@ def run_scan(plan: ScanPlan, should_stop=None, env: dict[str, str] | None = None
         raise
     guard = SigintGuard()
     guard.__enter__()
+    proc = None
     try:
         try:
             proc = subprocess.Popen(plan.argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -386,67 +414,94 @@ def run_scan(plan: ScanPlan, should_stop=None, env: dict[str, str] | None = None
                                     env=dict(os.environ if env is None else env))
         except OSError as exc:
             return ScanResult(ERROR, f"could not start clamscan: {exc.strerror or exc}", db=db)
-        out_box, err_box = [], []
-        readers = [_reader(proc.stdout, out_box, OUTPUT_CAP),
-                   _reader(proc.stderr, err_box, OUTPUT_CAP)]
-        deadline = time.monotonic() + plan.timeout_s
-        ended, notes = None, []
-        try:
-            guard.release()
-            if guard.hits:
-                raise KeyboardInterrupt
-            while ended is None:
-                try:  # wait without reaping, so the group id stays ours until we are done
-                    info = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
-                except ChildProcessError:
-                    info = True
-                if info:
-                    ended = "exited"
-                elif should_stop is not None and should_stop():
-                    ended = "stopped"
-                elif time.monotonic() >= deadline:
-                    ended = "timeout"
-                else:
-                    time.sleep(0.05)
-        except BaseException as exc:
-            guard.hits = 0
-            guard.__enter__()
+        return _finish_scan(proc, plan, should_stop, guard, db)
+    except BaseException as exc:
+        # Anything at all after the start (Ctrl-C, a reader thread that could not start, an
+        # error while reading): stop the scan's own group, then re-raise.
+        if proc is None:
+            raise
+        guard.release()
+        guard.hits = 0
+        guard.__enter__()  # hold further Ctrl-C while the group is stopped
+        notes = []
+        if proc.returncode is None:  # not reaped yet, so the group id is still the scan's
             notes = _stop_group(proc.pid)
-            proc.wait()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                notes.append("the scan's main process had not ended when gitfurl stopped waiting")
+        _close_streams(proc)
+        try:
             exc.scan_interrupted = True
             exc.notes = ["the ClamAV scan was stopped; the installer was not started", *notes]
-            raise
-        if ended == "exited":
-            if group_alive(proc.pid):  # something the scan left behind in its own group
-                notes = _stop_group(proc.pid)
-        else:
-            notes = _stop_group(proc.pid)
-        code = proc.wait()
-        for t in readers:
-            t.join(5)
-        for stream in (proc.stdout, proc.stderr):
-            try:
-                stream.close()
-            except OSError:
-                pass
-        stdout, over = out_box[0] if out_box else (b"", False)
-        stderr, _ = err_box[0] if err_box else (b"", False)
-        if ended == "timeout":
-            res = ScanResult(ERROR, f"the scan did not finish within {plan.timeout_s:g} s and "
-                             "was stopped", exit_code=None)
-        elif ended == "stopped":
-            res = ScanResult(ERROR, "the scan was stopped by you", exit_code=None)
-        else:
-            res = interpret(code, _decode(stdout), plan.files, over)
-            if res.status == ERROR and stderr.strip():
-                res.notes.append("clamscan said: " + clean(_decode(stderr).strip()
-                                                           .splitlines()[-1], 200))
-        res.db = db
-        res.large = plan.large
-        res.notes.extend(notes)
-        return res
+        except AttributeError:
+            pass
+        raise
     finally:
         guard.release()
+
+
+def _close_streams(proc) -> None:
+    for stream in (proc.stdout, proc.stderr):
+        try:
+            if stream is not None:
+                stream.close()
+        except OSError:
+            pass
+
+
+def _finish_scan(proc, plan: ScanPlan, should_stop, guard: SigintGuard,
+                 db: DbInfo) -> ScanResult:
+    """Wait for the started scan, stop what is left of its group and read the result.
+
+    Any exception here is handled by run_scan, which stops the group.
+    """
+    out_box, err_box = [], []
+    readers = [_reader(proc.stdout, out_box, OUTPUT_CAP),
+               _reader(proc.stderr, err_box, OUTPUT_CAP)]
+    deadline = time.monotonic() + plan.timeout_s
+    ended, notes = None, []
+    guard.release()
+    if guard.hits:
+        raise KeyboardInterrupt
+    while ended is None:
+        try:  # wait without reaping, so the group id stays ours until we are done
+            info = os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        except ChildProcessError:
+            info = True
+        if info:
+            ended = "exited"
+        elif should_stop is not None and should_stop():
+            ended = "stopped"
+        elif time.monotonic() >= deadline:
+            ended = "timeout"
+        else:
+            time.sleep(0.05)
+    if ended == "exited":
+        if group_alive(proc.pid):  # something the scan left behind in its own group
+            notes = _stop_group(proc.pid)
+    else:
+        notes = _stop_group(proc.pid)
+    code = proc.wait()
+    for t in readers:
+        t.join(5)
+    _close_streams(proc)
+    stdout, over = out_box[0] if out_box else (b"", False)
+    stderr, _ = err_box[0] if err_box else (b"", False)
+    if ended == "timeout":
+        res = ScanResult(ERROR, f"the scan did not finish within {plan.timeout_s:g} s and "
+                         "was stopped", exit_code=None)
+    elif ended == "stopped":
+        res = ScanResult(ERROR, "the scan was stopped by you", exit_code=None)
+    else:
+        res = interpret(code, _decode(stdout), plan.files, over)
+        if res.status == ERROR and stderr.strip():
+            res.notes.append("clamscan said: " + clean(_decode(stderr).strip()
+                                                       .splitlines()[-1], 200))
+    res.db = db
+    res.large = plan.large
+    res.notes.extend(notes)
+    return res
 
 
 def decide(result: ScanResult, allow_hit: bool = False) -> tuple[bool, str]:

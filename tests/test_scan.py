@@ -6,13 +6,16 @@ configured status and records its arguments. No real installer, Wine or network 
 
 import io
 import json
+import math
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -142,6 +145,45 @@ class ArgvTests(Fixture):
         with self.assertRaises(ValueError):
             self.plan()
 
+    def test_other_line_separators_in_a_name_are_refused(self):
+        for ch in ("\x0b", "\x0c", "\x1c", "\x85", "\u2028"):
+            bad = self.inst_dir / f"a{ch}b.bin"
+            bad.write_bytes(b"x")
+            with self.assertRaises(ValueError, msg=repr(ch)) as cm:
+                self.plan()
+            self.assertIn("line-separator", str(cm.exception))
+            self.assertNotIn(ch, str(cm.exception))
+            bad.unlink()
+        self.plan()  # fine again
+
+    def test_non_finite_timeout_is_refused(self):
+        for value in (math.nan, math.inf, -math.inf, -1):
+            with self.assertRaises(ValueError, msg=value):
+                build_scan_plan(self.installer, self.clamscan, value)
+
+    def test_more_than_1000_entries_is_refused(self):
+        for i in range(scan.MAX_FILES):
+            (self.inst_dir / f"f{i:04d}.bin").touch()
+        with self.assertRaises(ValueError) as cm:
+            self.plan()
+        self.assertIn("more than 1000 entries", str(cm.exception))
+
+    def test_fifo_beside_the_installer_is_skipped_and_nothing_blocks(self):
+        fifo = self.inst_dir / "pipe"
+        os.mkfifo(fifo)
+        p = self.plan()
+        self.assertNotIn(str(fifo), p.files)
+        self.assertNotIn(str(fifo), p.large)
+        self.assertEqual(p.skipped, 3)  # the subfolder, the symlink and the pipe
+        self.respond(self.ok_lines(p), 0)
+        box = []
+        th = threading.Thread(target=lambda: box.append(run_scan(p)), daemon=True)
+        th.start()
+        th.join(20)
+        self.assertFalse(th.is_alive(), "the scan blocked on a named pipe")
+        self.assertEqual(box[0].status, CLEAN)
+        self.assertNotIn(str(fifo), self.argv_seen())
+
     def test_find_clamscan_refuses_a_relative_result(self):
         with mock.patch("shutil.which", return_value="clamscan"):
             self.assertIsNone(scan.find_clamscan())
@@ -193,6 +235,36 @@ class ResultTests(Fixture):
         self.assertIn("nothing was run or created", msg)
         ok, msg = decide(res, allow_hit=True)
         self.assertTrue(ok)
+
+    def test_hit_with_an_error_line_is_an_error_not_overridable(self):
+        p = self.plan()
+        self.respond([f"{p.files[0]}: Win.Test.Sig\x1b[1m FOUND",
+                      f"{p.files[1]}: Can't read file ERROR"], 1)
+        res = run_scan(p)
+        self.assertEqual(res.status, ERROR, res.reason)
+        self.assertIn("a known signature matched", res.reason)
+        self.assertIn("could not be scanned or read", res.reason)
+        for allow in (False, True):
+            ok, msg = decide(res, allow_hit=allow)
+            self.assertFalse(ok)
+            self.assertIn("setup.exe: Win.Test.Sig?[1m", msg)  # the match is named, cleaned
+            self.assertNotIn("\x1b", msg)
+            self.assertNotIn("run it anyway", msg)
+
+    def test_hit_with_a_file_without_result_is_an_error(self):
+        p = self.plan()
+        self.respond([f"{p.files[0]}: Win.Test FOUND"], 1)  # nothing for data-1.bin
+        res = run_scan(p)
+        self.assertEqual(res.status, ERROR, res.reason)
+        self.assertIn("no result for", res.reason)
+        self.assertIn("Win.Test", res.reason)
+        self.assertFalse(decide(res, allow_hit=True)[0])
+
+    def test_hit_with_an_unreadable_line_is_an_error(self):
+        files = ("/a/setup.exe",)
+        res = interpret(1, "/a/setup.exe: X FOUND\nnoise\n", files)
+        self.assertEqual(res.status, ERROR)
+        self.assertFalse(decide(res, allow_hit=True)[0])
 
     def test_error_exit_blocks(self):
         p = self.plan()
@@ -269,6 +341,79 @@ class ResultTests(Fixture):
         self.assertIn("stopped by you", res.reason)
         self.assertFalse(group_alive(int(self.pid.read_text())))
 
+    def test_child_ignoring_sigterm_is_killed_after_the_grace_period(self):
+        sh = shutil.which("sh")
+        sleep = shutil.which("sleep")
+        child_pid = self.t / "child.pid"
+        self._script(self.bin / "clamscan",
+                     f'if [ "$1" = "--version" ]; then echo "{VERSION}"; exit 0; fi\n'
+                     f'echo $$ > "{self.pid}"\n'
+                     f"{sh} -c 'trap \"\" TERM; echo $$ > \"{child_pid}\"; "
+                     f"while :; do {sleep} 1; done' &\n"
+                     f"trap '' TERM\n"
+                     f"wait\n")
+        p = self.plan(timeout=1)
+        t0 = time.monotonic()
+        res = run_scan(p)
+        took = time.monotonic() - t0
+        self.assertEqual(res.status, ERROR)
+        self.assertGreaterEqual(took, 1 + scan.STOP_GRACE_S - 0.5)
+        self.assertLess(took, 20)
+        self.assertTrue(any("force-killed" in n for n in res.notes), res.notes)
+        self.assertTrue(child_pid.exists())  # the TERM-ignoring child had started
+        self.assertFalse(group_alive(int(self.pid.read_text())))  # leader and child gone
+
+    def test_ctrl_c_during_the_scan_stops_its_group(self):
+        if threading.current_thread() is not threading.main_thread():
+            self.skipTest("SIGINT is only delivered on the main thread")
+        self.fake_clamscan(sleep=60)
+        p = self.plan(timeout=60)
+        self.respond(self.ok_lines(p), 0)
+
+        def press():
+            for _ in range(200):  # wait until the fake has started
+                if self.pid.exists() and self.pid.read_text().strip():
+                    break
+                time.sleep(0.05)
+            time.sleep(0.3)
+            os.kill(os.getpid(), signal.SIGINT)  # our own process only
+
+        th = threading.Thread(target=press)
+        th.start()
+        t0 = time.monotonic()
+        with self.assertRaises(KeyboardInterrupt) as cm:
+            run_scan(p)
+        th.join(10)
+        self.assertLess(time.monotonic() - t0, 20)
+        self.assertTrue(cm.exception.scan_interrupted)
+        self.assertIn("the installer was not started", cm.exception.notes[0])
+        self.assertFalse(group_alive(int(self.pid.read_text())))
+        self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler)
+
+    def test_failure_after_the_start_stops_the_group_and_re_raises(self):
+        self.fake_clamscan(sleep=60)
+        p = self.plan(timeout=60)
+        self.respond(self.ok_lines(p), 0)
+        real = scan._reader
+        calls = []
+
+        def second_fails(*a):
+            calls.append(1)
+            if len(calls) == 2:
+                for _ in range(200):  # let the fake record its pid first
+                    if self.pid.exists() and self.pid.read_text().strip():
+                        break
+                    time.sleep(0.05)
+                raise RuntimeError("can't start new thread")
+            return real(*a)
+
+        with mock.patch("gitfurl.scan._reader", side_effect=second_fails), \
+                self.assertRaises(RuntimeError) as cm:
+            run_scan(p)
+        self.assertTrue(cm.exception.scan_interrupted)
+        self.assertFalse(group_alive(int(self.pid.read_text())))
+        self.assertIs(signal.getsignal(signal.SIGINT), signal.default_int_handler)
+
     def test_clamscan_vanished_after_planning_is_an_error(self):
         p = self.plan()
         os.unlink(self.clamscan)
@@ -298,6 +443,21 @@ class VersionTests(unittest.TestCase):
         info = parse_version("ClamAV 1.4.3/27780/not a date\n")
         self.assertIsNone(info.db_date)
         self.assertIn("date", info.problem)
+
+    def test_invalid_utf8_version_output_does_not_raise(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake = Path(d) / "clamscan"
+            fake.write_bytes(b"#!/bin/sh\nprintf 'ClamAV 1.4.3/27780/\\377\\376 bad\\n'\n")
+            fake.chmod(0o700)
+            info = scan.database_info(str(fake))
+            self.assertTrue(info.line.startswith("ClamAV 1.4.3/27780/"))
+            self.assertIsNotNone(info.problem)
+            from gitfurl import doctor
+
+            with mock.patch("shutil.which", return_value=str(fake)):
+                rep = doctor.probe_tool("clamscan", ["--version"])
+            self.assertIsNone(rep.problem)
+            self.assertIn("\ufffd", rep.version)
 
     def test_doctor_reports_clamscan(self):
         from gitfurl import doctor
@@ -344,6 +504,17 @@ class RunGateTests(Fixture):
         self.assertEqual(sorted(x.name for x in self.inst_dir.iterdir()),
                          ["data-1.bin", "link.bin", "setup.exe", "sub"])
 
+    def test_hit_with_an_error_blocks_even_with_the_override(self):
+        # The app offers its second dialog only for status HIT (gui.py), so not for this.
+        p = self.plan()
+        self.respond([f"{p.files[0]}: Win.Test FOUND", f"{p.files[1]}: Can't read ERROR"], 1)
+        with self.assertRaises(ScanBlocked) as cm:
+            self.go(RunOptions(allow_scan_hit=True))
+        self.assertEqual(cm.exception.result.status, ERROR)
+        self.assertIn("Win.Test", str(cm.exception))
+        self.assertEqual(self.calls, [])
+        self.assertFalse((self.t / "data").exists())
+
     def test_hit_with_override_runs_and_logs_the_scan(self):
         p = self.plan()
         self.respond([f"{p.files[0]}: Win.Test FOUND", f"{p.files[1]}: OK"], 1)
@@ -371,8 +542,9 @@ class RunGateTests(Fixture):
 
     def test_given_result_is_not_scanned_again(self):
         p = self.plan()
-        self.respond([f"{p.files[0]}: Win.Test FOUND"], 1)
+        self.respond([f"{p.files[0]}: Win.Test FOUND", f"{p.files[1]}: OK"], 1)
         hit = run_scan(p)
+        self.assertEqual(hit.status, HIT)
         self.rec.unlink()
         with mock.patch("gitfurl.scan.run_scan") as rs:
             self.go(RunOptions(scan_result=hit, allow_scan_hit=True))
@@ -482,6 +654,13 @@ class CliTests(Fixture):
                                    "--scan-timeout", "0")
         self.assertEqual(code, 1)
         self.assertIn("--scan-timeout", err)
+        for value in ("nan", "inf", "-inf"):
+            with mock.patch.dict("os.environ", self.env):
+                code, out, err = run_cli("install", str(self.installer), "--dry-run", "--scan",
+                                         f"--scan-timeout={value}")
+            self.assertEqual(code, 1, value)
+            self.assertIn("--scan-timeout must be a finite number", err)
+            self.assertNotIn("scan command", out)
 
 
 class GuiTests(Fixture):

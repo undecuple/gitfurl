@@ -28,6 +28,7 @@ def probe_tool(name: str, version_args: list[str]) -> ToolReport:
             [path, *version_args],
             capture_output=True,
             text=True,
+            errors="replace",  # odd version output must not raise
             timeout=PROBE_TIMEOUT_S,
             check=False,
         )

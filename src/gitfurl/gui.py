@@ -77,8 +77,9 @@ def portable_option_state(runtime: str, bwrap_path: str | None) -> tuple[bool, s
 
 
 SCAN_NOTE = ("Runs the clamscan on your PATH on the installer and the files beside it before "
-             "anything else, read-only. A match or a scan error stops the run. A clean result "
-             "only means no known signature matched. gitfurl never updates the database.")
+             "anything else; gitfurl passes no option that changes files. A match or a scan "
+             "error stops the run (a scan error can not be overridden). A clean result only "
+             "means no known signature matched. gitfurl never updates the database.")
 
 
 def scan_option_state(clamscan_path: str | None) -> tuple[bool, str]:
@@ -972,7 +973,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                 scanmod.database_info(scan_plan.clamscan)))
             extra += ("\n\nThe ClamAV scan runs first, after you approve. A match stops the run "
                       "(you are then asked a second time whether to run it anyway); a scan error "
-                      "always stops it.")
+                      "always stops it and is never overridden, also when a signature matched "
+                      "in a scan that had an error.")
         if not messagebox.askyesno("Run this installer?", f"{text}{extra}\n\n{WARNING}",
                                    icon="warning", default="no"):
             return

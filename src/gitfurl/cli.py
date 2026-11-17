@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import shutil
 import subprocess
@@ -83,11 +84,13 @@ def build_parser() -> argparse.ArgumentParser:
                            "file or its whole folder; default: none")
     inst.add_argument("--scan", action="store_true",
                       help="scan the installer and the files beside it with the clamscan on PATH "
-                           "first; a match or a scan error stops the run. Off by default. "
+                           "first; a match or a scan error stops the run (a scan error can "
+                           "not be overridden). Off by default. "
                            "gitfurl never updates the ClamAV database")
     inst.add_argument("--allow-scan-hit", action="store_true",
                       help="with --scan: run even if ClamAV matched a signature (false positives "
-                           "are common for game installers)")
+                           "are common for game installers). Never overrides a scan error, "
+                           "also not a match in a scan that had an error")
     inst.add_argument("--scan-timeout", type=float, default=SCAN_TIMEOUT_S, metavar="SECONDS",
                       help=f"with --scan: stop the scan after this long (default {SCAN_TIMEOUT_S:g})")
     inst.add_argument("--yes", action="store_true", help="approve the run without prompting")
@@ -153,8 +156,8 @@ def _scan_plan(args, installer):
         return None
     from gitfurl.scan import build_scan_plan, find_clamscan
 
-    if args.scan_timeout <= 0:
-        raise ValueError("--scan-timeout must be above 0")
+    if not math.isfinite(args.scan_timeout) or args.scan_timeout <= 0:
+        raise ValueError("--scan-timeout must be a finite number above 0")
     return build_scan_plan(installer, find_clamscan(), args.scan_timeout)
 
 
@@ -299,7 +302,8 @@ def _real_install(args) -> int:
             print(line)
         print("The scan runs first, after you approve. A match stops the run"
               + (" unless --allow-scan-hit is given" if args.allow_scan_hit else "")
-              + "; a scan error always stops it.")
+              + "; a scan error always stops it and is never overridden (also when a "
+              "signature matched in a scan that had an error).")
     print("Ctrl-C stops this run gracefully (see docs/user-guide.md for what it leaves behind).")
     if args.cleanup != "none":
         print("After the installer exits with status 0, " + clean.describe())
