@@ -30,6 +30,12 @@ Observed once by hand on 2026-11-16 (Wine 11.0 wow64, NixOS, a throwaway prefix,
 
 Not shown: Stop through `umu-run`. The attempt in `tools/sandbox.sh` with the cached Proton failed before starting ("umu has not been setup for the user; an internet connection is required"), so the Proton behaviour is unverified.
 
+## Stop against a generated test installer (2026-11-16)
+The maintainer pointed at a generated test installer: an Inno Setup 5.5.0 `setup.exe` (4 MB) and two `.bin` files (3.8 GB) beside it, made for testing. Only header bytes were read; the `.bat` and the checksum tool beside it were never run. Run once, in `tools/sandbox.sh` (no network, empty home), Xvfb, Wine 11.0 wow64 from nixpkgs, branch `fix/stop-races`:
+- `gitfurl cli install ... --create-prefix` did not get past creating the prefix: `wineboot --init` was still running after 300 s (`control.exe` and `rundll32.exe` were running; the cause was not confirmed), then gitfurl ended with an uncaught `subprocess.TimeoutExpired`. A Ctrl-C during that step ended gitfurl with 130 in 1 s and left `wineboot`, `services.exe` and other Wine processes running. Not fixed.
+- With the prefix made by hand first (`wine wineboot --init`, `WINEDLLOVERRIDES=mscoree,mshtml=d`, exit 0), the installer started (`setup.exe`, `setup.tmp`) and stayed open for 60 s with 0 bytes of the `.bin` files read. One Ctrl-C sent to the gitfurl process: it exited 130 after 1.0 s, the event log ends with `cancelled` (no `exit`), the note says the prefix's Wine server was asked to exit, and no Wine process was left in the sandbox.
+- Not shown: a complete install, Stop at other phases, Proton, more than one run.
+
 ## The single-file build (release workflow)
 `release.yml` builds one Linux program with PyInstaller. Checked on 2026-11-16 by running the workflow by hand (it builds and uploads only):
 - The checksum file matches. `cli --version` prints 1.0.0 and `cli doctor` runs.

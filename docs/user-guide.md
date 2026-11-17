@@ -64,7 +64,7 @@ While an installer runs, the **Stop** button (and **Ctrl-C** on the command line
 
 A second **Ctrl-C** while a stop is in progress skips the 10-second wait and force-kills what is left. A run counts as cancelled only if the stop took effect: before the installer started, or by signalling a group that still had a running program. If the installer had already exited when you pressed Stop, it is reported as finished with its own exit status and nothing is signalled. If `wineserver` cannot be found or exits with an error, the notes say so.
 
-Stopping while the prefix is still being created (before the installer starts) does not interrupt that step: it finishes, and then the installer is not started and the run is shown as cancelled.
+Stopping while the prefix is still being created (before the installer starts): in the graphical app, Stop does not interrupt that step; it finishes, and then the installer is not started and the run is shown as cancelled. On the command line, Ctrl-C ends gitfurl at once with status 130, and Wine's own processes for that prefix (`wineboot` and its helpers) may be left running; this step is not run in its own process group and gitfurl does not stop it.
 
 The run is shown as **cancelled**, not as a success or a failure. On the command line the exit status is 130 and the event log has a `cancelled` event. The log is kept. The original installer is never deleted after a cancelled run.
 
