@@ -3,7 +3,9 @@
 All notable changes are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
-The first release will be 1.0.0 (version set in `pyproject.toml` and `gitfurl.__version__`; not tagged or published).
+
+## [1.0.0] - 2026-11-16
+The first release. It means the app, the command line and the safety checks are complete for the stated scope. It does not mean any particular installer works; compatibility is unverified, and the single-file Linux build is not proven on every desktop (see the README known issues).
 
 ### Added (after review)
 - `release.yml`: builds the graphical app as one Linux program on a `v*` tag and attaches it, with SHA256SUMS, to a draft release. Not yet run.
