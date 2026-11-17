@@ -4,6 +4,9 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-17
+The second release: Stop for a running installer, cleanup when prefix creation times out or is interrupted, a read-only guess at the installer's format, a reworked window (footer, keyboard use, checklist, banner, resizing), an optional portable install inside bubblewrap, and run events. As with 1.0.0, it does not mean any particular installer works: compatibility is unverified, a complete install has not been tested, and the code has not been audited.
+
 ### Added
 - A **Stop** button (and Ctrl-C on the command line) for a running installer. It signals only the run's own process group (SIGTERM, then SIGKILL after 10 s), then, for Wine, asks that prefix's Wine server to exit. The run is reported as cancelled (exit status 130, a `cancelled` event); the log is kept and nothing is deleted. Complete process-tree termination is not guaranteed, and stopping through `umu-run` is unverified.
 - A read-only, advisory preflight before a run: measured free space, installer-folder size and memory, apart from estimates; required space is shown as unknown and no multiplier is applied.
