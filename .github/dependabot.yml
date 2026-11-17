@@ -1,8 +1,21 @@
 version: 2
 updates:
-  # Keeps the commit-SHA pins in the workflows current, one pull request at a time.
+  # Keeps the commit-SHA pins in the workflows current. Updates come as one grouped
+  # pull request; each one changes workflow files, so it needs a human look.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 3
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 1
+    commit-message:
+      prefix: docker

@@ -101,6 +101,9 @@ The code has no runtime dependencies. For tests and lint, enter `nix develop`, o
 - **[Wine](https://www.winehq.org/):** the compatibility layer gitfurl drives.
 - **[umu-launcher](https://github.com/Open-Wine-Components/umu-launcher):** used for the optional Proton runtime.
 
+- **[Proton](https://github.com/ValveSoftware/Proton) and [GE-Proton](https://github.com/GloriousEggroll/proton-ge-custom):** the optional runtime umu-launcher uses. Gitfurl does not ship either.
+- **[vim-tictoc](https://github.com/adonaldson/vim-tictoc):** the colour scheme the app and the images follow.
+
 Gitfurl is not affiliated with these projects or with any software publisher.
 
 ## Roadmap
