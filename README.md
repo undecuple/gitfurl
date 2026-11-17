@@ -7,7 +7,12 @@
 <p align="center"><b>Run a Windows installer you already have on Linux, in its own Wine environment, with a plan you approve first.</b></p>
 
 <p align="center">
-  <a href="https://github.com/undecuple/gitfurl/actions/workflows/ci.yml"><img src="https://github.com/undecuple/gitfurl/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/undecuple/gitfurl/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/undecuple/gitfurl/ci.yml?branch=main&label=CI&labelColor=0C1021&style=flat-square" alt="CI status"></a>
+  <a href="https://github.com/undecuple/gitfurl/releases/latest"><img src="https://img.shields.io/github/v/release/undecuple/gitfurl?label=release&color=FF6400&labelColor=0C1021&style=flat-square" alt="Latest release"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/licence-GPL--3.0--or--later-FCB439?labelColor=0C1021&style=flat-square" alt="Licence: GPL-3.0-or-later"></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-FBDE2D?labelColor=0C1021&style=flat-square" alt="Python 3.11 or newer">
+  <img src="https://img.shields.io/badge/platform-Linux-00C1E4?labelColor=0C1021&style=flat-square" alt="Platform: Linux">
+  <img src="https://img.shields.io/badge/runtime-Wine%20%7C%20Proton-FF6400?labelColor=0C1021&style=flat-square" alt="Runtime: Wine, optional Proton">
 </p>
 
 <p align="center"><a href="#getting-started">Getting started</a> · <a href="#why-would-i-want-this">Why would I want this?</a> · <a href="#status">Status</a> · <a href="#known-issues">Known issues</a> · <a href="docs/user-guide.md">User guide</a> · <a href="#building">Building</a> · <a href="https://github.com/undecuple/gitfurl/issues/new/choose">Report a bug</a></p>
@@ -16,7 +21,7 @@
 
 gitfurl is a graphical app (with an optional command line) for running a Windows installer on Linux through Wine. **You supply the installer.** Gitfurl does not find, download or include any.
 
-> **Status: version 1.0.0 is the first release and is not yet published, as of 2026-11-16.** 1.0.0 means the app, the command line and the safety checks are complete for the scope below. It does **not** mean any particular installer works: compatibility is unverified. Installers have been *started* in a sandbox, but a complete install has not been tested, and the code has not been audited. Details under [Status](#status).
+> **Status: version 1.0.0 is the first release, published on 2026-11-16.** 1.0.0 means the app, the command line and the safety checks are complete for the scope below. It does **not** mean any particular installer works: compatibility is unverified. Installers have been *started* in a sandbox, but a complete install has not been tested, and the code has not been audited. Details under [Status](#status).
 
 ![The Library page: a list of Wine prefixes](docs/screenshot.png)
 
@@ -44,7 +49,7 @@ Running a Windows installer under Wine by hand works, until it does not. These a
 
 ## Getting started
 
-There is no published release yet; 1.0.0 will be the first. Until then, run it from source. You need Linux, Python 3.11 or newer, tkinter (`python3-tk` on Debian and Ubuntu) and Wine.
+The [1.0.0 release](https://github.com/undecuple/gitfurl/releases/tag/v1.0.0) has a single-file Linux program and a `SHA256SUMS` file (check it with `sha256sum -c SHA256SUMS`). It is not proven on every desktop; see Known issues. Or run it from source. Either way you need Linux and Wine; from source you also need Python 3.11 or newer and tkinter (`python3-tk` on Debian and Ubuntu).
 
 1. **Get the code.** `git clone https://github.com/undecuple/gitfurl.git && cd gitfurl`
 2. **Check your setup.** `python -m gitfurl cli doctor` reports Wine, tkinter, bubblewrap and umu-run. With Nix, `nix develop .#wine` gives you Python with tkinter and Wine.
@@ -78,7 +83,7 @@ As of 2026-11-16, on Linux x86_64, Wine 11.0, tested headless (no GPU, a virtual
 - The app is dark only, with a fixed pixel font. Tab and Return/space work on buttons, switches and the sidebar (added 2026-11-16, lightly tested). Screen readers cannot read it: Tk does not expose its widgets to them.
 - Gitfurl refuses to create prefixes or run installers as root.
 - Proton needs a Proton folder you already have, and umu-run downloads its own runtime on first use if it is missing.
-- There is no published release yet. The single-file Linux build made by the release workflow starts and runs `cli` here, and its window opens in a Debian image with Tk and fonts. It is **not proven on every desktop**: it expects the system's standard X11 libraries and at least one font. On NixOS it stops with `libxcb.so.1: cannot open shared object file` unless the libraries are provided (for example with nix-ld) or you run from source with `nix develop`. See the [roadmap](ROADMAP.md).
+- The single-file Linux build in the 1.0.0 release starts and runs `cli` here, and its window opens in a Debian image with Tk and fonts. It is **not proven on every desktop**: it expects the system's standard X11 libraries and at least one font. On NixOS it stops with `libxcb.so.1: cannot open shared object file` unless the libraries are provided (for example with nix-ld) or you run from source with `nix develop`. See the [roadmap](ROADMAP.md).
 
 ## What goes online
 Nothing, from gitfurl itself. (Inherited `WINE*` variables from your shell are not passed to the installer, so the plan shows everything that is set.) It makes no network requests, sends no telemetry and uploads nothing. Two things you start yourself can use the network: umu-run downloading its runtime on first use, and anything the installer does. The [sandbox wrapper](docs/development.md#running-an-installer-in-a-sandbox) turns the network off for the installer.
