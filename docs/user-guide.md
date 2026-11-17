@@ -134,7 +134,7 @@ Two modes per run. **Normal install** (default) is the installer's usual behavio
 - Wine's `winemenubuilder.exe` is disabled (`WINEDLLOVERRIDES=winemenubuilder.exe=d`, shown in the plan). Without it Wine does not create menu entries or file associations.
 - The X11 or Wayland socket (and your `XAUTHORITY` file, or `~/.Xauthority`, read-only) is allowed so the installer window can show. A hostile installer can still use that connection. Audio is not provided and GPU access is limited to `/dev/dri`; other devices are not available.
 - If the prefix has to be created first, that step (`wineboot --init`) runs outside bwrap.
-- Stop ends the run through its own process group; bwrap is started with `--die-with-parent` and a private PID namespace. `wineserver -k` is not run, since the sandboxed Wine server lives in a private `/tmp`.
+- Stop signals bwrap's own process group, not the installer's: the sandboxed programs run in a session of their own (`--new-session`), and `--die-with-parent` plus the private PID namespace end them when bwrap ends. It was checked with real bwrap and a dummy `sleep`, and once with a real Wine installer in `tools/sandbox.sh`, not with every installer. `wineserver -k` is not run, since the sandboxed Wine server lives in a private `/tmp`.
 - If you turn on the changes report, it covers the checked places only and says nothing about places gitfurl did not check.
 - Not supported with the `proton` runtime, as root, or when wine itself is installed under your home folder (hidden inside the sandbox).
 

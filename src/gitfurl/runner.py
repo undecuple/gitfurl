@@ -421,8 +421,9 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
             finally:
                 final = monitor.stop() if monitor else None
             if control.cancelled and plan.portable:
-                control.notes.append("portable run: the sandbox ended with the run's process "
-                                     "group; wineserver -k was not run")
+                control.notes.append("portable run: bwrap's process group was stopped and the "
+                                     "sandbox ended with it (--die-with-parent); "
+                                     "wineserver -k was not run")
             if control.cancelled:
                 log.write(f"\n--- cancelled by user (process exit status {proc.returncode})\n")
                 for note in control.notes:

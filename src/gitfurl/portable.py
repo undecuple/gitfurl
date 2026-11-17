@@ -167,9 +167,10 @@ def describe_portable(plan, bwrap_path: str | None, installer_path: Path,
         ("  Wine's menu and file-association builder is disabled (WINEDLLOVERRIDES="
          "winemenubuilder.exe=d)."),
         "  If the prefix has to be created first, that step runs outside this wrapper.",
-        ("  Stop ends the sandbox through its own process group (bwrap dies with it); "
-         "wineserver -k is not run, because the sandboxed Wine server lives in a private "
-         "/tmp."),
+        ("  Stop signals bwrap's process group, not the installer's: the sandboxed programs "
+         "run in a session of their own, and bwrap's --die-with-parent and private process "
+         "namespace end them when bwrap ends. wineserver -k is not run, because the "
+         "sandboxed Wine server lives in a private /tmp."),
         "  " + LIMITS,
     ]
     if bwrap_path:
