@@ -2055,3 +2055,246 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("preflight (read-only, advisory)", out)
         self.assertIn("space the install needs: unknown", out)
+
+
+class FakeClock:
+    """Moves forward by `step` seconds every time it is read."""
+
+    def __init__(self, step):
+        self.now, self.step = 0.0, step
+
+    def __call__(self):
+        self.now += self.step
+        return self.now
+
+
+class RunEventTests(unittest.TestCase):
+    """Stall advisory, process and memory events, and the three-field result. Fakes only."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        t = Path(self.tmp.name)
+        self.installer = t / "inst" / "setup.exe"
+        self.installer.parent.mkdir()
+        self.installer.write_bytes(b"x")
+        self.payload = self.installer.parent / "p.bin"
+        self.payload.write_bytes(b"x" * (2 << 20))
+        self.env = {"XDG_DATA_HOME": str(t / "data"), "XDG_STATE_HOME": str(t / "state"),
+                    "SECRET_TOKEN": "hunter2"}
+        from gitfurl.runner import build_plan
+
+        self.plan = build_plan(self.installer.resolve(), "p", self.env)
+        self.plan.prefix.mkdir(parents=True)
+        self.proc = t / "proc"
+        self.proc.mkdir()
+        self.meminfo = t / "meminfo"
+        self.meminfo.write_text("MemTotal: 999 kB\nMemAvailable:  123456 kB\n")
+
+    def fake_prefix_process(self, pos):
+        d = self.proc / "100"
+        (d / "fd").mkdir(parents=True, exist_ok=True)
+        (d / "fdinfo").mkdir(exist_ok=True)
+        (d / "environ").write_bytes(f"WINEPREFIX={self.plan.prefix}\0SECRET_TOKEN=hunter2\0".encode())
+        stat = ["S"] + ["0"] * 19
+        stat[11] = "5"
+        (d / "stat").write_text("100 (setup.tmp) " + " ".join(stat))
+        link = d / "fd" / "7"
+        if not link.is_symlink():
+            link.symlink_to(self.payload.resolve())
+        (d / "fdinfo" / "7").write_text(f"pos:\t{pos}\nflags:\t0\n")
+
+    def run_it(self, run, **opts):
+        from gitfurl.runner import RunOptions, execute
+
+        return execute(self.plan, "/x/wine", self.env, run,
+                       RunOptions(progress_interval=0.05, proc_root=str(self.proc),
+                                  meminfo=str(self.meminfo), **opts))
+
+    def sleeper(self, seconds=0.6, write=0):
+        def run(argv, **kw):
+            import time
+
+            if write:
+                (self.plan.prefix / "big.dat").write_bytes(b"y" * write)
+            time.sleep(seconds)
+            return subprocess.CompletedProcess(argv, 0)
+
+        return run
+
+    @staticmethod
+    def events(res):
+        import json
+
+        text = Path(res.log_path).with_suffix(".events.jsonl").read_text()
+        return [json.loads(line) for line in text.splitlines()], text
+
+    def test_stall_advisory_fires_once_and_never_signals(self):
+        notes = []
+        with mock.patch("os.kill") as kill, mock.patch("os.killpg") as killpg, \
+                mock.patch("subprocess.run") as sub:
+            res = self.run_it(self.sleeper(1.0), detailed_log=True, stall_after_s=250,
+                              clock=FakeClock(100), on_note=notes.append)
+        evs, _ = self.events(res)
+        stalls = [e for e in evs if e["event"] == "possibly_stalled"]
+        self.assertEqual(len(stalls), 1)
+        self.assertTrue(stalls[0]["advisory"])
+        self.assertEqual(len(notes), 1)
+        self.assertIn("advice only", notes[0])
+        self.assertEqual(res.status, 0)  # the run was not touched
+        kill.assert_not_called()
+        killpg.assert_not_called()
+        sub.assert_not_called()
+
+    def test_stall_off_by_default_and_rejects_bad_value(self):
+        from gitfurl.runner import RunOptions
+
+        self.assertIsNone(RunOptions().stall_after_s)
+        notes = []
+        res = self.run_it(self.sleeper(0.4), detailed_log=True, on_progress=lambda s: None,
+                          clock=FakeClock(1000), on_note=notes.append)
+        evs, _ = self.events(res)
+        self.assertEqual(notes, [])
+        self.assertNotIn("possibly_stalled", [e["event"] for e in evs])
+        with self.assertRaises(ValueError):
+            self.run_it(self.sleeper(0.1), stall_after_s=0)
+
+    def test_stall_detector_counts_each_kind_of_movement(self):
+        from gitfurl.progress import Sample, StallDetector
+
+        def smp(read=0, cpu=None):
+            return Sample(1, read, 100, 0, 0, 1, cpu)
+
+        log = Path(self.tmp.name) / "a.log"
+        log.write_text("a")
+        d = StallDetector(25, log, FakeClock(10))
+        self.assertIsNone(d.check(smp(read=5)))  # read grew
+        self.assertIsNone(d.check(smp(read=5, cpu=2.0)))  # cpu used
+        log.write_text("ab")
+        self.assertIsNone(d.check(smp(read=5, cpu=0.0)))  # log grew
+        self.assertIsNone(d.check(smp(read=5, cpu=0.0)))  # idle 10
+        self.assertIsNone(d.check(smp(read=5, cpu=0.0)))  # idle 20
+        self.assertIsNotNone(d.check(smp(read=5, cpu=0.0)))  # idle 30: fires
+        self.assertIsNone(d.check(smp(read=5, cpu=0.0)))  # only once
+
+    def test_processes_and_memory_events_without_env_values(self):
+        self.fake_prefix_process(pos=2 << 20)
+        res = self.run_it(self.sleeper(0.5), detailed_log=True, on_progress=lambda s: None)
+        evs, text = self.events(res)
+        procs = [e for e in evs if e["event"] == "processes"]
+        mems = [e for e in evs if e["event"] == "memory"]
+        self.assertTrue(procs)
+        self.assertEqual(procs[0]["count"], 1)
+        self.assertEqual(procs[0]["programs"], ["setup.tmp"])
+        self.assertEqual(mems[0]["mem_available_bytes"], 123456 * 1024)
+        self.assertNotIn("hunter2", text)
+
+    def test_no_events_when_detailed_log_is_off(self):
+        self.fake_prefix_process(pos=2 << 20)
+        res = self.run_it(self.sleeper(0.4), on_progress=lambda s: None, stall_after_s=0.001,
+                          clock=FakeClock(100))
+        names = [p.name for p in Path(res.log_path).parent.iterdir()]
+        self.assertEqual([n for n in names if n.endswith(".jsonl")], [])
+
+    def test_no_process_or_memory_events_without_the_monitor(self):
+        res = self.run_it(self.sleeper(0.2), detailed_log=True)
+        evs, _ = self.events(res)
+        self.assertEqual([e["event"] for e in evs], ["start", "exit"])
+
+    def test_extraction_observed_when_prefix_grew_and_payload_was_read(self):
+        self.fake_prefix_process(pos=2 << 20)
+        res = self.run_it(self.sleeper(0.5, write=2 << 20), on_progress=lambda s: None)
+        self.assertTrue(res.extraction_observed)
+        self.assertTrue(res.observation_measured)
+        self.assertEqual(res.exit_status, 0)
+        self.assertTrue(res.started)
+
+    def test_extraction_not_observed_with_reads_only(self):
+        self.fake_prefix_process(pos=2 << 20)
+        res = self.run_it(self.sleeper(0.4), on_progress=lambda s: None)
+        self.assertFalse(res.extraction_observed)
+
+    def test_extraction_not_observed_with_writes_only(self):
+        res = self.run_it(self.sleeper(0.4, write=2 << 20), on_progress=lambda s: None)
+        self.assertFalse(res.extraction_observed)
+
+    def test_extraction_observed_false_when_nothing_read_or_written(self):
+        res = self.run_it(self.sleeper(0.4), detailed_log=True, on_progress=lambda s: None)
+        self.assertFalse(res.extraction_observed)
+        self.assertTrue(res.observation_measured)
+        evs, _ = self.events(res)
+        last = evs[-1]
+        self.assertEqual(last["event"], "exit")
+        self.assertIs(last["extraction_observed"], False)
+        self.assertIs(last["started"], True)
+        self.assertEqual(last["exit_status"], 0)
+
+    def test_result_is_not_measured_without_the_monitor_and_still_unpacks(self):
+        from gitfurl.runner import describe_result
+
+        res = self.run_it(self.sleeper(0.1))
+        status, log = res
+        self.assertEqual((status, log), (res.status, res.log_path))
+        self.assertEqual(res[0], 0)
+        self.assertFalse(res.observation_measured)
+        self.assertIn("not measured", describe_result(res))
+        self.assertIsNone(describe_result((0, "x")))
+
+    def test_final_event_shows_the_three_fields_and_wording(self):
+        from gitfurl.runner import describe_result
+
+        self.fake_prefix_process(pos=2 << 20)
+        res = self.run_it(self.sleeper(0.5, write=2 << 20), detailed_log=True,
+                          on_progress=lambda s: None)
+        evs, _ = self.events(res)
+        self.assertIs(evs[-1]["extraction_observed"], True)
+        text = describe_result(res)
+        self.assertIn("Observed activity (heuristic)", text)
+        self.assertIn("does not show that anything was extracted", text)
+
+    def test_stop_before_start_reports_not_started(self):
+        from gitfurl.runner import (
+            CANCELLED_STATUS,
+            RunControl,
+            RunOptions,
+            describe_result,
+            execute,
+        )
+
+        control = RunControl()
+        control.request_stop()
+        with mock.patch("subprocess.Popen") as popen:
+            res = execute(self.plan, "/x/wine", self.env,
+                          options=RunOptions(control=control, detailed_log=True))
+        popen.assert_not_called()
+        self.assertFalse(res.started)
+        self.assertIsNone(res.exit_status)
+        self.assertEqual(res.status, CANCELLED_STATUS)
+        evs, _ = self.events(res)
+        self.assertEqual(evs[-1]["event"], "cancelled")
+        self.assertIs(evs[-1]["started"], False)
+        self.assertIn("Started: no", describe_result(res))
+
+    def test_cli_end_text_and_stall_flag(self):
+        from gitfurl.runner import TrackedResult
+
+        res = TrackedResult(0, Path(self.tmp.name) / "x.log", True, False, True, 0)
+        seen = {}
+
+        def fake(plan, wine, create, track, options=None):
+            seen["opts"] = options
+            return res
+
+        with mock.patch.dict("os.environ", self.env), \
+                mock.patch("shutil.which", return_value="/x/wine"), \
+                mock.patch("gitfurl.cli.run_tracked", side_effect=fake):
+            code, out, _ = run_cli("install", str(self.installer), "--prefix", "p", "--yes",
+                                   "--stall-after", "900")
+            bad, _, err = run_cli("install", str(self.installer), "--prefix", "p", "--yes",
+                                  "--stall-after", "0")
+        self.assertEqual(code, 0)
+        self.assertEqual(seen["opts"].stall_after_s, 900)
+        self.assertIn("Observed activity (heuristic): no", out)
+        self.assertIn("Exit status: 0", out)
+        self.assertEqual(bad, 1)
+        self.assertIn("--stall-after must be above 0", err)
