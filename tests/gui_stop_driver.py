@@ -17,6 +17,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox
 
 from gitfurl import gui
+from gitfurl.memlimit import Availability
 
 dialogs: list[str] = []  # titles of the yes/no dialogs shown, in order
 errors: list[str] = []
@@ -153,6 +154,11 @@ def scenario(root, name):
 def main() -> int:
     name, installer = sys.argv[1], sys.argv[2]
     gui.run_tracked = fake_run_tracked
+    # The memory limit stays on (its default) but is reported as available, so the case does
+    # not depend on this machine's systemd; run_tracked is a fake, so no scope is created.
+    gui.memory_availability = lambda *_a, **_k: Availability(
+        True, "test", "/fake/systemd-run", "/fake/systemctl")
+    gui.memory_problem = lambda *_a, **_k: None
     messagebox.askyesno = ask
     messagebox.showerror = lambda title, msg, **_k: errors.append(f"{title}: {msg}")
     filedialog.askopenfilename = lambda **_k: installer

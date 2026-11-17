@@ -29,6 +29,9 @@ class InstallPlan:
     runtime: str = "wine"
     portable: bool = False  # run inside bwrap (see gitfurl.portable); off by default
     scan: object = None  # a gitfurl.scan.ScanPlan: ClamAV scan before the run; off by default
+    # Run inside a memory-limited systemd user scope (see gitfurl.memlimit). Off in this
+    # library default; the CLI and the window turn it on unless the user turns it off.
+    memory_limit: bool = False
 
     def preview(self) -> str:
         """Readable preview only. The real call would use argv, never a shell string."""
@@ -69,7 +72,8 @@ def runtime_env(runtime: str, proton_path: str | None) -> dict[str, str]:
 
 def build_plan(installer: Path, prefix_name: str, env: dict[str, str] | None = None,
                runtime: str = "wine", proton_path: str | None = None,
-               portable: bool = False, scan=None) -> InstallPlan:
+               portable: bool = False, scan=None,
+               memory_limit: bool = False) -> InstallPlan:
     prefix = prefix_path(prefix_name, env)
     extra = runtime_env(runtime, proton_path)
     if portable:
@@ -89,6 +93,9 @@ def build_plan(installer: Path, prefix_name: str, env: dict[str, str] | None = N
     if scan is not None:
         needs.append("clamscan on PATH and its signature database (ClamAV scan first; gitfurl "
                      "never updates the database)")
+    if memory_limit:
+        needs.append("systemd-run and a user systemd manager with the memory controller "
+                     "(memory limit; turn it off with --no-memory-limit)")
     return InstallPlan(
         argv=["umu-run" if runtime == "proton" else "wine", str(installer)],
         prefix=prefix,
@@ -98,6 +105,7 @@ def build_plan(installer: Path, prefix_name: str, env: dict[str, str] | None = N
         runtime=runtime,
         portable=portable,
         scan=scan,
+        memory_limit=memory_limit,
     )
 
 
@@ -339,6 +347,8 @@ class RunOptions:
     allow_scan_hit: bool = False  # run even if the ClamAV scan matched a signature
     scan_result: object = None  # a ScanResult already obtained (the app's second confirmation)
     scan_summary: str | None = None  # set by run_with_prefix; written to the log
+    cgroup_root: str = "/sys/fs/cgroup"  # injected in tests (memory limit)
+    memory_interval: float = 5.0  # seconds between memory limit adjustments
 
 
 _WINEDEBUG_OK = None
@@ -379,6 +389,7 @@ class ExecResult:
     extraction_observed: bool = False
     observation_measured: bool = False
     exit_status: int | None = None
+    memory: object = None  # gitfurl.memlimit.MemoryReport when the memory limit was on
 
     def as_tuple(self):
         return (self.status, self.log_path)
@@ -416,8 +427,11 @@ def describe_result(result) -> str | None:
                 "a heuristic and does not show that anything was extracted or installed")
     else:
         seen = "no (not seen; a short burst between samples would be missed)"
-    return (f"Started: yes.\nObserved activity (heuristic): {seen}.\n"
+    text = (f"Started: yes.\nObserved activity (heuristic): {seen}.\n"
             f"Exit status: {result.exit_status}.")
+    if result.memory is not None:
+        text += "\n" + "\n".join(result.memory.lines())
+    return text
 
 
 def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run=None,
@@ -453,6 +467,13 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
         # overrides are set inside it (see gitfurl.portable.build_portable_argv).
         argv = build_portable_argv(replace(plan, argv=argv), bwrap or "", Path(plan.argv[-1]),
                                    dict(base_env), overrides)
+    scope = None
+    if plan.memory_limit:  # no silent fallback: refuse before anything is created or run
+        from gitfurl.memlimit import prepare
+
+        scope = prepare(plan.prefix.name, base_env, cgroup_root=options.cgroup_root,
+                        meminfo=options.meminfo, interval=options.memory_interval)
+        argv = scope.wrap(argv)  # outermost: it wraps bwrap or umu-run as well
     child_env = build_child_env(os.environ if env is None else env, overrides)
     events = None
     if options.detailed_log:
@@ -499,6 +520,18 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
     # Variable names only, never values: the environment can hold secrets.
     event("start", command=shlex.join(argv), cwd=str(plan.cwd), prefix=str(plan.prefix),
           env_overrides=sorted(overrides), wine=wine, portable=plan.portable)
+    if scope is not None:
+        b = scope.budget
+        event("memory_limit", unit=scope.unit, memory_high=b.high_bytes, memory_max=b.max_bytes,
+              reserve=b.reserve, mem_total=b.total, mem_available=b.available)
+
+        def memory_changed(old, new, available, usage):
+            event("memory_limit_change", unit=scope.unit, old_memory_high=old,
+                  memory_high=new, mem_available=available, scope_usage=usage)
+
+        scope.on_change = memory_changed
+        scope.on_note = options.on_note
+    memory_report = None
     fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "w") as log:
@@ -509,6 +542,8 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
             log.flush()
             if monitor:
                 monitor.start()
+            if scope is not None:
+                scope.start()
             started = True
             try:
                 if run is not None:  # tests inject a fake runner
@@ -526,6 +561,8 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
                 final = monitor.stop() if monitor else None
                 if final is not None:
                     observer.update(final)
+                if scope is not None:
+                    memory_report = scope.finish()
             if control.cancelled and plan.portable:
                 control.notes.append("portable run: bwrap's process group was stopped and the "
                                      "sandbox ended with it (--die-with-parent); "
@@ -536,8 +573,15 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
                     log.write(f"--- {note}\n")
             else:
                 log.write(f"\n--- exit status {proc.returncode}\n")
+            if memory_report is not None:
+                for line in memory_report.lines():
+                    log.write(f"--- {line}\n")
         if final is not None:
             event("progress_final", line=final.line())
+        if memory_report is not None:
+            event("memory_limit_result", unit=scope.unit, oom_kill=memory_report.oom_kill,
+                  oom_result=memory_report.oom_result, high_events=memory_report.high,
+                  changes=len(memory_report.changes))
         facts = {"started": started,
                  "extraction_observed": bool(observer and observer.observed),
                  "observation_measured": bool(observer and observer.measured),
@@ -552,7 +596,7 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
         if events:
             events.close()
     return ExecResult(CANCELLED_STATUS if control.cancelled else proc.returncode, log_path,
-                      **facts)
+                      memory=memory_report, **facts)
 
 
 def run_with_prefix(plan: InstallPlan, wine: str, create_if_missing: bool,
@@ -569,18 +613,37 @@ def run_with_prefix(plan: InstallPlan, wine: str, create_if_missing: bool,
 
         base = os.environ if env is None else env
         check_portable_supported(plan, find_bwrap(base), dict(base), Path(plan.argv[-1]))
+    opts = options or RunOptions()
+    if plan.memory_limit:  # refuse before a prefix is created for a run that cannot happen
+        from gitfurl.memlimit import prepare
+
+        prepare(plan.prefix.name, os.environ if env is None else env,
+                cgroup_root=opts.cgroup_root, meminfo=opts.meminfo)
     if plan.scan is not None:  # before anything is created; a hit or an error raises ScanBlocked
-        options = _scan_gate(plan, options or RunOptions())
+        options = _scan_gate(plan, opts)
+        opts = options
     if not plan.prefix.is_dir():
         if not create_if_missing:
             raise FileNotFoundError(
                 f"prefix does not exist: {plan.prefix} (run 'gitfurl cli prefix create')"
             )
         extra = {k: v for k, v in plan.env_overrides.items() if k != "WINEPREFIX"}
-        status = create_prefix(plan.prefix.name, wine, env, run, extra_env=extra)
+        boot_scope = None
+        if plan.memory_limit:  # wineboot gets the same limits, fixed (no adjustment)
+            from gitfurl.memlimit import prepare
+
+            boot_scope = prepare(plan.prefix.name, os.environ if env is None else env,
+                                 cgroup_root=opts.cgroup_root, meminfo=opts.meminfo,
+                                 label="wineboot")
+        try:
+            status = create_prefix(plan.prefix.name, wine, env, run, extra_env=extra,
+                                   wrap=boot_scope.wrap if boot_scope else None)
+        finally:
+            boot_report = boot_scope.finish() if boot_scope else None
         if status != 0:
+            hit = " " + boot_report.lines()[0] if boot_report and boot_report.hit_limit else ""
             raise RuntimeError(f"creating the prefix failed (wine exited {status}); "
-                               "the installer was not run")
+                               f"the installer was not run.{hit}")
     if on_ready is not None:
         on_ready()  # the prefix exists; e.g. take a "before" snapshot
     return execute(plan, wine, env, run, options)

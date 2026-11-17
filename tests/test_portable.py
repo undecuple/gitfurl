@@ -308,7 +308,7 @@ class CliTests(unittest.TestCase):
                 mock.patch("gitfurl.portable.find_bwrap", return_value=BWRAP), \
                 mock.patch("sys.stdin.isatty", return_value=False), \
                 mock.patch("subprocess.run") as run, mock.patch("subprocess.Popen") as popen:
-            code, out, _ = run_cli("install", str(self.f), "--prefix", "p1", "--portable")
+            code, out, _ = run_cli("install", "--no-memory-limit", str(self.f), "--prefix", "p1", "--portable")
         self.assertEqual(code, 2)  # not approved
         run.assert_not_called()
         popen.assert_not_called()
@@ -327,7 +327,7 @@ class CliTests(unittest.TestCase):
                 mock.patch("shutil.which", return_value="/x/wine"), \
                 mock.patch("gitfurl.portable.find_bwrap", return_value=None), \
                 mock.patch("subprocess.run") as run, mock.patch("subprocess.Popen") as popen:
-            code, _, err = run_cli("install", str(self.f), "--prefix", "p1", "--portable", "--yes")
+            code, _, err = run_cli("install", "--no-memory-limit", str(self.f), "--prefix", "p1", "--portable", "--yes")
         self.assertEqual(code, 1)
         self.assertIn("Nothing was run", err)
         run.assert_not_called()

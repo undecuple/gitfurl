@@ -159,11 +159,12 @@ def run_in_group(argv: list[str], env: dict[str, str], timeout: float, wine: str
 
 
 def create_prefix(name: str, wine: str, env: dict[str, str] | None = None, run=None,
-                  extra_env: dict[str, str] | None = None) -> int:
+                  extra_env: dict[str, str] | None = None, wrap=None) -> int:
     """Create a dedicated prefix. Refuses to touch an existing path. Returns wine's exit status.
 
     Without an injected `run` (tests), wineboot runs in its own process group so a timeout
-    or Ctrl-C can end it and its helpers (see run_in_group).
+    or Ctrl-C can end it and its helpers (see run_in_group). `wrap`, if given, turns the
+    wineboot argv into the argv to start (the memory limit's systemd-run scope).
     """
     import subprocess
 
@@ -178,11 +179,12 @@ def create_prefix(name: str, wine: str, env: dict[str, str] | None = None, run=N
         exc.notes = ["wineboot had not been started yet; nothing was run"]
         raise
     child = child_env(os.environ if env is None else env, plan["env_overrides"])
+    argv = wrap(plan["argv"]) if wrap else plan["argv"]
     try:
         if run is None:
-            proc = run_in_group(plan["argv"], env=child, timeout=WINEBOOT_TIMEOUT_S, wine=wine)
+            proc = run_in_group(argv, env=child, timeout=WINEBOOT_TIMEOUT_S, wine=wine)
         else:
-            proc = run(plan["argv"], env=child, timeout=WINEBOOT_TIMEOUT_S, check=False)
+            proc = run(argv, env=child, timeout=WINEBOOT_TIMEOUT_S, check=False)
     except subprocess.TimeoutExpired as exc:
         done = "; ".join(getattr(exc, "notes", [])) or "no cleanup details"
         raise RuntimeError(

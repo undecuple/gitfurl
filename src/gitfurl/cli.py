@@ -13,6 +13,7 @@ from gitfurl.cleanup import MODES, perform_cleanup, plan_cleanup
 from gitfurl.detect import describe as describe_detection
 from gitfurl.detect import detect
 from gitfurl.doctor import format_report, run_doctor
+from gitfurl.memlimit import MemoryLimitError
 from gitfurl.prefixes import (
     create_prefix,
     list_prefixes,
@@ -64,6 +65,10 @@ def build_parser() -> argparse.ArgumentParser:
                       help="run the installer inside bwrap with only the prefix writable, no "
                            "network and no menu entries (reduces changes outside the prefix; "
                            "not a guarantee); default: off")
+    inst.add_argument("--no-memory-limit", action="store_true",
+                      help="run without the memory limit. By default the run is put in a "
+                           "systemd user scope with a soft and a hard memory limit, so it is "
+                           "less likely to push the whole system out of memory")
     inst.add_argument("--find-exe", action="store_true",
                       help="after the run, guess which new program was installed (local only)")
     inst.add_argument("--progress", action="store_true",
@@ -116,7 +121,8 @@ def main(argv: list[str] | None = None) -> int:
         installer = validate_installer(args.installer)
         scan_plan = _scan_plan(args, installer)
         plan = build_plan(installer, args.prefix or DEFAULT_PREFIX, runtime=args.runtime,
-                          proton_path=args.proton_path, portable=args.portable, scan=scan_plan)
+                          proton_path=args.proton_path, portable=args.portable, scan=scan_plan,
+                          memory_limit=not args.no_memory_limit)
         portable_lines = _portable_lines(plan, installer, shutil.which("wine") or "wine",
                                          full=True) if args.portable else []
     except ValueError as exc:
@@ -139,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
         for line in describe_scan_plan(scan_plan):
             print(line)
         print("  database date: not checked in a dry run (see 'gitfurl cli doctor')")
+    for line in _memory_lines(plan)[0]:
+        print(line)
     for line in describe_detection(detect(installer)).splitlines():
         print(line)
     print("preflight (read-only, advisory):")
@@ -173,6 +181,19 @@ def _portable_lines(plan, installer, wine: str, full: bool) -> list[str]:
     wrapped = replace(plan, argv=[wine, *plan.argv[1:]])
     check_portable_supported(wrapped, bwrap, env, installer)
     return describe_portable(wrapped, bwrap, installer, env, full_argv=full)
+
+
+def _memory_lines(plan) -> tuple[list[str], str | None]:
+    """The memory limit's plan lines and the problem that stops a run (None if none).
+
+    Reads files only (PATH, the user manager's socket, cgroup files, /proc/meminfo)."""
+    from gitfurl.memlimit import availability, describe
+
+    return describe(plan.memory_limit, availability() if plan.memory_limit else None)
+
+
+MEMORY_OFF_HINT = ("Nothing was run. To run without the memory limit, add --no-memory-limit "
+                   "(the run can then use all free memory).")
 
 
 def _prefix_interrupt_message(exc: BaseException) -> str:
@@ -241,7 +262,8 @@ def _real_install(args) -> int:
         installer = validate_installer(args.installer)
         scan_plan = _scan_plan(args, installer)
         plan = build_plan(installer, args.prefix, runtime=args.runtime,
-                          proton_path=args.proton_path, portable=args.portable, scan=scan_plan)
+                          proton_path=args.proton_path, portable=args.portable, scan=scan_plan,
+                          memory_limit=not args.no_memory_limit)
         if args.portable and args.runtime != "wine":
             raise ValueError("portable install is only supported with the wine runtime")
     except ValueError as exc:
@@ -280,6 +302,12 @@ def _real_install(args) -> int:
     except ValueError as exc:
         print(f"error: {exc}. Nothing was run.", file=sys.stderr)
         return 1
+    memory_lines, memory_problem = _memory_lines(plan)
+    if memory_problem:
+        for line in memory_lines:
+            print(line)
+        print(f"error: {memory_problem}. {MEMORY_OFF_HINT}", file=sys.stderr)
+        return 2
     print(f"About to run: {plan.preview()}")
     print(f"prefix: {plan.prefix}" + (" (will be created first)" if missing else ""))
     if args.portable:
@@ -287,6 +315,8 @@ def _real_install(args) -> int:
             print(line)
     else:
         print("Wine prefixes are not sandboxes: the installer can reach files you can reach.")
+    for line in memory_lines:
+        print(line)
     print("Only run installers you are authorised to use and have chosen to trust.")
     for line in describe_detection(detect(installer)).splitlines():
         print(line)
@@ -327,6 +357,9 @@ def _real_install(args) -> int:
         result = run_tracked(
             plan, wine, args.create_prefix, args.show_changes or args.find_exe, options=options)
         status, log_path, changes = result
+    except MemoryLimitError as exc:
+        print(f"error: {exc}. {MEMORY_OFF_HINT}", file=sys.stderr)
+        return 2
     except (RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

@@ -396,6 +396,7 @@ class WindowPolishTests(unittest.TestCase):
     def test_banner_checklist_and_reasons(self):
         r = run_window('''
             root.focus_force()
+            ui["memory_var"].set(False)  # the memory limit has its own test (test_memlimit)
             ui["show"]("details")
             ui["wine_path"].update(value=None, umu=None)
             ui["set_banners"](True)

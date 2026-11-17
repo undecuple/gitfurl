@@ -19,6 +19,8 @@ from gitfurl.cleanup import MODES, perform_cleanup, plan_cleanup
 from gitfurl.detect import describe as describe_detection
 from gitfurl.detect import detect
 from gitfurl.doctor import run_doctor
+from gitfurl.memlimit import availability as memory_availability
+from gitfurl.memlimit import describe as describe_memory
 from gitfurl.prefixes import (
     create_prefix,
     list_prefixes,
@@ -90,10 +92,29 @@ def scan_option_state(clamscan_path: str | None) -> tuple[bool, str]:
     return True, SCAN_NOTE
 
 
+MEMORY_TITLE = "Limit memory (protects the rest of the system)"
+MEMORY_NOTE = ("On by default. Runs the installer in a systemd user scope with a soft and a hard "
+               "memory limit. This reduces the chance that the system runs out of memory; it does "
+               "not guarantee that the installer succeeds. Above the soft limit the installer is "
+               "slowed down; at the hard limit the kernel stops processes in this run only.")
+
+
+def memory_problem(enabled: bool, avail=None, meminfo: str = "/proc/meminfo") -> str | None:
+    """Why Run must stay off for the memory limit, or None. Reads files only."""
+    if not enabled:
+        return None
+    _lines, problem = describe_memory(True, avail if avail is not None else memory_availability(),
+                                      meminfo)
+    if problem is None:
+        return None
+    return f"{problem}. Turn off '{MEMORY_TITLE}' to run without it."
+
+
 def describe_plan(installer: str, prefix: str, runtime: str = "wine",
                   proton_path: str | None = None, portable: bool = False,
-                  scan: bool = False) -> tuple[str, str | None]:
-    """Return (preview text, error). No side effects: the scan is described, never run."""
+                  scan: bool = False, memory_limit: bool = False) -> tuple[str, str | None]:
+    """Return (preview text, error). No side effects: the scan is described, never run; the
+    memory limit lines read files only."""
     if not installer.strip():
         return "", "Choose an installer file."
     if not prefix.strip():
@@ -103,7 +124,7 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
                                             scanmod.find_clamscan()) if scan else None
         plan = build_plan(validate_installer(installer.strip()), prefix.strip(),
                           runtime=runtime, proton_path=proton_path, portable=portable,
-                          scan=scan_plan)
+                          scan=scan_plan, memory_limit=memory_limit)
         portable_lines = []
         if portable:
             from gitfurl.portable import check_portable_supported, describe_portable, find_bwrap
@@ -126,7 +147,9 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
     if portable_lines:
         text += "\n".join(portable_lines) + "\n"
     if scan_plan is not None:
-        text += "\n".join(scanmod.describe_scan_plan(scan_plan))
+        text += "\n".join(scanmod.describe_scan_plan(scan_plan)) + "\n"
+    text += "\n".join(describe_memory(memory_limit, memory_availability() if memory_limit
+                                      else None)[0])
     return text.rstrip(), None
 
 
@@ -143,12 +166,15 @@ def installer_problem(installer: str) -> str | None:
 
 def plan_checklist(installer_error: str | None, prefix_error: str | None, prefix_exists: bool,
                    will_create: bool, runtime: str, runtime_found: bool,
-                   plan_error: str | None = None) -> list[tuple[str, bool, str]]:
+                   plan_error: str | None = None, memory_error: str | None = None
+                   ) -> list[tuple[str, bool, str]]:
     """What Run needs, as (key, ok, text) rows in screen order. No side effects.
 
     Run is allowed only when every row is ok. A row that is not ok says what is missing in
     words, so the state never depends on colour alone. `plan_error` is a problem the plan
     itself reports after the other rows pass (for example a missing Proton folder).
+    `memory_error` is why the memory limit cannot be used (see memory_problem); it is always
+    shown, since only the user can decide to run without the limit.
     """
     tool = "umu-run" if runtime == "proton" else "Wine"
     rows = [
@@ -168,6 +194,8 @@ def plan_checklist(installer_error: str | None, prefix_error: str | None, prefix
                                        "'Create the prefix if it does not exist'")))
     if plan_error is not None and all(ok for _k, ok, _t in rows):
         rows.append(("plan", False, plan_error))
+    if memory_error is not None:
+        rows.append(("memory", False, memory_error))
     return rows
 
 
@@ -291,6 +319,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     find_var = tk.BooleanVar(value=False)
     portable_var = tk.BooleanVar(value=False)
     scan_var = tk.BooleanVar(value=False)
+    memory_var = tk.BooleanVar(value=True)  # the memory limit: on by default
     progress_var = tk.StringVar(value="Shown while an installer runs: payload read, rate, rough ETA.")
     pending = {"cleanup": None, "control": None, "proton": False}
     proton_var = tk.StringVar(value=os.environ.get("PROTONPATH", ""))
@@ -583,7 +612,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     c = w.RoundCard(det)
     c.pack(fill="x")
     check_rows: dict[str, tuple[tk.Frame, tk.Label, tk.Label]] = {}
-    for key in ("installer", "runtime", "prefix", "plan"):
+    for key in ("installer", "runtime", "prefix", "plan", "memory"):
         rr = tk.Frame(c.body, bg=w.PANEL)
         mark = tk.Label(rr, text="", bg=w.PANEL, fg=FG, font=F(T["body"], True), width=2)
         mark.pack(side="left", anchor="n")
@@ -649,11 +678,18 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
 
         return build
 
-    heading(det, "Options  (all off except creating the prefix)")
+    heading(det, "Options  (all off except creating the prefix and the memory limit)")
     c = w.RoundCard(det)
     c.pack(fill="x")
     row(c, "Create the prefix if it does not exist", "On by default. The prefix is created first, "
         "then the installer runs.", lambda p: w.Switch(p, create_var), first=True)
+    memory_switch = {}
+
+    def memory_widget(p):
+        memory_switch["w"] = w.Switch(p, memory_var, command=lambda: refresh_plan())
+        return memory_switch["w"]
+
+    row(c, MEMORY_TITLE, MEMORY_NOTE, memory_widget)
     row(c, "Show what the installer changed on my system",
         "Lists new files and registry keys in the prefix and in a few places outside it.",
         lambda p: w.Switch(p, changes_var))
@@ -804,11 +840,12 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             sub_var.set("invalid name")
         runtime = runtime_var.get()
         text, err = describe_plan(installer_var.get(), name, runtime, proton_dir(),
-                                  portable_var.get(), scan_var.get())
+                                  portable_var.get(), scan_var.get(), memory_var.get())
         set_text(plan_box, text or (err or ""))
         tool = wine_path["umu"] if runtime == "proton" else wine_path["value"]
         rows = plan_checklist(installer_problem(installer_var.get()), prefix_error, exists,
-                              create_var.get(), runtime, bool(tool), err)
+                              create_var.get(), runtime, bool(tool), err,
+                              memory_problem(memory_var.get()))
         for key, (frame, mark, msg) in check_rows.items():
             hit = next((r for r in rows if r[0] == key), None)
             if hit is None:
@@ -923,7 +960,9 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     def run_clicked():
         proton = runtime_var.get() == "proton"
         text, err = describe_plan(installer_var.get(), selected_prefix(), runtime_var.get(),
-                                  proton_dir(), portable_var.get(), scan_var.get())
+                                  proton_dir(), portable_var.get(), scan_var.get(),
+                                  memory_var.get())
+        err = err or memory_problem(memory_var.get())
         if err:
             messagebox.showerror("Cannot run", err)
             return
@@ -941,7 +980,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             return
         plan = build_plan(validate_installer(installer_var.get().strip()), selected_prefix(),
                           runtime=runtime_var.get(), proton_path=proton_dir(),
-                          portable=portable_var.get(), scan=scan_plan)
+                          portable=portable_var.get(), scan=scan_plan,
+                          memory_limit=memory_var.get())
         missing = not plan.prefix.is_dir()
         if missing and not create_var.get():
             messagebox.showerror("Prefix missing", f"{plan.prefix} does not exist. Create it first, "
@@ -993,15 +1033,21 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         pending["portable"] = plan.portable
         options = RunOptions(on_progress=ui_updates.put, progress_interval=3.0,
                              detailed_log=detail_var.get(), control=control,
-                             on_note=lambda m: pending.__setitem__("note", m))
-        pending["note"] = ""
+                             on_note=note_received)
         if scan_plan is not None:
             status_var.set("Scanning the installer with ClamAV first...")
         launch(plan, tool, create, track, options, ctx)
 
+    def note_received(message):
+        """A run note (scan result, memory limit change, stall advisory): shown on the
+        progress line now and kept for the end text."""
+        pending["notes"].append(message)
+        ui_updates.put(message)
+
     def launch(plan, tool, create, track, options, ctx):
         """Start the approved run in a thread (the scan, if any, runs first inside it)."""
         pending["rerun"] = (plan, tool, create, track, options, ctx)
+        pending["notes"] = []
         stop_btn.state(["!disabled"])  # a Stop from an earlier run must not leave it disabled
         stop_btn.pack(side="left", padx=(0, SP["md"]), before=create_btn)
         run_in_thread(lambda: run_tracked(plan, tool, create, track,
@@ -1065,6 +1111,9 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         try:
             while True:  # keep only the newest progress sample
                 smp = ui_updates.get_nowait()
+                if isinstance(smp, str):  # a note (memory limit change, stall advisory)
+                    progress_var.set(smp)
+                    continue
                 bar.set(smp.percent or 0)
                 progress_var.set(smp.line())
         except queue.Empty:
@@ -1124,7 +1173,10 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                     extra = "\nCleanup skipped: the installer did not exit with status 0."
             facts = describe_result(value)
             extra += f"\n{facts}" if facts else ""
-            extra += f"\n{pending['note']}" if pending.get("note") else ""
+            notes = pending.get("notes") or []
+            if len(notes) > 5:  # the first (the scan result, if any) and the latest four
+                notes = [notes[0], "...", *notes[-4:]]
+            extra += "".join(f"\n{n}" for n in notes)
             status_var.set(f"Installer exited with status {status}{note}{extra}\n"
                            f"Local log: {log} (may contain your user name and paths)")
             status_label.configure(fg=w.CYAN if status == 0 else w.AMBER)
@@ -1193,6 +1245,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                     "action": action,
                     "installer_var": installer_var,
                     "create_var": create_var,
+                    "memory_var": memory_var,
+                    "memory_switch": memory_switch,
                     "run": run,
                     "busy": busy,
                     "plan_box": plan_box,

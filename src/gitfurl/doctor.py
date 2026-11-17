@@ -63,6 +63,22 @@ def machine_resources(meminfo: str = "/proc/meminfo") -> str:
     return f"{cpus} CPU threads, {mem}"
 
 
+def memory_limit_report(env=None) -> str:
+    """Whether the memory limit can be used (file checks, then systemd itself, read-only)."""
+    from gitfurl.memlimit import MemoryLimitError, availability, verify
+
+    avail = availability(env)
+    if not avail.ok:
+        return f"unavailable ({avail.reason}); runs need --no-memory-limit"
+    try:
+        checked = verify(avail, env)
+    except MemoryLimitError as exc:
+        return f"unavailable ({str(exc).removeprefix('memory limit: NOT available: ')}); runs " \
+               "need --no-memory-limit"
+    return (f"available (systemd {checked.version}, memory controller delegated to your user "
+            f"manager at {checked.manager_cgroup})")
+
+
 def run_doctor() -> dict:
     return {
         "resources": machine_resources(),
@@ -73,6 +89,7 @@ def run_doctor() -> dict:
         "innoextract": probe_tool("innoextract", ["--version"]),
         "clamscan": probe_tool("clamscan", ["--version"]),
         "tkinter": probe_tkinter(),
+        "memory_limit": memory_limit_report(),
     }
 
 
@@ -91,6 +108,8 @@ def format_report(report: dict) -> str:
     scan = report.get("clamscan")
     if scan is not None:
         lines.extend(_clamscan_lines(scan))
+    if report.get("memory_limit"):
+        lines.append(f"memory limit: {report['memory_limit']}")
     lines.append("Nothing was installed or changed.")
     return "\n".join(lines)
 

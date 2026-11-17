@@ -112,7 +112,7 @@ class InstallRunTests(unittest.TestCase):
             f = Path(d) / "setup.exe"
             f.write_bytes(b"")
             with mock.patch("subprocess.run") as run:
-                code, _, err = run_cli("install", str(f), "--yes")
+                code, _, err = run_cli("install", "--no-memory-limit", str(f), "--yes")
         self.assertEqual(code, 1)
         self.assertIn("--prefix", err)
         run.assert_not_called()
@@ -125,7 +125,7 @@ class InstallRunTests(unittest.TestCase):
                     mock.patch("shutil.which", return_value="/x/wine"), \
                     mock.patch("sys.stdin.isatty", return_value=False), \
                     mock.patch("subprocess.run") as run:
-                code, _, _ = run_cli("install", str(f), "--prefix", "p1")
+                code, _, _ = run_cli("install", "--no-memory-limit", str(f), "--prefix", "p1")
             self.assertEqual(list(Path(state).iterdir()), [])
         self.assertEqual(code, 2)
         run.assert_not_called()
@@ -137,7 +137,7 @@ class InstallRunTests(unittest.TestCase):
             with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data}), \
                     mock.patch("shutil.which", return_value="/x/wine"), \
                     mock.patch("subprocess.run") as run:
-                code, _, err = run_cli("install", str(f), "--prefix", "nope", "--yes")
+                code, _, err = run_cli("install", "--no-memory-limit", str(f), "--prefix", "nope", "--yes")
         self.assertEqual(code, 1)
         self.assertIn("does not exist", err)
         run.assert_not_called()
@@ -151,7 +151,7 @@ class InstallRunTests(unittest.TestCase):
                                                 "SECRET_TOKEN": "hunter2"}), \
                     mock.patch("shutil.which", return_value="/x/wine"), \
                     patched_runs(done) as run:
-                code, out, _ = run_cli("install", str(f), "--prefix", "p1", "--yes")
+                code, out, _ = run_cli("install", "--no-memory-limit", str(f), "--prefix", "p1", "--yes")
             logs = list((Path(state) / "gitfurl" / "logs").iterdir())
             self.assertEqual(len(logs), 1)
             self.assertEqual(logs[0].stat().st_mode & 0o777, 0o600)
@@ -347,7 +347,7 @@ class CreateIfMissingTests(unittest.TestCase):
             f, env = self._env(d, data, state)
             with env, mock.patch("shutil.which", return_value="/x/wine"), \
                     patched_runs(done) as run:
-                code, out, _ = run_cli("install", str(f), "--prefix", "new", "--create-prefix", "--yes")
+                code, out, _ = run_cli("install", "--no-memory-limit", str(f), "--prefix", "new", "--create-prefix", "--yes")
             self.assertTrue((Path(data) / "gitfurl" / "prefixes" / "new").is_dir())
         self.assertEqual(code, 0)
         self.assertIn("will be created first", out)
@@ -362,7 +362,7 @@ class CreateIfMissingTests(unittest.TestCase):
             f, env = self._env(d, data, state)
             with env, mock.patch("shutil.which", return_value="/x/wine"), \
                     mock.patch("gitfurl.prefixes.run_in_group", return_value=done) as run:
-                code, _, err = run_cli("install", str(f), "--prefix", "new", "--create-prefix", "--yes")
+                code, _, err = run_cli("install", "--no-memory-limit", str(f), "--prefix", "new", "--create-prefix", "--yes")
         self.assertEqual(code, 1)
         self.assertIn("installer was not run", err)
         self.assertEqual(run.call_count, 1)
@@ -373,7 +373,7 @@ class CreateIfMissingTests(unittest.TestCase):
             f, env = self._env(d, data, state)
             with env, mock.patch("shutil.which", return_value="/x/wine"), \
                     mock.patch("subprocess.run") as run:
-                code, _, err = run_cli("install", str(f), "--prefix", "new", "--yes")
+                code, _, err = run_cli("install", "--no-memory-limit", str(f), "--prefix", "new", "--yes")
         self.assertEqual(code, 1)
         self.assertIn("--create-prefix", err)
         run.assert_not_called()
@@ -470,7 +470,7 @@ class CleanupTests(unittest.TestCase):
                 with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data, "XDG_STATE_HOME": state}), \
                         mock.patch("shutil.which", return_value="/x/wine"), \
                         patched_runs(done):
-                    run_cli("install", str(f), "--prefix", "p1", "--yes", "--cleanup", "installer")
+                    run_cli("install", "--no-memory-limit", str(f), "--prefix", "p1", "--yes", "--cleanup", "installer")
                 self.assertEqual(f.exists(), should_exist)
 
 
@@ -516,7 +516,7 @@ class ChangesTests(unittest.TestCase):
                 with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data, "XDG_STATE_HOME": state}), \
                         mock.patch("shutil.which", return_value="/x/wine"), \
                         patched_runs(done):
-                    outs[bool(flag)] = run_cli("install", str(f), "--prefix", "p1", "--yes", *flag)[1]
+                    outs[bool(flag)] = run_cli("install", "--no-memory-limit", str(f), "--prefix", "p1", "--yes", *flag)[1]
         self.assertNotIn("registry keys", outs[False])
         self.assertIn("registry keys", outs[True])
 
@@ -615,7 +615,7 @@ class ProgressTests(unittest.TestCase):
             with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data, "XDG_STATE_HOME": state}), \
                     mock.patch("shutil.which", return_value="/x/wine"), \
                     patched_runs(done):
-                _, out, _ = run_cli("install", str(f), "--prefix", "p1", "--yes")
+                _, out, _ = run_cli("install", "--no-memory-limit", str(f), "--prefix", "p1", "--yes")
             names = [p.name for p in (Path(state) / "gitfurl" / "logs").iterdir()]
         self.assertEqual(len(names), 1)
         self.assertTrue(names[0].endswith(".log"))
@@ -629,7 +629,7 @@ class ProgressTests(unittest.TestCase):
             with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data}), \
                     mock.patch("shutil.which", return_value="/x/wine"), \
                     mock.patch("subprocess.run") as run:
-                code, _, err = run_cli("install", str(f), "--prefix", "p1", "--yes",
+                code, _, err = run_cli("install", "--no-memory-limit", str(f), "--prefix", "p1", "--yes",
                                        "--wine-debug", "x;y")
         self.assertEqual(code, 1)
         self.assertIn("invalid --wine-debug", err)
@@ -681,7 +681,7 @@ class RuntimeAndExeTests(unittest.TestCase):
             with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data, "XDG_STATE_HOME": state}), \
                     mock.patch("shutil.which", side_effect=lambda n: f"/x/{n}"), \
                     patched_runs(done) as run:
-                code, _, _ = run_cli("install", str(f), "--prefix", "n", "--create-prefix", "--yes",
+                code, _, _ = run_cli("install", "--no-memory-limit", str(f), "--prefix", "n", "--create-prefix", "--yes",
                                      "--runtime", "proton", "--proton-path", str(pp))
         self.assertEqual(code, 0)
         first, second = run.call_args_list[0], run.call_args_list[1]
@@ -746,7 +746,7 @@ class RuntimeAndExeTests(unittest.TestCase):
                         mock.patch("shutil.which", return_value="/x/wine"), \
                         patched_runs() as run:
                     run.side_effect = fake_run
-                    _, out, _ = run_cli("install", str(f), "--prefix", "p1", "--yes", *flag)
+                    _, out, _ = run_cli("install", "--no-memory-limit", str(f), "--prefix", "p1", "--yes", *flag)
                 self.assertEqual(run.call_count, 1)  # only the installer; the program is not run
                 self.assertEqual("g.exe" in out, expect)
 
@@ -761,7 +761,7 @@ class ReviewFixTests(unittest.TestCase):
                     mock.patch.dict("os.environ", {"XDG_DATA_HOME": data}), \
                     mock.patch("shutil.which", return_value="/x/wine"), \
                     mock.patch("subprocess.run") as run:
-                code1, _, err1 = run_cli("install", str(f), "--prefix", "p1", "--yes")
+                code1, _, err1 = run_cli("install", "--no-memory-limit", str(f), "--prefix", "p1", "--yes")
                 code2, _, err2 = run_cli("prefix", "create", "new", "--yes")
                 code3, _, _ = run_cli("install", str(f), "--prefix", "p1", "--dry-run")
                 run.assert_not_called()  # refused or dry: nothing was started
@@ -788,7 +788,7 @@ class ReviewFixTests(unittest.TestCase):
                                                 "WINEDLLOVERRIDES": "mscoree=d"}), \
                     mock.patch("shutil.which", return_value="/x/wine"), \
                     patched_runs(done) as run:
-                run_cli("install", str(f), "--prefix", "p1", "--yes")
+                run_cli("install", "--no-memory-limit", str(f), "--prefix", "p1", "--yes")
         self.assertNotIn("WINEDLLOVERRIDES", run.call_args.kwargs["env"])
 
     def test_cleanup_refuses_general_purpose_user_folders(self):
@@ -1462,7 +1462,7 @@ class StopTests(unittest.TestCase):
             with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data, "XDG_STATE_HOME": state}), \
                     mock.patch("shutil.which", return_value="/x/wine"), \
                     mock.patch("gitfurl.cli.run_tracked", side_effect=fake):
-                code, out, _ = run_cli("install", str(f), "--prefix", "p1", "--yes",
+                code, out, _ = run_cli("install", "--no-memory-limit", str(f), "--prefix", "p1", "--yes",
                                        "--cleanup", "installer")
             self.assertTrue(f.exists())
         self.assertEqual(code, 130)
@@ -1771,7 +1771,7 @@ class PrefixGroupTests(unittest.TestCase):
             with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data}), \
                     mock.patch("shutil.which", return_value="/x/wine"), \
                     mock.patch("gitfurl.cli.run_tracked", side_effect=exc):
-                code, _, err = run_cli("install", str(f), "--prefix", "p1", "--create-prefix", "--yes")
+                code, _, err = run_cli("install", "--no-memory-limit", str(f), "--prefix", "p1", "--create-prefix", "--yes")
         self.assertEqual(code, 130)
         self.assertIn("the processes it started were stopped", err)
         self.assertIn("The installer was not started", err)
@@ -2297,9 +2297,9 @@ class RunEventTests(unittest.TestCase):
         with mock.patch.dict("os.environ", self.env), \
                 mock.patch("shutil.which", return_value="/x/wine"), \
                 mock.patch("gitfurl.cli.run_tracked", side_effect=fake):
-            code, out, _ = run_cli("install", str(self.installer), "--prefix", "p", "--yes",
+            code, out, _ = run_cli("install", "--no-memory-limit", str(self.installer), "--prefix", "p", "--yes",
                                    "--stall-after", "900")
-            bad, _, err = run_cli("install", str(self.installer), "--prefix", "p", "--yes",
+            bad, _, err = run_cli("install", "--no-memory-limit", str(self.installer), "--prefix", "p", "--yes",
                                   "--stall-after", "0")
         self.assertEqual(code, 0)
         self.assertEqual(seen["opts"].stall_after_s, 900)
