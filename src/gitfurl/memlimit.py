@@ -2,7 +2,8 @@
 
 This reduces the chance that the system runs out of memory; it does not guarantee that the
 installer succeeds. Above the soft limit the installer is slowed down; at the hard limit the
-kernel stops processes in this run only. It needs no root, no network and no Python package:
+kernel stops a process of this run and systemd then ends the whole run (OOMPolicy=stop);
+programs outside the run are not touched. It needs no root, no network and no Python package:
 it uses the user's own systemd manager and its cgroup v2 memory controls.
 
 What this relies on, checked against the official documentation on 2026-11-17:
@@ -43,6 +44,18 @@ instead of finishing.
 killer is unloaded at once, with its memory.events, so the result could not be read
 (seen on this machine). Without it systemd keeps that one failed unit with Result=oom-kill;
 gitfurl reads that and then clears it with `systemctl --user reset-failed <that unit>`.
+
+OOMPolicy=stop is passed explicitly. systemd.scope(5) lists OOMPolicy= for scope units; with
+"stop" "the event is logged and the unit's processes are terminated cleanly by the service
+manager" and the unit "ultimately ends up in the oom-kill failed state". The default comes from
+DefaultOOMPolicy=, which can be changed, so gitfurl does not rely on it. Seen on this machine
+(systemd 262, 2026-11-17, test programs in scopes with MemoryMax=200M and MemorySwapMax=0):
+a normal end left no unit at all (LoadState=not-found) at once; an out-of-memory kill of the
+main process, or of a child while the main process would have exited 0 or 3, left the unit
+loaded as failed with Result=oom-kill (and in the child cases systemd ended the main process
+with SIGTERM). So when this run's unit is gone after the run and was never seen failed,
+gitfurl reports that no out-of-memory stop was recorded, and says why. A scope ends normally
+before gitfurl can read its memory.events, so that read alone can not tell.
 """
 
 from __future__ import annotations
@@ -70,7 +83,8 @@ PROBE_TIMEOUT_S = 5
 
 WORDING = ("This reduces the chance that the system runs out of memory; it does not guarantee "
            "that the installer succeeds. Above the soft limit the installer is slowed down; at "
-           "the hard limit the kernel stops processes in this run only.")
+           "the hard limit the kernel stops a process of this run and systemd then ends the whole run; "
+           "programs outside the run are not touched.")
 
 
 class MemoryLimitError(ValueError):
@@ -117,7 +131,8 @@ class Budget:
             (f"  kept free for the rest of the system: {gib(self.reserve)} (the larger of 1 GiB "
              "and 10% of MemTotal)"),
             (f"  hard limit MemoryMax={self.max_bytes} ({gib(self.max_bytes)}) = MemAvailable "
-             "minus that reserve; at this limit the kernel stops processes in this run only"),
+             "minus that reserve; at this limit a process of this run is stopped and systemd then ends "
+             "the whole run (OOMPolicy=stop)"),
             (f"  soft limit MemoryHigh={self.high_bytes} ({gib(self.high_bytes)}) = 90% of the "
              "hard limit; above it the installer is slowed down, nothing is stopped"),
             ("  swap: not limited (no MemorySwapMax), so the run can use swap and slow down "
@@ -309,7 +324,7 @@ def describe(enabled: bool, avail: Availability | None, meminfo: str = "/proc/me
         [avail.systemd_run or "systemd-run", "--user", "--scope", "--quiet",
          "--unit=gitfurl-<prefix>-<time>.scope", "--expand-environment=no",
          "-p", f"MemoryHigh={budget.high_bytes}", "-p", f"MemoryMax={budget.max_bytes}",
-         "--", "<the command above>"]))
+         "-p", "OOMPolicy=stop", "--", "<the command above>"]))
     return lines, None
 
 
@@ -332,6 +347,7 @@ class MemoryReport:
     changes: list = field(default_factory=list)  # (old, new) soft limit changes
     notes: list = field(default_factory=list)
     final_read: bool = False  # memory.events was read after the run ended
+    unit_gone: bool = False  # after the run systemd no longer had the unit (LoadState=not-found)
     start_failure: str | None = None  # a "Failed to ..." line systemd-run left in the log
 
     @property
@@ -343,8 +359,8 @@ class MemoryReport:
             count = f" ({self.oom_kill} process(es) by this run's memory.events)" \
                 if self.oom_kill else ""
             out = [(f"Memory limit: the run hit its hard memory limit "
-                    f"({gib(self.budget.max_bytes)}) and the kernel stopped one or more processes "
-                    f"inside this run's scope{count}. The install may be incomplete; read the "
+                    f"({gib(self.budget.max_bytes)}): the kernel stopped a process of this run"
+                    f"{count} and systemd then ended the whole run. The install may be incomplete; read the "
                     "log. The hard limit was fixed from the memory available when the run "
                     "started; to retry without it, use --no-memory-limit, or turn the option off "
                     "in the window.")]
@@ -352,6 +368,11 @@ class MemoryReport:
             out = [("Memory limit: systemd-run may have failed, so the installer may not have "
                     f"run at all; the exit status may be systemd-run's. The log has: "
                     f"'{self.start_failure}'. See the log.")]
+        elif self.unit_gone and not self.oom_kill:
+            out = [(f"Memory limit: no out-of-memory stop was recorded in this run (hard limit "
+                    f"{gib(self.budget.max_bytes)}). systemd had already removed the run's scope, "
+                    "which it does only when the run ended without one: a stop by the "
+                    "out-of-memory killer leaves the scope as failed (OOMPolicy=stop).")]
         elif not self.final_read:
             seen = (f"; while the run lasted it showed {self.oom_kill} out-of-memory stop(s)"
                     if self.oom_kill is not None else "")
@@ -424,7 +445,7 @@ class MemoryScope:
                 f"{EXPAND_FLAG_SINCE} and cannot be told not to expand '$', and the command "
                 "holds a '$'. Rename the file or folder, or turn the memory limit off")
         return [*out, "-p", f"MemoryHigh={self.budget.high_bytes}",
-                "-p", f"MemoryMax={self.budget.max_bytes}", "--", *argv]
+                "-p", f"MemoryMax={self.budget.max_bytes}", "-p", "OOMPolicy=stop", "--", *argv]
 
     # -- systemctl, only for self.unit --
     def _systemctl(self, *args: str) -> subprocess.CompletedProcess | None:
@@ -545,7 +566,7 @@ class MemoryScope:
                 self.report.final_read = True
             deadline = time.monotonic() + self.settle_s
             while True:  # a process of the run (e.g. Wine's server) may keep it a few seconds
-                state = self._show("ActiveState", "Result")
+                state = self._show("ActiveState", "Result", "LoadState")
                 if state.get("ActiveState") not in ACTIVE_STATES \
                         or time.monotonic() >= deadline:
                     break
@@ -554,7 +575,8 @@ class MemoryScope:
                     self.report.final_read = True
         finally:  # also on Ctrl-C or an error above: settle this unit's result
             if state is None:
-                state = self._show("ActiveState", "Result")
+                state = self._show("ActiveState", "Result", "LoadState")
+            self.report.unit_gone = state.get("LoadState") == "not-found"
             if state.get("Result") == "oom-kill":
                 self.report.oom_result = True
             if state.get("ActiveState") == "failed":

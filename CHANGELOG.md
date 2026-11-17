@@ -4,6 +4,10 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Fixed
+- Memory limit: after a normal run the end text no longer says that an out-of-memory stop "could not be checked". systemd removes a scope that ended normally before gitfurl can read it; a scope ended by the out-of-memory killer stays as failed. gitfurl now passes `OOMPolicy=stop` explicitly and, when the scope is gone and was not seen failed, says that no out-of-memory stop was recorded, and why. Checked against systemd 262 with test programs (no Wine, no installer).
+- Memory limit wording: at the hard limit the kernel stops a process of the run and systemd then ends the whole run (it was described as stopping processes only).
+
 ## [1.2.0] - 2026-11-17
 An optional ClamAV scan before a run, and a memory limit for the run that is on by default. Neither was tried with Wine, Proton or a real installer: both were tested with stand-ins, and the memory limit also with test programs in a real systemd scope.
 
