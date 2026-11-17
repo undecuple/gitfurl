@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import shlex
+import signal
+import subprocess
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -78,6 +83,150 @@ def build_plan(installer: Path, prefix_name: str, env: dict[str, str] | None = N
     )
 
 
+CANCELLED_STATUS = 130  # the shell convention for a run ended by an interrupt
+STOP_GRACE_S = 10.0
+
+CANCEL_REMAINS = (
+    "Stopped by you. Nothing was deleted. The prefix may hold partly installed files and "
+    "registry changes, and files may have been written elsewhere on this machine. Any process "
+    "that left the run's own process group was not touched. Read the log, and the changes "
+    "report if you turned it on."
+)
+
+
+class RunControl:
+    """Stops the run gitfurl started, and only that run.
+
+    The installer is started in its own process group, so a stop signals that group and
+    nothing else: never a process found by name, never another Wine session. For the wine
+    runtime, after the group has ended, the Wine server of this run's own prefix is asked to
+    exit (`wineserver -k` with that WINEPREFIX), which also ends anything else running in
+    that dedicated prefix. Complete process-tree termination is not guaranteed: a program
+    that moved itself into another session is out of reach of a group signal.
+
+    A process-group id can be reused once the group is empty, so the group leader is kept
+    unreaped until any stop has finished, every signal is sent under the lock, and nothing
+    is signalled after the run has ended (a stop then does nothing).
+    """
+
+    def __init__(self, grace_s: float = STOP_GRACE_S):
+        self.grace_s = grace_s
+        self.cancelled = False
+        self.notes: list[str] = []
+        self._pgid: int | None = None
+        self._finished = False
+        self._stopping = False
+        self._stop_done = threading.Event()
+        self._lock = threading.Lock()
+        self._server_argv: list[str] | None = None
+        self._server_env: dict[str, str] | None = None
+
+    def configure_server(self, argv: list[str] | None, env: dict[str, str] | None) -> None:
+        self._server_argv, self._server_env = argv, env
+
+    def attach(self, pid: int) -> None:
+        with self._lock:
+            self._pgid = pid  # the leader is its own group leader (start_new_session)
+
+    def _signal(self, sig) -> bool:
+        """Signal the run's group, only while the run is active. False if it was refused."""
+        with self._lock:
+            if self._finished or self._pgid is None:
+                return False
+            try:
+                os.killpg(self._pgid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+            return True
+
+    def _group_alive(self) -> bool:
+        """True while a live (not zombie) process is in the run's group. Read-only.
+
+        The leader stays unreaped until finish(), so the group id cannot be reused while this
+        is called; a zombie leader alone does not count as alive.
+        """
+        with self._lock:
+            if self._finished or self._pgid is None:
+                return False
+            pgid = self._pgid
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/stat", encoding="utf-8", errors="replace") as fh:
+                    fields = fh.read().rpartition(")")[2].split()
+                if int(fields[2]) == pgid and fields[0] != "Z":
+                    return True
+            except (OSError, ValueError, IndexError):
+                continue
+        return False
+
+    def request_stop(self) -> list[str]:
+        """Stop the run: TERM to its group, KILL after the grace period. Safe to call twice."""
+        with self._lock:
+            if self._stopping or self._finished:
+                return list(self.notes)
+            self._stopping = True
+            self.cancelled = True
+            started = self._pgid is not None
+        try:
+            if started and self._signal(signal.SIGTERM):
+                deadline = time.monotonic() + self.grace_s
+                while time.monotonic() < deadline and self._group_alive():
+                    time.sleep(0.1)
+                if self._group_alive() and self._signal(signal.SIGKILL):
+                    self.notes.append(f"some processes did not stop within {self.grace_s:g} s "
+                                      "and were force-killed")
+                    end = time.monotonic() + 3
+                    while time.monotonic() < end and self._group_alive():
+                        time.sleep(0.1)
+                    if self._group_alive():
+                        self.notes.append("could not confirm that every process of the run ended")
+            if started and self._server_argv:
+                try:
+                    subprocess.run(self._server_argv, env=self._server_env, timeout=30,
+                                   check=False, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+                    self.notes.append("asked this prefix's Wine server to exit (wineserver -k)")
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    self.notes.append(f"could not stop this prefix's Wine server: {exc}")
+        finally:
+            self._stop_done.set()
+        return list(self.notes)
+
+    def finish(self) -> None:
+        """Called by the run once the leader has exited (not yet reaped): waits for a stop in
+        progress, then closes the run so nothing can be signalled any more."""
+        with self._lock:
+            stopping = self._stopping
+        if stopping:
+            self._stop_done.wait()
+        with self._lock:
+            self._finished = True
+
+
+def _run_in_group(argv, cwd, env, stdout, control: RunControl):
+    """Start argv in its own process group and wait. Ctrl-C stops it gracefully."""
+    if control.cancelled:  # stopped before it started
+        return subprocess.CompletedProcess(argv, CANCELLED_STATUS)
+    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=stdout, stderr=subprocess.STDOUT,
+                            start_new_session=True)
+    control.attach(proc.pid)
+    try:
+        while True:
+            try:  # wait without reaping, so the group id stays ours until finish()
+                os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+                break
+            except KeyboardInterrupt:
+                control.request_stop()
+            except ChildProcessError:
+                break
+    finally:
+        control.finish()
+        proc.wait()  # reap
+    return proc
+
+
 @dataclass
 class RunOptions:
     """Optional extras for a run. Everything here is off by default."""
@@ -86,6 +235,7 @@ class RunOptions:
     progress_interval: float = 10.0
     detailed_log: bool = False  # also write a JSON-lines event log
     wine_debug: str | None = None  # WINEDEBUG channels, e.g. "err+all"
+    control: RunControl | None = None  # lets the caller stop the run (see RunControl)
 
 
 _WINEDEBUG_OK = None
@@ -115,13 +265,11 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
     With options, it can also report progress and write a JSON-lines event log next to it.
     """
     import json
-    import os
-    import subprocess
-    import time
+    import shutil
     from datetime import datetime
 
     options = options or RunOptions()
-    run = run or subprocess.run
+    control = options.control or RunControl()
     if not plan.prefix.is_dir():
         raise FileNotFoundError(f"prefix does not exist: {plan.prefix} (run 'gitfurl prefix create')")
     log_dir = logs_root(env)
@@ -169,18 +317,35 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
             if monitor:
                 monitor.start()
             try:
-                proc = run(argv, cwd=plan.cwd, env=child_env, stdout=log, stderr=subprocess.STDOUT,
-                           check=False)
+                if run is not None:  # tests inject a fake runner
+                    proc = run(argv, cwd=plan.cwd, env=child_env, stdout=log,
+                               stderr=subprocess.STDOUT, check=False)
+                else:
+                    if plan.runtime == "wine":
+                        server = Path(wine).with_name("wineserver")
+                        server = str(server) if server.is_file() else shutil.which("wineserver")
+                        control.configure_server([server, "-k"] if server else None,
+                                                 {**child_env, "WINEPREFIX": str(plan.prefix)})
+                    proc = _run_in_group(argv, cwd=plan.cwd, env=child_env, stdout=log,
+                                         control=control)
             finally:
                 final = monitor.stop() if monitor else None
-            log.write(f"\n--- exit status {proc.returncode}\n")
+            if control.cancelled:
+                log.write(f"\n--- cancelled by user (process exit status {proc.returncode})\n")
+                for note in control.notes:
+                    log.write(f"--- {note}\n")
+            else:
+                log.write(f"\n--- exit status {proc.returncode}\n")
         if final is not None:
             event("progress_final", line=final.line())
-        event("exit", status=proc.returncode, seconds=round(time.monotonic() - t0, 1))
+        if control.cancelled:
+            event("cancelled", notes=control.notes, seconds=round(time.monotonic() - t0, 1))
+        else:
+            event("exit", status=proc.returncode, seconds=round(time.monotonic() - t0, 1))
     finally:
         if events:
             events.close()
-    return proc.returncode, log_path
+    return (CANCELLED_STATUS if control.cancelled else proc.returncode), log_path
 
 
 def run_with_prefix(plan: InstallPlan, wine: str, create_if_missing: bool,

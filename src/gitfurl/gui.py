@@ -22,8 +22,11 @@ from gitfurl.prefixes import (
     prefixes_root,
     validate_prefix_name,
 )
+from gitfurl.preflight import measure
 from gitfurl.runner import (
+    CANCEL_REMAINS,
     RUNTIMES,
+    RunControl,
     RunOptions,
     build_plan,
     logs_root,
@@ -139,7 +142,7 @@ def main(start: str = "library", prefix: str | None = None) -> int:
     runtime_var = tk.StringVar(value="wine")
     find_var = tk.BooleanVar(value=False)
     progress_var = tk.StringVar(value="Shown while an installer runs: payload read, rate, rough ETA.")
-    pending = {"cleanup": None}
+    pending = {"cleanup": None, "control": None, "proton": False}
     proton_var = tk.StringVar(value=os.environ.get("PROTONPATH", ""))
     busy = {"on": False}
     wine_path = {"value": None, "umu": None}
@@ -329,6 +332,7 @@ def main(start: str = "library", prefix: str | None = None) -> int:
     run_btn.pack(side="right")
     create_btn = w.PillButton(dhead, "Create now", lambda: create_clicked(), "plain", F(10))
     create_btn.pack(side="right", padx=10)
+    stop_btn = w.PillButton(dhead, "Stop", lambda: stop_clicked(), "plain", F(10))  # shown during a run
     tk.Label(dhead, textvariable=title_var, bg=w.BG, fg=FG, font=F(22, True)).pack(side="left", anchor="n")
     tk.Label(det, textvariable=sub_var, bg=w.BG, fg=w.MUTED, font=F(9), wraplength=640,
              justify="left").pack(anchor="w")
@@ -589,6 +593,8 @@ def main(start: str = "library", prefix: str | None = None) -> int:
             if missing else ""
         if cleanup_var.get() != "none":
             extra += "\n\nIf the installer exits with status 0, " + clean.describe()
+        extra += "\n\nChecks before the run (read-only, advisory):\n" + measure(
+            validate_installer(installer_var.get().strip()), plan.prefix).describe()
         if proton:
             extra += RUNTIME_DOWNLOAD_NOTE
         if changes_var.get():
@@ -606,11 +612,35 @@ def main(start: str = "library", prefix: str | None = None) -> int:
         ctx = {"prefix": selected_prefix_path(), "changes": changes_var.get(), "find": find_var.get()}
         bar.set(0)
         progress_var.set("Waiting for the installer to start reading its files...")
+        control = RunControl()
+        pending["control"], pending["proton"] = control, proton
         options = RunOptions(on_progress=ui_updates.put, progress_interval=3.0,
-                             detailed_log=detail_var.get())
+                             detailed_log=detail_var.get(), control=control)
+        stop_btn.pack(side="right", padx=10)
         run_in_thread(lambda: run_tracked(plan, tool, create, track,
                                           options=options), results)
         poll("install", ctx)
+
+    def stop_clicked():
+        control = pending["control"]
+        if control is None or control.cancelled:
+            return
+        server = ("" if pending["proton"] else
+                  "\n\nThen this prefix's Wine server is asked to exit (wineserver -k). That also "
+                  "ends anything you started by hand in this same prefix.")
+        if not messagebox.askyesno(
+                "Stop the installer?",
+                "Stop sends a polite stop to the installer gitfurl started and the programs it "
+                "started in its own group, waits 10 seconds, then forces whatever is left." + server
+                + "\n\nNothing is deleted. Partly installed files and registry changes can remain "
+                "in the prefix, and files may have been written elsewhere. A program that moved "
+                "itself out of the run's group, or (for Proton) the runtime's own container, may keep "
+                "running; this is not guaranteed to end everything. The run is reported as "
+                "cancelled and the log is kept.\n\nStop it?", icon="warning", default="no"):
+            return
+        stop_btn.state(["disabled"])
+        status_var.set("Stopping the installer...")
+        threading.Thread(target=control.request_stop, daemon=True).start()
 
     def show_report(title, body):
         win = tk.Toplevel(root)
@@ -636,6 +666,18 @@ def main(start: str = "library", prefix: str | None = None) -> int:
             root.after(300, poll, kind, ctx)
             return
         end_busy()
+        stop_btn.pack_forget()
+        stop_btn.state(["!disabled"])
+        control = pending["control"]
+        pending["control"] = None
+        if state == "ok" and kind == "install" and control is not None and control.cancelled:
+            log = value[1]
+            notes = "".join(f"\nNote: {n}" for n in control.notes)
+            status_var.set(f"Cancelled. {CANCEL_REMAINS}{notes}\nCleanup skipped. "
+                           f"Local log: {log} (may contain your user name and paths)")
+            status_label.configure(fg=w.AMBER)
+            pending["cleanup"] = None
+            return
         if state == "error":
             status_var.set(f"Failed: {value}")
             status_label.configure(fg=w.RED)

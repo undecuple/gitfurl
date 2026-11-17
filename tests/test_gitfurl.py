@@ -1,4 +1,5 @@
 import io
+import contextlib
 import os
 import subprocess
 import tempfile
@@ -16,6 +17,14 @@ def run_cli(*argv):
     with redirect_stdout(out), redirect_stderr(err):
         code = cli.main(list(argv))
     return code, out.getvalue(), err.getvalue()
+
+
+@contextlib.contextmanager
+def patched_runs(result=None):
+    """One mock for both subprocess.run (prefix creation) and the installer launcher."""
+    run = mock.Mock(return_value=result or subprocess.CompletedProcess([], 0))
+    with mock.patch("subprocess.run", run), mock.patch("gitfurl.runner._run_in_group", run):
+        yield run
 
 
 class DoctorTests(unittest.TestCase):
@@ -140,7 +149,7 @@ class InstallRunTests(unittest.TestCase):
             with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data, "XDG_STATE_HOME": state,
                                                 "SECRET_TOKEN": "hunter2"}), \
                     mock.patch("shutil.which", return_value="/x/wine"), \
-                    mock.patch("subprocess.run", return_value=done) as run:
+                    patched_runs(done) as run:
                 code, out, _ = run_cli("install", str(f), "--prefix", "p1", "--yes")
             logs = list((Path(state) / "gitfurl" / "logs").iterdir())
             self.assertEqual(len(logs), 1)
@@ -312,7 +321,7 @@ class CreateIfMissingTests(unittest.TestCase):
                 tempfile.TemporaryDirectory() as state:
             f, env = self._env(d, data, state)
             with env, mock.patch("shutil.which", return_value="/x/wine"), \
-                    mock.patch("subprocess.run", return_value=done) as run:
+                    patched_runs(done) as run:
                 code, out, _ = run_cli("install", str(f), "--prefix", "new", "--create-prefix", "--yes")
             self.assertTrue((Path(data) / "gitfurl" / "prefixes" / "new").is_dir())
         self.assertEqual(code, 0)
@@ -435,7 +444,7 @@ class CleanupTests(unittest.TestCase):
                 f.write_bytes(b"x")
                 with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data, "XDG_STATE_HOME": state}), \
                         mock.patch("shutil.which", return_value="/x/wine"), \
-                        mock.patch("subprocess.run", return_value=done):
+                        patched_runs(done):
                     run_cli("install", str(f), "--prefix", "p1", "--yes", "--cleanup", "installer")
                 self.assertEqual(f.exists(), should_exist)
 
@@ -481,7 +490,7 @@ class ChangesTests(unittest.TestCase):
                 f.write_bytes(b"x")
                 with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data, "XDG_STATE_HOME": state}), \
                         mock.patch("shutil.which", return_value="/x/wine"), \
-                        mock.patch("subprocess.run", return_value=done):
+                        patched_runs(done):
                     outs[bool(flag)] = run_cli("install", str(f), "--prefix", "p1", "--yes", *flag)[1]
         self.assertNotIn("registry keys", outs[False])
         self.assertIn("registry keys", outs[True])
@@ -580,7 +589,7 @@ class ProgressTests(unittest.TestCase):
             f.write_bytes(b"x")
             with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data, "XDG_STATE_HOME": state}), \
                     mock.patch("shutil.which", return_value="/x/wine"), \
-                    mock.patch("subprocess.run", return_value=done):
+                    patched_runs(done):
                 _, out, _ = run_cli("install", str(f), "--prefix", "p1", "--yes")
             names = [p.name for p in (Path(state) / "gitfurl" / "logs").iterdir()]
         self.assertEqual(len(names), 1)
@@ -646,7 +655,7 @@ class RuntimeAndExeTests(unittest.TestCase):
             pp = self._proton_dir(d)
             with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data, "XDG_STATE_HOME": state}), \
                     mock.patch("shutil.which", side_effect=lambda n: f"/x/{n}"), \
-                    mock.patch("subprocess.run", return_value=done) as run:
+                    patched_runs(done) as run:
                 code, _, _ = run_cli("install", str(f), "--prefix", "n", "--create-prefix", "--yes",
                                      "--runtime", "proton", "--proton-path", str(pp))
         self.assertEqual(code, 0)
@@ -710,7 +719,8 @@ class RuntimeAndExeTests(unittest.TestCase):
 
                 with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data, "XDG_STATE_HOME": state}), \
                         mock.patch("shutil.which", return_value="/x/wine"), \
-                        mock.patch("subprocess.run", side_effect=fake_run) as run:
+                        patched_runs() as run:
+                    run.side_effect = fake_run
                     _, out, _ = run_cli("install", str(f), "--prefix", "p1", "--yes", *flag)
                 self.assertEqual(run.call_count, 1)  # only the installer; the program is not run
                 self.assertEqual("g.exe" in out, expect)
@@ -752,7 +762,7 @@ class ReviewFixTests(unittest.TestCase):
             with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data, "XDG_STATE_HOME": state,
                                                 "WINEDLLOVERRIDES": "mscoree=d"}), \
                     mock.patch("shutil.which", return_value="/x/wine"), \
-                    mock.patch("subprocess.run", return_value=done) as run:
+                    patched_runs(done) as run:
                 run_cli("install", str(f), "--prefix", "p1", "--yes")
         self.assertNotIn("WINEDLLOVERRIDES", run.call_args.kwargs["env"])
 
@@ -900,3 +910,421 @@ class ActivityTests(unittest.TestCase):
         self.assertIn("8.0 GB memory available", text)
         self.assertIn("CPU threads", text)
         self.assertIn("memory unknown", machine_resources("/nonexistent/meminfo"))
+
+
+DUMMY = '''
+import os, signal, subprocess, sys, time
+role, mode, out = sys.argv[1], sys.argv[2], sys.argv[3]
+def note(name):
+    with open(out, "a") as fh:
+        fh.write(f"{name} {os.getpid()}\\n")
+if role == "leader":
+    if mode == "ignore":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if mode == "fail":
+        sys.exit(3)
+    if mode == "quick":
+        sys.exit(0)
+    note("leader")
+    subprocess.Popen([sys.executable, __file__, "child", mode, out])
+    time.sleep(120)
+elif role == "child":
+    if mode == "ignore":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if mode == "escape":
+        os.setsid()
+    note("child")
+    subprocess.Popen([sys.executable, __file__, "grandchild", mode, out])
+    time.sleep(120)
+else:
+    if mode == "ignore":
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    note("grandchild")
+    time.sleep(120)
+'''
+
+
+def pid_alive(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            return fh.read().rpartition(")")[2].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+class StopTests(unittest.TestCase):
+    """Controlled dummy processes only. These tests say nothing about real installers."""
+
+    def setUp(self):
+        import time
+
+        from gitfurl.runner import InstallPlan, RunControl, RunOptions, execute
+
+        self.time = time
+        self.execute, self.RunControl, self.RunOptions = execute, RunControl, RunOptions
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        t = Path(self.tmp.name)
+        (t / "prefix").mkdir()
+        (t / "dummy.py").write_text(DUMMY)
+        import sys
+
+        self.py = sys.executable
+        # a fake "wine" and a fake "wineserver" beside it, so nothing real is ever started
+        (t / "wine").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+        (t / "wineserver").write_text(
+            f'#!/bin/sh\necho "$@ WINEPREFIX=$WINEPREFIX" >> "{t}/server.txt"\n')
+        for n in ("wine", "wineserver"):
+            (t / n).chmod(0o755)
+        self.out = t / "pids.txt"
+        self.plan_for = lambda mode, runtime="wine": InstallPlan(
+            argv=["wine", str(t / "dummy.py"), "leader", mode, str(self.out)],
+            prefix=t / "prefix", cwd=t, runtime=runtime,
+            env_overrides={"WINEPREFIX": str(t / "prefix")})
+        self.env = {"XDG_STATE_HOME": str(t / "state"), "HOME": str(t)}
+        self.stray = []
+        self.addCleanup(self._kill_strays)
+
+    def _kill_strays(self):
+        import os
+        import signal
+
+        for pid in self.stray:  # only pids this test itself recorded
+            if pid_alive(pid):
+                os.kill(pid, signal.SIGKILL)
+
+    def pids(self, want):
+        end = self.time.monotonic() + 15
+        while self.time.monotonic() < end:
+            found = dict(line.split() for line in self.out.read_text().splitlines()) \
+                if self.out.exists() else {}
+            if all(k in found for k in want):
+                got = {k: int(v) for k, v in found.items()}
+                self.stray.extend(got.values())
+                return got
+            self.time.sleep(0.05)
+        self.fail("dummy processes did not start")
+
+    def start(self, mode, control, runtime="wine"):
+        import threading
+
+        box = {}
+
+        def work():
+            box["res"] = self.execute(self.plan_for(mode, runtime), str(Path(self.tmp.name) / "wine"),
+                                      self.env, options=self.RunOptions(control=control))
+
+        th = threading.Thread(target=work)
+        th.start()
+        return th, box
+
+    def gone(self, pid):
+        end = self.time.monotonic() + 5
+        while self.time.monotonic() < end:
+            if not pid_alive(pid):
+                return True
+            self.time.sleep(0.05)
+        return False
+
+    def test_stop_ends_leader_child_and_grandchild_and_reports_cancelled(self):
+        control = self.RunControl(grace_s=5)
+        th, box = self.start("normal", control)
+        p = self.pids(["leader", "child", "grandchild"])
+        control.request_stop()
+        th.join(20)
+        status, log = box["res"]
+        self.assertEqual(status, 130)
+        self.assertTrue(control.cancelled)
+        for pid in p.values():
+            self.assertTrue(self.gone(pid), pid)
+        text = Path(log).read_text()
+        self.assertIn("cancelled by user", text)
+        self.assertNotIn("--- exit status 0", text)
+        self.assertFalse(any("force-killed" in n for n in control.notes))  # TERM was enough
+        self.assertEqual(Path(log).stat().st_mode & 0o777, 0o600)
+        self.assertTrue((Path(self.tmp.name) / "prefix").is_dir())  # nothing deleted
+
+    def test_a_child_that_ignores_term_is_killed_after_the_grace_period(self):
+        control = self.RunControl(grace_s=0.5)
+        th, box = self.start("ignore", control)
+        p = self.pids(["leader", "child", "grandchild"])
+        control.request_stop()
+        th.join(20)
+        self.assertEqual(box["res"][0], 130)
+        for pid in p.values():
+            self.assertTrue(self.gone(pid), pid)
+        self.assertTrue(any("force-killed" in n for n in control.notes))
+
+    def test_a_program_that_leaves_the_group_is_not_killed(self):
+        control = self.RunControl(grace_s=0.5)
+        th, box = self.start("escape", control)
+        p = self.pids(["leader", "child", "grandchild"])
+        control.request_stop()
+        th.join(20)
+        self.assertEqual(box["res"][0], 130)
+        self.assertTrue(self.gone(p["leader"]))
+        self.assertTrue(pid_alive(p["child"]))  # documented limit: out of reach of the group signal
+        self.assertTrue(pid_alive(p["grandchild"]))  # it stayed with the escapee's own group
+
+    def test_stopping_twice_or_after_the_end_does_nothing(self):
+        import os
+
+        control = self.RunControl(grace_s=1)
+        th, box = self.start("quick", control)
+        th.join(20)
+        self.assertEqual(box["res"][0], 0)
+        with mock.patch("os.killpg") as killpg, mock.patch("os.kill") as kill:
+            control.request_stop()
+            control.request_stop()
+        killpg.assert_not_called()
+        kill.assert_not_called()
+        self.assertFalse(control.cancelled)
+        self.assertTrue(os.path.isdir(Path(self.tmp.name) / "prefix"))
+
+    def test_second_stop_while_stopping_is_harmless(self):
+        control = self.RunControl(grace_s=5)
+        th, box = self.start("normal", control)
+        self.pids(["leader", "child", "grandchild"])
+        control.request_stop()
+        control.request_stop()
+        th.join(20)
+        self.assertEqual(box["res"][0], 130)
+
+    def test_only_the_recorded_group_and_this_prefixs_wineserver_are_touched(self):
+        import os
+        import signal
+
+        real_killpg = os.killpg
+        calls = []
+
+        def spy(pgid, sig):
+            calls.append((pgid, sig))
+            return real_killpg(pgid, sig)
+
+        control = self.RunControl(grace_s=5)
+        th, box = self.start("normal", control)
+        p = self.pids(["leader", "child", "grandchild"])
+        with mock.patch("os.killpg", side_effect=spy), mock.patch("os.kill") as kill:
+            control.request_stop()
+            th.join(20)
+        kill.assert_not_called()  # never a single-pid or name-based signal
+        self.assertTrue(calls)
+        for pgid, sig in calls:
+            self.assertEqual(pgid, p["leader"])
+            self.assertIn(sig, (0, signal.SIGTERM, signal.SIGKILL))
+        server = (Path(self.tmp.name) / "server.txt").read_text().strip()
+        self.assertEqual(server, f"-k WINEPREFIX={Path(self.tmp.name) / 'prefix'}")
+
+    def test_no_name_based_tools_are_ever_called(self):
+        import subprocess as sp
+
+        started = []
+        real_run = sp.run
+
+        def spy(argv, *a, **k):
+            started.append(list(argv))
+            return real_run(argv, *a, **k)
+
+        control = self.RunControl(grace_s=5)
+        th, box = self.start("normal", control)
+        self.pids(["leader", "child", "grandchild"])
+        with mock.patch("subprocess.run", side_effect=spy):
+            control.request_stop()
+            th.join(20)
+        self.assertEqual(len(started), 1)
+        self.assertEqual(Path(started[0][0]).name, "wineserver")
+        self.assertEqual(started[0][1:], ["-k"])
+        for word in ("pkill", "killall", "pgrep", "kill"):
+            self.assertFalse(any(Path(a).name == word for a in started[0]))
+
+    def test_proton_runtime_never_runs_wineserver(self):
+        control = self.RunControl(grace_s=5)
+        th, box = self.start("normal", control, runtime="proton")
+        self.pids(["leader", "child", "grandchild"])
+        control.request_stop()
+        th.join(20)
+        self.assertEqual(box["res"][0], 130)
+        self.assertFalse((Path(self.tmp.name) / "server.txt").exists())
+
+    def test_a_finished_run_can_no_longer_be_signalled(self):
+        control = self.RunControl()
+        control.attach(os_getpid_other())
+        control.finish()
+        with mock.patch("os.killpg") as killpg:
+            self.assertFalse(control._signal(15))
+            control.request_stop()
+        killpg.assert_not_called()
+
+    def test_stop_before_start_means_the_run_does_not_start(self):
+        control = self.RunControl()
+        control.request_stop()
+        th, box = self.start("normal", control)
+        th.join(20)
+        self.assertEqual(box["res"][0], 130)
+        self.assertFalse(self.out.exists())
+
+    def test_a_failing_installer_is_reported_as_failed_not_cancelled(self):
+        control = self.RunControl()
+        th, box = self.start("fail", control)
+        th.join(20)
+        status, log = box["res"]
+        self.assertEqual(status, 3)
+        self.assertFalse(control.cancelled)
+        self.assertIn("--- exit status 3", Path(log).read_text())
+
+    def test_ctrl_c_triggers_the_same_graceful_stop(self):
+        import os
+
+        real = os.waitid
+        state = {"n": 0}
+        control = self.RunControl(grace_s=5)
+
+        def waitid(*a):
+            state["n"] += 1
+            if state["n"] == 1:
+                self.pids(["leader", "child", "grandchild"])
+                raise KeyboardInterrupt
+            return real(*a)
+
+        with mock.patch("os.waitid", side_effect=waitid):
+            status, log = self.execute(self.plan_for("normal"), str(Path(self.tmp.name) / "wine"),
+                                       self.env, options=self.RunOptions(control=control))
+        self.assertEqual(status, 130)
+        self.assertTrue(control.cancelled)
+        self.assertIn("cancelled by user", Path(log).read_text())
+
+    def test_cancelled_event_in_the_json_log(self):
+        import json
+
+        control = self.RunControl(grace_s=5)
+        plan = self.plan_for("normal")
+        import threading
+
+        box = {}
+        th = threading.Thread(target=lambda: box.update(res=self.execute(
+            plan, str(Path(self.tmp.name) / "wine"), self.env,
+            options=self.RunOptions(control=control, detailed_log=True))))
+        th.start()
+        self.pids(["leader", "child", "grandchild"])
+        control.request_stop()
+        th.join(20)
+        events = [json.loads(line) for line in
+                  Path(box["res"][1]).with_suffix(".events.jsonl").read_text().splitlines()]
+        self.assertEqual([e["event"] for e in events][-1], "cancelled")
+        self.assertNotIn("exit", [e["event"] for e in events])
+
+    def test_cli_cancelled_run_returns_130_and_skips_cleanup(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as data, \
+                tempfile.TemporaryDirectory() as state:
+            f = Path(d) / "setup.exe"
+            f.write_bytes(b"x")
+            (Path(data) / "gitfurl" / "prefixes" / "p1").mkdir(parents=True)
+
+            def fake(plan, wine, create, track, env=None, run=None, options=None):
+                options.control.cancelled = True
+                return 130, Path(state) / "x.log", None
+
+            with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data, "XDG_STATE_HOME": state}), \
+                    mock.patch("shutil.which", return_value="/x/wine"), \
+                    mock.patch("gitfurl.cli.run_tracked", side_effect=fake):
+                code, out, _ = run_cli("install", str(f), "--prefix", "p1", "--yes",
+                                       "--cleanup", "installer")
+            self.assertTrue(f.exists())
+        self.assertEqual(code, 130)
+        self.assertIn("cancelled", out)
+        self.assertIn("Nothing was deleted", out)
+        self.assertIn("cleanup: skipped", out)
+        self.assertNotIn("installer exited with status", out)
+
+
+def os_getpid_other():
+    import os
+
+    return os.getpid() + 1_000_000  # a pid that is never signalled in the tests that use it
+
+
+class PreflightTests(unittest.TestCase):
+    def test_folder_size_counts_regular_files_and_does_not_follow_symlinks(self):
+        from gitfurl.preflight import folder_size
+
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as other:
+            (Path(d) / "a.bin").write_bytes(b"x" * 1000)
+            (Path(d) / "sub").mkdir()
+            (Path(d) / "sub" / "b.bin").write_bytes(b"y" * 500)
+            (Path(other) / "big.bin").write_bytes(b"z" * 100000)
+            (Path(d) / "link").symlink_to(other)
+            (Path(d) / "flink").symlink_to(Path(other) / "big.bin")
+            self.assertEqual(folder_size(Path(d)), (1500, True))
+
+    def test_folder_size_says_at_least_when_capped(self):
+        from gitfurl.preflight import folder_size
+
+        with tempfile.TemporaryDirectory() as d:
+            for i in range(10):
+                (Path(d) / f"f{i}").write_bytes(b"x" * 10)
+            size, complete = folder_size(Path(d), max_entries=4)
+            self.assertFalse(complete)
+            self.assertLessEqual(size, 40)
+            size, complete = folder_size(Path(d), max_seconds=-1)
+            self.assertFalse(complete)
+
+    def test_memory_from_fake_meminfo_and_failures(self):
+        from gitfurl.preflight import memory_available
+
+        with tempfile.TemporaryDirectory() as d:
+            m = Path(d) / "meminfo"
+            m.write_text("MemTotal: 999 kB\nMemAvailable:    2048 kB\n")
+            self.assertEqual(memory_available(str(m)), 2048 * 1024)
+            m.write_text("MemTotal: 999 kB\n")
+            self.assertIsNone(memory_available(str(m)))
+            m.write_text("MemAvailable: lots kB\n")
+            self.assertIsNone(memory_available(str(m)))
+            self.assertIsNone(memory_available(str(Path(d) / "missing")))
+
+    def _measure(self, free, folder_files, mem_kb):
+        from gitfurl.preflight import measure
+
+        with tempfile.TemporaryDirectory() as d:
+            (Path(d) / "inst").mkdir()
+            inst = Path(d) / "inst" / "setup.exe"
+            inst.write_bytes(b"x" * folder_files)
+            m = Path(d) / "meminfo"  # outside the measured folder
+            m.write_text(f"MemAvailable: {mem_kb} kB\n")
+            with mock.patch("shutil.disk_usage", return_value=mock.Mock(free=free)):
+                return measure(inst, Path(d) / "pfx" / "deep", str(m))
+
+    def test_labels_separate_measured_from_estimate_and_required_space_is_unknown(self):
+        text = self._measure(10**12, 2000, 8_000_000).describe()
+        self.assertIn("measured: free space", text)
+        self.assertIn("measured: size of the installer's own files", text)
+        self.assertIn("space the install needs: unknown", text)
+        self.assertIn("estimate:", text)
+        self.assertNotIn("advisory", text)  # nothing to warn about
+
+    def test_no_multiplier_is_applied(self):
+        # free space above the installer's own size: no warning, however close it is
+        self.assertEqual(self._measure(2001, 2000, 8_000_000).warnings(), [])
+
+    def test_warnings_are_advisory_and_labelled_estimates(self):
+        warns = self._measure(100, 2000, 1_000_000).warnings()
+        self.assertEqual(len(warns), 2)
+        for w in warns:
+            self.assertIn("advisory, estimate", w)
+            self.assertIn("You can still go ahead", w)
+
+    def test_unknown_values_are_reported_as_unknown(self):
+        from gitfurl.preflight import Preflight
+
+        text = Preflight(None, Path("/x"), 0, False, None, 4).describe()
+        self.assertIn("free space where the prefix will live (/x): unknown", text)
+        self.assertIn("at least", text)
+        self.assertIn("memory available: unknown", text)
+
+    def test_dry_run_shows_the_preflight_and_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "setup.exe"
+            f.write_bytes(b"x")
+            code, out, _ = run_cli("install", str(f), "--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("preflight (read-only, advisory)", out)
+        self.assertIn("space the install needs: unknown", out)

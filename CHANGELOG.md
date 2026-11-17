@@ -4,6 +4,14 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Added
+- A **Stop** button (and Ctrl-C on the command line) for a running installer. It signals only the run's own process group (SIGTERM, then SIGKILL after 10 s), then, for Wine, asks that prefix's Wine server to exit. The run is reported as cancelled (exit status 130, a `cancelled` event); the log is kept and nothing is deleted. Complete process-tree termination is not guaranteed, and stopping through `umu-run` is unverified.
+- A read-only, advisory preflight before a run: measured free space, installer-folder size and memory, apart from estimates; required space is shown as unknown and no multiplier is applied.
+- The progress line shows how many processes run in the prefix, their CPU use and helper names, with a "quiet" hint; `doctor` reports CPU threads and available memory.
+
+### Changed
+- The README, the user guide and SECURITY.md state exactly what the progress display reads from `/proc`, including the process environment (only to find the prefix).
+
 ## [1.0.0] - 2026-11-16
 The first release. It means the app, the command line and the safety checks are complete for the stated scope. It does not mean any particular installer works; compatibility is unverified, and the single-file Linux build is not proven on every desktop (see the README known issues).
 

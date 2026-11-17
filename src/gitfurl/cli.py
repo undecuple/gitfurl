@@ -17,8 +17,12 @@ from gitfurl.prefixes import (
     prefixes_root,
     validate_prefix_name,
 )
+from gitfurl.preflight import measure
 from gitfurl.runner import (
+    CANCEL_REMAINS,
+    CANCELLED_STATUS,
     RUNTIMES,
+    RunControl,
     RunOptions,
     build_plan,
     logs_root,
@@ -100,6 +104,9 @@ def main(argv: list[str] | None = None) -> int:
     print("needed for a real run:")
     for item in plan.prerequisites:
         print(f"  - {item}")
+    print("preflight (read-only, advisory):")
+    for line in measure(installer, plan.prefix).describe().splitlines():
+        print(f"  {line}")
     print("Running an installer can expose files the current user can access.")
     return 0
 
@@ -190,6 +197,10 @@ def _real_install(args) -> int:
     print(f"prefix: {plan.prefix}" + (" (will be created first)" if missing else ""))
     print("Wine prefixes are not sandboxes: the installer can reach files you can reach.")
     print("Only run installers you are authorised to use and have chosen to trust.")
+    print("preflight (read-only, advisory):")
+    for line in measure(installer, plan.prefix).describe().splitlines():
+        print(f"  {line}")
+    print("Ctrl-C stops this run gracefully (see docs/user-guide.md for what it leaves behind).")
     if args.cleanup != "none":
         print("After the installer exits with status 0, " + clean.describe())
     if not args.yes:
@@ -199,12 +210,13 @@ def _real_install(args) -> int:
         if input("Type 'yes' to run the installer: ").strip() != "yes":
             print("Not approved. Nothing was run.")
             return 2
+    control = RunControl()
     try:
         options = RunOptions(
             on_progress=(lambda smp: print(f"[progress] {smp.line()}", flush=True))
             if args.progress else None,
             progress_interval=args.progress_interval,
-            detailed_log=args.detailed_log, wine_debug=args.wine_debug)
+            detailed_log=args.detailed_log, wine_debug=args.wine_debug, control=control)
         status, log_path, changes = run_tracked(
             plan, wine, args.create_prefix, args.show_changes or args.find_exe, options=options)
     except RuntimeError as exc:
@@ -214,6 +226,17 @@ def _real_install(args) -> int:
         print("interrupted; the installer may still be running or half-finished.",
               file=sys.stderr)
         return 130
+    if control.cancelled:
+        print("The run was cancelled, not completed.")
+        print(CANCEL_REMAINS)
+        for note in control.notes:
+            print(f"note: {note}")
+        if args.cleanup != "none":
+            print("cleanup: skipped, the run was cancelled")
+        if args.detailed_log:
+            print(f"event log: {Path(log_path).with_suffix('.events.jsonl')}")
+        print(f"local log: {log_path} (may contain your username and local paths)")
+        return CANCELLED_STATUS
     print(f"installer exited with status {status}")
     if args.cleanup != "none":
         if status == 0:

@@ -23,6 +23,13 @@ Result: two user-supplied installers started and stayed open for the whole 120 s
 
 One installer was also started through Proton (GE-Proton) with umu-launcher in the same sandbox, with `SANDBOX_ETC=1`. It stayed open for 120 seconds. Proton's output held one error line whose source was not found.
 
+## Stop and preflight
+Tested with controlled dummy processes (a Python script that starts a child and a grandchild) and fake `/proc` and meminfo data, plus a fake `wineserver` script that only records its arguments. They cover: the whole group ending on Stop, a child that ignores SIGTERM being killed after the grace period, a program that moved to another session surviving (the documented limit), stopping twice or after the end doing nothing, only the recorded group and `wineserver -k` for the plan's prefix being signalled (no call by name), Ctrl-C, the `cancelled` event, a failing installer reported as failed, and the preflight labels and caps. None of this shows that any real installer stops or installs correctly.
+
+Observed once by hand on 2026-11-16 (Wine 11.0 wow64, NixOS, a throwaway prefix, the built-in command `cmd /c ping -n 60 127.0.0.1`): the run's own processes shared the leader's process group, and Wine's server and services each had their own session, so a group stop ended the run and left the prefix's server running; `wineserver -k` for that prefix then ended the rest. Not observed: a stop during `wineboot`, or an installer attached to a Wine server that was already running.
+
+Not shown: Stop through `umu-run`. The attempt in `tools/sandbox.sh` with the cached Proton failed before starting ("umu has not been setup for the user; an internet connection is required"), so the Proton behaviour is unverified.
+
 ## The single-file build (release workflow)
 `release.yml` builds one Linux program with PyInstaller. Checked on 2026-11-16 by running the workflow by hand (it builds and uploads only):
 - The checksum file matches. `cli --version` prints 1.0.0 and `cli doctor` runs.
