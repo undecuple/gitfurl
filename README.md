@@ -15,7 +15,7 @@
   <img src="https://img.shields.io/badge/runtime-Wine%20%7C%20Proton-FF6400?labelColor=0C1021&style=flat-square" alt="Runtime: Wine, optional Proton">
 </p>
 
-<p align="center"><a href="#getting-started">Getting started</a> · <a href="#why-would-i-want-this">Why would I want this?</a> · <a href="#status">Status</a> · <a href="#known-issues">Known issues</a> · <a href="#ai-use">AI use</a> · <a href="docs/user-guide.md">User guide</a> · <a href="#building">Building</a> · <a href="https://github.com/undecuple/gitfurl/issues/new/choose">Report a bug</a></p>
+<p align="center"><a href="#getting-started">Getting started</a> · <a href="#why-would-i-want-this">Why would I want this?</a> · <a href="#status">Status</a> · <a href="#known-issues">Known issues</a> · <a href="#ai-use">AI use</a> · <a href="docs/user-guide.md">User guide</a> · <a href="#building">Building</a> · <a href="#community">Community</a> · <a href="https://github.com/undecuple/gitfurl/issues/new/choose">Report a bug</a></p>
 
 ---
 
@@ -129,6 +129,9 @@ Gitfurl is not affiliated with these projects or with any software publisher.
 
 ## Roadmap
 First a release that has been tested on a complete install, then a runtime choice in the app with Proton checked end to end, then a Docker image and compose file. See [ROADMAP.md](ROADMAP.md).
+
+## Community
+Questions and discussion: the gitfurl forum on the [undecuple Discord server](https://discord.gg/W8fMT78Q7k). Bugs still go to [GitHub issues](https://github.com/undecuple/gitfurl/issues/new/choose), and security problems to [private advisories](SECURITY.md). Do not post logs there without removing your user name and local paths.
 
 ## Contributing
 See [CONTRIBUTING.md](CONTRIBUTING.md). Security problems: [SECURITY.md](SECURITY.md).
