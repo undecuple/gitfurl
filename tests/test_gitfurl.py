@@ -260,6 +260,20 @@ class GuiLogicTests(unittest.TestCase):
         self.assertTrue(describe_plan("", "p")[1])
         self.assertTrue(describe_plan("/x", "")[1])
 
+    def test_stop_applies_only_to_the_active_unstopped_run(self):
+        # The decision stop_clicked re-checks after its modal dialog (R4). The dialog itself
+        # and the button are not driven by any test.
+        from gitfurl.gui import stop_applies
+        from gitfurl.runner import RunControl
+
+        mine, other = RunControl(), RunControl()
+        self.assertTrue(stop_applies({"control": mine}, mine))
+        self.assertFalse(stop_applies({"control": None}, mine))  # the run ended during the dialog
+        self.assertFalse(stop_applies({"control": other}, mine))  # a newer run replaced it
+        self.assertFalse(stop_applies({"control": None}, None))
+        mine.cancelled = True
+        self.assertFalse(stop_applies({"control": mine}, mine))  # already stopping
+
     def test_plan_preview_has_no_side_effects(self):
         from gitfurl.gui import describe_plan
 
@@ -1361,6 +1375,38 @@ class StopTests(unittest.TestCase):
             control.request_stop()
             th.join(20)
         self.assertFalse(marker.exists())
+
+    def test_ctrl_c_between_guard_release_and_the_wait_loop_still_stops_the_run(self):
+        # any exception after the child is recorded must stop it, not leave it unmanaged
+        control = self.RunControl(grace_s=5)
+        from gitfurl import runner
+
+        real_release = runner._SigintGuard.release
+        state = {"n": 0}
+
+        def release_then_interrupt(g):
+            real_release(g)
+            state["n"] += 1
+            if state["n"] == 1:  # the release inside the run, right after the child was recorded
+                raise KeyboardInterrupt
+
+        calls, spy = self._spy_killpg()
+        with spy, mock.patch.object(runner._SigintGuard, "release", release_then_interrupt), \
+                self.assertRaises(KeyboardInterrupt):
+            self.execute(self.plan_for("normal"), str(Path(self.tmp.name) / "wine"),
+                         self.env, options=self.RunOptions(control=control))
+        self.assertTrue(any(sig == __import__("signal").SIGTERM for _, sig in calls), calls)
+
+    def test_request_stop_releases_finish_even_if_the_guard_setup_fails(self):
+        from gitfurl import runner
+
+        control = self.RunControl(grace_s=1)
+        control.start(lambda: mock.Mock(pid=os_getpid_other()))
+        with mock.patch.object(runner._SigintGuard, "__enter__", side_effect=KeyboardInterrupt), \
+                self.assertRaises(KeyboardInterrupt):
+            control.request_stop()
+        control.finish()  # must not wait forever
+        self.assertFalse(control.cancelled)
 
     def test_cancelled_event_in_the_json_log(self):
         import json

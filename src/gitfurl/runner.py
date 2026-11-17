@@ -117,9 +117,14 @@ class _SigintGuard:
     def _note(self, signum, frame):
         self.hits += 1
 
-    def __exit__(self, *exc):
+    def release(self) -> None:
+        """Put the previous SIGINT handler back. Safe to call more than once."""
         if self._active and self._previous is not None:
+            self._active = False
             signal.signal(signal.SIGINT, self._previous)
+
+    def __exit__(self, *exc):
+        self.release()
         return False
 
 
@@ -226,37 +231,39 @@ class RunControl:
         between, and a waiting finish() is always released.
         """
         mine = False
-        with _SigintGuard() as guard:
+        guard = _SigintGuard()
+        try:
+            guard.__enter__()
+            with self._lock:
+                if self._stopping or self._ended or self._finished:
+                    return list(self.notes)
+                self._stopping = mine = True
+                started = self._pgid is not None
+                if not started:
+                    self.cancelled = True  # start() will refuse
+            terminated = False
             try:
-                with self._lock:
-                    if self._stopping or self._ended or self._finished:
-                        return list(self.notes)
-                    self._stopping = mine = True
-                    started = self._pgid is not None
-                    if not started:
-                        self.cancelled = True  # start() will refuse
-                terminated = False
-                try:
-                    if started and self._group_alive() and self._signal(signal.SIGTERM):
-                        terminated = True
-                        self.cancelled = True
-                        self._wait_group(self.grace_s, guard)
-                finally:
-                    if terminated and self._group_alive() and self._signal(signal.SIGKILL):
-                        self.notes.append(
-                            "stop was forced by a second Ctrl-C: remaining processes were "
-                            "force-killed" if guard.hits else
-                            f"some processes did not stop within {self.grace_s:g} s and "
-                            "were force-killed")
-                        self._wait_group(3)
-                        if self._group_alive():
-                            self.notes.append(
-                                "could not confirm that every process of the run ended")
-                if self.cancelled and started:
-                    self._ask_server_to_exit()
+                if started and self._group_alive() and self._signal(signal.SIGTERM):
+                    terminated = True
+                    self.cancelled = True
+                    self._wait_group(self.grace_s, guard)
             finally:
-                if mine:
-                    self._stop_done.set()
+                if terminated and self._group_alive() and self._signal(signal.SIGKILL):
+                    self.notes.append(
+                        "stop was forced by a second Ctrl-C: remaining processes were "
+                        "force-killed" if guard.hits else
+                        f"some processes did not stop within {self.grace_s:g} s and "
+                        "were force-killed")
+                    self._wait_group(3)
+                    if self._group_alive():
+                        self.notes.append(
+                            "could not confirm that every process of the run ended")
+            if self.cancelled and started:
+                self._ask_server_to_exit()
+        finally:
+            if mine:
+                self._stop_done.set()
+            guard.release()
         return list(self.notes)
 
     def _ask_server_to_exit(self) -> None:
@@ -296,29 +303,34 @@ def _run_in_group(argv, cwd, env, stdout, control: RunControl):
         return subprocess.Popen(argv, cwd=cwd, env=env, stdout=stdout, stderr=subprocess.STDOUT,
                                 start_new_session=True)
 
-    with _SigintGuard() as guard:  # a Ctrl-C between the start and the recording waits
-        proc = control.start(popen)
-    if proc is None:  # stopped before it started
-        return subprocess.CompletedProcess(argv, CANCELLED_STATUS)
+    guard = _SigintGuard()
+    guard.__enter__()  # a Ctrl-C from here until the wait loop is held, then replayed
     try:
-        if guard.hits:
-            control.request_stop()
-        while True:
-            try:  # wait without reaping, so the group id stays ours until finish()
-                os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
-                break
-            except KeyboardInterrupt:
+        proc = control.start(popen)
+        if proc is None:  # stopped before it started
+            return subprocess.CompletedProcess(argv, CANCELLED_STATUS)
+        try:
+            guard.release()  # from here a Ctrl-C raises, and the handler below covers it
+            if guard.hits:
                 control.request_stop()
-            except ChildProcessError:
-                break
-        control.mark_exited()
-    except BaseException:
-        control.request_stop()  # never leave the leader running unmanaged
-        raise
+            while True:
+                try:  # wait without reaping, so the group id stays ours until finish()
+                    os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
+                    break
+                except KeyboardInterrupt:
+                    control.request_stop()
+                except ChildProcessError:
+                    break
+            control.mark_exited()
+        except BaseException:
+            control.request_stop()  # never leave the leader running unmanaged
+            raise
+        finally:
+            control.finish()
+            proc.wait()  # reap
+        return proc
     finally:
-        control.finish()
-        proc.wait()  # reap
-    return proc
+        guard.release()
 
 
 @dataclass
