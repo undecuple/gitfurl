@@ -158,7 +158,7 @@ class BudgetTests(unittest.TestCase):
         for needle in (f"MemoryMax={b.max_bytes}", f"MemoryHigh={b.high_bytes}",
                        "kept free for the rest of the system", "10% of MemTotal",
                        "swap: not limited", "does not guarantee", "slowed down",
-                       "stops processes in this run only", "--expand-environment=no",
+                       "systemd then ends the whole run", "--expand-environment=no", "OOMPolicy=stop",
                        "--scope", "never raised"):
             self.assertIn(needle, text)
         self.assertNotIn("cannot", text.lower().replace("cannot be", ""))
@@ -258,7 +258,7 @@ class WrapTests(unittest.TestCase):
             "/usr/bin/systemd-run", "--user", "--scope", "--quiet",
             "--unit=gitfurl-p1-20261117-101010-42.scope", "--expand-environment=no",
             "-p", f"MemoryHigh={b.high_bytes}", "-p", f"MemoryMax={b.max_bytes}",
-            "--", "/usr/bin/wine", "/i/setup.exe"])
+            "-p", "OOMPolicy=stop", "--", "/usr/bin/wine", "/i/setup.exe"])
 
     def test_old_systemd_refuses_a_dollar_and_otherwise_omits_the_flag(self):
         s, _b = self.scope(version=249)
@@ -306,7 +306,8 @@ class ExecuteTests(unittest.TestCase):
         b = compute_budget(16 * GIB, 10 * GIB)
         self.assertEqual(got[5:9], ["-p", f"MemoryHigh={b.high_bytes}", "-p",
                                     f"MemoryMax={b.max_bytes}"])
-        self.assertEqual(got[9:], ["--", self.wine, str(self.installer)])
+        self.assertEqual(got[9:11], ["-p", "OOMPolicy=stop"])
+        self.assertEqual(got[11:], ["--", self.wine, str(self.installer)])
         self.assertEqual(self.wine_rec.read_text().splitlines(), [str(self.installer)])
         self.assertIsNotNone(res.memory)
         self.assertFalse(res.memory.hit_limit)
@@ -331,8 +332,8 @@ class ExecuteTests(unittest.TestCase):
         self.assertEqual((rep.oom_kill, rep.high), (2, 7))
         text = describe_result(res)
         self.assertIn("hit its hard memory limit", text)
-        self.assertIn("the kernel stopped one or more processes inside this run's scope "
-                      "(2 process(es)", text)
+        self.assertIn("the kernel stopped a process of this run (2 process(es) by this run's "
+                      "memory.events) and systemd then ended the whole run", text)
         self.assertNotIn("protected", text)
         self.assertIn("retry without it, use --no-memory-limit, or turn the option off in the "
                       "window", text)
@@ -356,6 +357,27 @@ class ExecuteTests(unittest.TestCase):
         self.assertIn("memory.events could not be read after the run", text)
         self.assertIn("an out-of-memory stop could not be checked", text)
         self.assertNotIn("no out-of-memory stop was seen", text)
+
+    def test_a_scope_gone_after_the_run_means_no_oom_stop_was_recorded(self):
+        # what systemd 262 did after a normal end: the unit was already unloaded
+        self.f.state.write_text("LoadState=not-found\nActiveState=inactive\nResult=success\n")
+        res = execute(self.plan, self.wine, self.f.env, options=self.options())
+        self.assertTrue(res.memory.unit_gone)
+        self.assertFalse(res.memory.final_read)
+        text = describe_result(res)
+        self.assertIn("no out-of-memory stop was recorded in this run", text)
+        self.assertIn("leaves the scope as failed (OOMPolicy=stop)", text)
+        self.assertNotIn("could not be checked", text)
+        self.assertFalse(any("reset-failed" in x for x in self.f.ctl_lines()))
+
+    def test_a_gone_scope_with_a_kill_seen_during_the_run_still_reports_the_kill(self):
+        self.f.events.write_text("high 0\noom_kill 1\n")
+        self.f.state.write_text("LoadState=not-found\nActiveState=inactive\nResult=success\n")
+        with mock.patch.object(memlimit.MemoryScope, "read_events", autospec=True,
+                               side_effect=_events_then_gone()):
+            res = execute(self.plan, self.wine, self.f.env, options=self.options())
+        self.assertTrue(res.memory.hit_limit)
+        self.assertNotIn("no out-of-memory stop was recorded", describe_result(res))
 
     def test_a_failed_systemd_run_start_is_named(self):
         self.f.fail_start.write_text("Failed to start transient scope unit: Access denied\n")
@@ -544,6 +566,16 @@ class FinishTests(unittest.TestCase):
                          "Failed to find executable /a: No such file or directory")
 
 
+def _events_then_gone():
+    """read_events stand-in: as if a read while the run lasted had counted one OOM kill and
+    every read after the run found nothing (the scope gone)."""
+    def fake(self):
+        self.report.oom_kill = 1
+        self.report.high = 0
+        return False
+    return fake
+
+
 def replace_settle(scope):
     scope.settle_s = 0.0
     return scope
@@ -721,7 +753,7 @@ class CliTests(unittest.TestCase):
         popen.assert_not_called()
         b = compute_budget(16 * GIB, 10 * GIB)
         self.assertLess(out.index(f"MemoryMax={b.max_bytes}"), out.index("Not approved"))
-        self.assertIn("stops processes in this run only", out)
+        self.assertIn("systemd then ends the whole run", out)
 
 
 class PrefixCreationTests(unittest.TestCase):
