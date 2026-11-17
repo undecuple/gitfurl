@@ -57,6 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
     inst.add_argument("--proton-path", metavar="DIR",
                       default=os.environ.get("PROTONPATH"),
                       help="a Proton folder you already have (or set PROTONPATH); never downloaded")
+    inst.add_argument("--portable", action="store_true",
+                      help="run the installer inside bwrap with only the prefix writable, no "
+                           "network and no menu entries (reduces changes outside the prefix; "
+                           "not a guarantee); default: off")
     inst.add_argument("--find-exe", action="store_true",
                       help="after the run, guess which new program was installed (local only)")
     inst.add_argument("--progress", action="store_true",
@@ -93,7 +97,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         installer = validate_installer(args.installer)
         plan = build_plan(installer, args.prefix or DEFAULT_PREFIX, runtime=args.runtime,
-                          proton_path=args.proton_path)
+                          proton_path=args.proton_path, portable=args.portable)
+        portable_lines = _portable_lines(plan, installer, shutil.which("wine") or "wine",
+                                         full=True) if args.portable else []
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -106,6 +112,8 @@ def main(argv: list[str] | None = None) -> int:
     print("needed for a real run:")
     for item in plan.prerequisites:
         print(f"  - {item}")
+    for line in portable_lines:
+        print(line)
     for line in describe_detection(detect(installer)).splitlines():
         print(line)
     print("preflight (read-only, advisory):")
@@ -113,6 +121,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {line}")
     print("Running an installer can expose files the current user can access.")
     return 0
+
+
+def _portable_lines(plan, installer, wine: str, full: bool) -> list[str]:
+    """Description of a portable run, with the real bwrap argument list. Raises ValueError."""
+    import os
+    from dataclasses import replace
+
+    from gitfurl.portable import check_portable_supported, describe_portable, find_bwrap
+
+    bwrap = find_bwrap()
+    env = dict(os.environ)
+    wrapped = replace(plan, argv=[wine, *plan.argv[1:]])
+    check_portable_supported(wrapped, bwrap, env, installer)
+    return describe_portable(wrapped, bwrap, installer, env, full_argv=full)
 
 
 def _prefix_interrupt_message(exc: BaseException) -> str:
@@ -180,7 +202,9 @@ def _real_install(args) -> int:
     try:
         installer = validate_installer(args.installer)
         plan = build_plan(installer, args.prefix, runtime=args.runtime,
-                          proton_path=args.proton_path)
+                          proton_path=args.proton_path, portable=args.portable)
+        if args.portable and args.runtime != "wine":
+            raise ValueError("portable install is only supported with the wine runtime")
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -190,6 +214,13 @@ def _real_install(args) -> int:
         print(f"error: {tool} not found on PATH; run 'gitfurl cli doctor'. Nothing was run.",
               file=sys.stderr)
         return 1
+    portable_lines: list[str] = []
+    if args.portable:
+        try:
+            portable_lines = _portable_lines(plan, installer, wine, full=True)
+        except ValueError as exc:
+            print(f"error: {exc}. Nothing was run.", file=sys.stderr)
+            return 1
     missing = not plan.prefix.is_dir()
     if missing and not args.create_prefix:
         print(f"error: prefix does not exist: {plan.prefix}. Create it first with "
@@ -210,7 +241,11 @@ def _real_install(args) -> int:
         return 1
     print(f"About to run: {plan.preview()}")
     print(f"prefix: {plan.prefix}" + (" (will be created first)" if missing else ""))
-    print("Wine prefixes are not sandboxes: the installer can reach files you can reach.")
+    if args.portable:
+        for line in portable_lines:
+            print(line)
+    else:
+        print("Wine prefixes are not sandboxes: the installer can reach files you can reach.")
     print("Only run installers you are authorised to use and have chosen to trust.")
     for line in describe_detection(detect(installer)).splitlines():
         print(line)
@@ -236,7 +271,7 @@ def _real_install(args) -> int:
             detailed_log=args.detailed_log, wine_debug=args.wine_debug, control=control)
         status, log_path, changes = run_tracked(
             plan, wine, args.create_prefix, args.show_changes or args.find_exe, options=options)
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt as exc:
@@ -270,6 +305,9 @@ def _real_install(args) -> int:
     if changes is not None:
         if args.show_changes:
             print(changes.describe())
+            if args.portable:
+                print("Portable run: this report covers the checked places only; it says "
+                      "nothing about places gitfurl did not check.")
         if args.find_exe:
             print(changes.describe_executables(plan.prefix))
     if args.detailed_log:
