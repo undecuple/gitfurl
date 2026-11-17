@@ -4,7 +4,7 @@ max=1048576
 bad=0
 for f in $(git diff --cached --name-only --diff-filter=ACM); do
   case "$f" in
-    *.exe|*.msi|*.bin|*.iso|*.zip|*.7z|*.rar|*.tar|*.tar.*|*.gz|*.pem|*.key|*.p12|*.pfx)
+    *.exe|*.msi|*.bin|*.iso|*.zip|*.7z|*.rar|*.tar|*.tar.*|*.gz|*.arc|*.sfx|*.pem|*.key|*.p12|*.pfx)
       echo "blocked: $f (installer, archive or key file)"; bad=1 ;;
   esac
   size=$(git cat-file -s ":$f" 2>/dev/null || echo 0)
