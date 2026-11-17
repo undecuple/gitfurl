@@ -3,3 +3,6 @@ contact_links:
   - name: Security problem
     url: https://github.com/undecuple/gitfurl/security/advisories/new
     about: Report security problems privately, not as an issue.
+  - name: Questions and discussion
+    url: https://discord.gg/W8fMT78Q7k
+    about: The gitfurl forum on the undecuple Discord server. Bugs go in an issue here.
