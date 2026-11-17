@@ -31,6 +31,7 @@ from gitfurl.scan import (
     ScanBlocked,
     build_scan_plan,
     decide,
+    describe_scan_plan,
     interpret,
     parse_version,
     run_scan,
@@ -159,6 +160,25 @@ class ResultTests(Fixture):
         self.assertIn("no known signature matched (ClamAV, database dated 2025-10-02)", msg)
         self.assertNotIn("safe", msg.lower())
         self.assertNotIn("clean of", msg.lower())
+
+    def test_files_over_the_default_size_limit_are_named_not_called_clean(self):
+        big = self.inst_dir / "data-2.bin"
+        with open(big, "wb") as fh:  # sparse: the size counts, no disk is used
+            fh.truncate(150 * 1000 * 1000)
+        p = self.plan()
+        self.assertEqual(p.large, (str(big),))
+        text = "\n".join(describe_scan_plan(p))
+        self.assertIn("may not have been scanned completely: data-2.bin", text)
+        self.respond(self.ok_lines(p), 0)
+        res = run_scan(p)
+        ok, msg = decide(res)
+        self.assertTrue(ok)
+        self.assertIn("no known signature matched in the parts ClamAV scanned", msg)
+        self.assertIn("larger than ClamAV's default per-file limit (100 MB)", msg)
+        self.assertIn("data-2.bin", msg)
+        self.assertEqual(self.plan().large, (str(big),))
+        small = self.plan()
+        self.assertNotIn(str(self.inst_dir / "data-1.bin"), small.large)
 
     def test_hit_blocks_and_override_proceeds(self):
         p = self.plan()

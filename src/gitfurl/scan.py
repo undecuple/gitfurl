@@ -41,6 +41,10 @@ VERSION_TIMEOUT_S = 5
 OUTPUT_CAP = 1024 * 1024  # bytes of stdout and of stderr kept; the rest is read and dropped
 MAX_FILES = 1000  # files beside the installer; a bigger folder is refused, not cut short
 DB_WARN_DAYS = 7
+# clamscan(1): --max-filesize "(default: 100 MB, max: 2 GB)"; --alert-exceeds-max is off by
+# default and the man page does not say what an over-limit file reports. gitfurl does not
+# rely on that: files above this size are named as possibly not fully scanned.
+LIMIT_BYTES = 100 * 1000 * 1000
 STOP_GRACE_S = 2.0
 
 # The only options gitfurl ever passes. Nothing here removes, moves or copies a file.
@@ -73,6 +77,7 @@ class ScanPlan:
     files: tuple[str, ...]
     timeout_s: float = DEFAULT_TIMEOUT_S
     skipped: int = 0  # entries beside the installer that are not scanned (folders, links, ...)
+    large: tuple[str, ...] = ()  # files above ClamAV's default per-file limit (LIMIT_BYTES)
 
     @property
     def argv(self) -> list[str]:
@@ -116,11 +121,24 @@ def build_scan_plan(installer: Path, clamscan: str | None,
         raise ValueError(f"could not list the installer's folder ({exc.strerror or exc})") from exc
     files.sort()
     files.insert(0, str(installer))
+    large = []
     for f in files:
         if "\n" in f or "\r" in f:
             raise ValueError(f"a file name contains a line break ({clean(Path(f).name, 60)}); "
                              "its scan result could not be read reliably")
-    return ScanPlan(clamscan, tuple(files), float(timeout_s), skipped)
+        try:
+            if os.stat(f, follow_symlinks=False).st_size > LIMIT_BYTES:
+                large.append(f)
+        except OSError:
+            pass
+    return ScanPlan(clamscan, tuple(files), float(timeout_s), skipped, tuple(large))
+
+
+def large_note(large: tuple[str, ...]) -> str:
+    names = ", ".join(clean(Path(f).name, 60) for f in large[:5])
+    more = f" and {len(large) - 5} more" if len(large) > 5 else ""
+    return (f"{len(large)} file(s) are larger than ClamAV's default per-file limit (100 MB) and "
+            f"may not have been scanned completely: {names}{more}")
 
 
 # ---- database version (clamscan --version) ----
@@ -203,6 +221,8 @@ def describe_scan_plan(plan: ScanPlan, db: DbInfo | None = None,
          f"subfolders and symbolic links are not scanned ({plan.skipped} skipped). Timeout "
          f"{plan.timeout_s:g} s."),
     ]
+    if plan.large:
+        lines.append("  " + large_note(plan.large) + ".")
     if db is not None:
         lines.extend("  " + ln for ln in describe_database(db, now))
     lines.append("  gitfurl never runs freshclam or updates the database; keep it current "
@@ -226,6 +246,7 @@ class ScanResult:
     exit_code: int | None = None
     db: DbInfo | None = None
     notes: list[str] = field(default_factory=list)
+    large: tuple[str, ...] = ()  # files possibly not scanned completely (size above the limit)
 
 
 def parse_output(text: str, files: tuple[str, ...]) -> tuple[list[tuple[str, str]], list[str],
@@ -421,6 +442,7 @@ def run_scan(plan: ScanPlan, should_stop=None, env: dict[str, str] | None = None
                 res.notes.append("clamscan said: " + clean(_decode(stderr).strip()
                                                            .splitlines()[-1], 200))
         res.db = db
+        res.large = plan.large
         res.notes.extend(notes)
         return res
     finally:
@@ -433,6 +455,9 @@ def decide(result: ScanResult, allow_hit: bool = False) -> tuple[bool, str]:
     dated = f"database dated {db.date_text()}" if db and db.db_date else "database date unknown"
     notes = "".join(f"\n  note: {n}" for n in result.notes)
     if result.status == CLEAN:
+        if result.large:
+            return True, (f"ClamAV scan: no known signature matched in the parts ClamAV scanned "
+                          f"(ClamAV, {dated}). {large_note(result.large)}.{notes}")
         return True, f"ClamAV scan: no known signature matched (ClamAV, {dated}).{notes}"
     if result.status == HIT:
         listed = "\n".join(f"  {clean(p, 200)}: {clean(s, 120)}" for p, s in result.hits[:20])
