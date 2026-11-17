@@ -13,6 +13,8 @@ from pathlib import Path
 
 from gitfurl.prefixes import child_env as build_child_env
 from gitfurl.prefixes import prefix_path
+from gitfurl.procgroup import SigintGuard as _SigintGuard
+from gitfurl.procgroup import wineserver_for
 
 
 @dataclass(frozen=True)
@@ -92,40 +94,6 @@ CANCEL_REMAINS = (
     "that left the run's own process group was not touched. Read the log, and the changes "
     "report if you turned it on."
 )
-
-
-class _SigintGuard:
-    """Hold SIGINT back on the main thread: remember it instead of raising KeyboardInterrupt.
-
-    Outside the main thread (where Python never delivers SIGINT) it does nothing.
-    """
-
-    def __init__(self):
-        self.hits = 0
-        self._previous = None
-        self._active = False
-
-    def __enter__(self):
-        if threading.current_thread() is threading.main_thread():
-            try:
-                self._previous = signal.signal(signal.SIGINT, self._note)
-                self._active = True
-            except (ValueError, OSError):
-                pass
-        return self
-
-    def _note(self, signum, frame):
-        self.hits += 1
-
-    def release(self) -> None:
-        """Put the previous SIGINT handler back. Safe to call more than once."""
-        if self._active and self._previous is not None:
-            self._active = False
-            signal.signal(signal.SIGINT, self._previous)
-
-    def __exit__(self, *exc):
-        self.release()
-        return False
 
 
 class RunControl:
@@ -371,7 +339,6 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
     With options, it can also report progress and write a JSON-lines event log next to it.
     """
     import json
-    import shutil
     from datetime import datetime
 
     options = options or RunOptions()
@@ -428,9 +395,7 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
                                stderr=subprocess.STDOUT, check=False)
                 else:
                     if plan.runtime == "wine":
-                        # an absolute path only: a bare name would resolve against the cwd
-                        server = Path(wine).with_name("wineserver") if Path(wine).is_absolute() else None
-                        server = str(server) if server and server.is_file() else shutil.which("wineserver")
+                        server = wineserver_for(wine)
                         control.configure_server([server, "-k"] if server else None,
                                                  {**child_env, "WINEPREFIX": str(plan.prefix)})
                     proc = _run_in_group(argv, cwd=plan.cwd, env=child_env, stdout=log,

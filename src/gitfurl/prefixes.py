@@ -60,55 +60,101 @@ def plan_create(name: str, wine: str, env: dict[str, str] | None = None,
     }
 
 
-def _wineserver_for(wine: str) -> str | None:
-    """wineserver beside an absolute wine path, else on PATH. Never relative to the cwd."""
-    import shutil
+def _cleanup_group(proc, env: dict[str, str], wine: str, grace_s: float, guard) -> list[str]:
+    """End the group `proc` leads, then ask this prefix's Wine server to exit. Returns notes.
 
-    if os.path.isabs(wine):
-        beside = Path(wine).with_name("wineserver")
-        if beside.is_file():
-            return str(beside)
-    return shutil.which("wineserver")
+    The leader is never reaped here until the end (liveness is read from /proc), so its
+    group id stays ours. KILL goes to the group whenever any member is left after the grace
+    period, even if the leader itself already exited on TERM. A Ctrl-C held by `guard` ends
+    the grace wait early. Every step runs even if an earlier one fails.
+    """
+    import signal
+    import subprocess
+    import time
+
+    from gitfurl.procgroup import group_alive, wineserver_for
+
+    notes: list[str] = []
+    pgid = proc.pid
+
+    def wait_gone(seconds: float, interruptible: bool) -> bool:
+        end = time.monotonic() + seconds
+        while time.monotonic() < end and not (interruptible and guard.hits) and group_alive(pgid):
+            time.sleep(0.05)
+        return not group_alive(pgid)
+
+    try:
+        if group_alive(pgid):
+            for sig, seconds in ((signal.SIGTERM, grace_s), (signal.SIGKILL, 3.0)):
+                try:
+                    os.killpg(pgid, sig)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                if wait_gone(seconds, sig == signal.SIGTERM):
+                    break
+                if sig == signal.SIGTERM:
+                    notes.append("a second Ctrl-C ended the wait: remaining processes were "
+                                 "force-killed" if guard.hits else
+                                 f"some processes did not stop within {grace_s:g} s and were "
+                                 "force-killed")
+            if group_alive(pgid):
+                notes.append("could not confirm that every process it started had ended")
+            else:
+                notes.append("the processes it started were stopped")
+        else:
+            notes.append("no process it started was still running")
+    except Exception as exc:  # noqa: BLE001 - cleanup must go on to the next step
+        notes.append(f"stopping the processes failed: {exc}")
+    server = wineserver_for(wine)
+    if not server:
+        notes.append("wineserver was not found, so this prefix's Wine server was not asked to "
+                     "exit")
+    else:
+        try:
+            done = subprocess.run([server, "-k"], env=env, timeout=30, check=False,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            notes.append("asked this prefix's Wine server to exit (wineserver -k)"
+                         if done.returncode == 0 else
+                         f"wineserver -k for this prefix exited with status {done.returncode}")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            notes.append(f"could not ask this prefix's Wine server to exit: {exc}")
+    try:
+        proc.wait(timeout=10)  # reap last
+    except subprocess.TimeoutExpired:
+        notes.append("the first process did not end within 10 s of the stop (it may be stuck "
+                     "in the kernel); it was not waited for further")
+    return notes
 
 
 def run_in_group(argv: list[str], env: dict[str, str], timeout: float, wine: str,
                  grace_s: float = 5.0):
     """Run argv in its own process group and wait up to `timeout` seconds.
 
-    On a timeout or Ctrl-C only that group is signalled (TERM, then KILL after `grace_s`),
-    and then this prefix's own Wine server is asked to exit (`wineserver -k`, WINEPREFIX
-    from `env`). Nothing is found by name. A program that left the group is out of reach.
-    Raises subprocess.TimeoutExpired after the cleanup, or re-raises KeyboardInterrupt.
+    On a timeout or Ctrl-C only that group is signalled (TERM, then KILL), then this
+    prefix's own Wine server is asked to exit. Nothing is found by name; a program that left
+    the group is out of reach. A second Ctrl-C during the cleanup is held back and only
+    shortens the grace wait. The exception that ends the wait (subprocess.TimeoutExpired or
+    KeyboardInterrupt) is re-raised with a `notes` list saying what was really done.
     """
-    import signal
     import subprocess
-    import time
 
-    proc = subprocess.Popen(argv, env=env, start_new_session=True)
+    from gitfurl.procgroup import SigintGuard
+
+    guard = SigintGuard()
+    guard.__enter__()  # a Ctrl-C from here to the wait is held, then replayed
     try:
-        return subprocess.CompletedProcess(argv, proc.wait(timeout))
-    except BaseException:
-        # The leader has not been reaped (wait() raised), so its group id is still ours.
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.killpg(proc.pid, sig)
-            except (ProcessLookupError, PermissionError):
-                pass
-            end = time.monotonic() + grace_s
-            while time.monotonic() < end and proc.poll() is None:
-                time.sleep(0.05)
-            if proc.poll() is not None:
-                break
-        server = _wineserver_for(wine)
-        if server:
-            try:
-                subprocess.run([server, "-k"], env=env, timeout=30, check=False,
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-        if proc.poll() is None:
-            proc.wait()
-        raise
+        proc = subprocess.Popen(argv, env=env, start_new_session=True)
+        try:
+            guard.release()
+            if guard.hits:
+                raise KeyboardInterrupt
+            return subprocess.CompletedProcess(argv, proc.wait(timeout))
+        except BaseException as exc:
+            guard.__enter__()
+            exc.notes = _cleanup_group(proc, env, wine, grace_s, guard)
+            raise
+    finally:
+        guard.release()
 
 
 def create_prefix(name: str, wine: str, env: dict[str, str] | None = None, run=None,
@@ -133,8 +179,8 @@ def create_prefix(name: str, wine: str, env: dict[str, str] | None = None, run=N
         else:
             proc = run(plan["argv"], env=child, timeout=WINEBOOT_TIMEOUT_S, check=False)
     except subprocess.TimeoutExpired as exc:
+        done = "; ".join(getattr(exc, "notes", [])) or "no cleanup details"
         raise RuntimeError(
-            f"creating the prefix timed out after {WINEBOOT_TIMEOUT_S} s ({path}). gitfurl "
-            "stopped the processes it started for it and asked this prefix's Wine server to "
-            "exit. The prefix folder was kept; it may be incomplete.") from exc
+            f"creating the prefix timed out after {WINEBOOT_TIMEOUT_S} s ({path}). What "
+            f"gitfurl did: {done}. The prefix folder was kept; it may be incomplete.") from exc
     return proc.returncode

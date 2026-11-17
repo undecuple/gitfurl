@@ -111,6 +111,13 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _prefix_interrupt_message(exc: BaseException) -> str:
+    notes = getattr(exc, "notes", None)
+    done = "; ".join(notes) if notes else "no cleanup details are available"
+    return ("interrupted while creating the prefix. What gitfurl did: " + done
+            + ". The prefix folder was kept and may be incomplete.")
+
+
 def _prefix_command(args) -> int:
     if args.prefix_command == "create" and running_as_root():
         print(f"error: {ROOT_MESSAGE}", file=sys.stderr)
@@ -146,10 +153,8 @@ def _prefix_command(args) -> int:
     except FileExistsError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except KeyboardInterrupt:
-        print("interrupted: the processes gitfurl started for the prefix were stopped, and the "
-              "prefix's Wine server was asked to exit. The prefix folder was kept and may be "
-              "incomplete.", file=sys.stderr)
+    except KeyboardInterrupt as exc:
+        print(_prefix_interrupt_message(exc), file=sys.stderr)
         return 130
     except (RuntimeError, subprocess.TimeoutExpired) as exc:
         print(f"error: {exc}" if isinstance(exc, RuntimeError) else
@@ -228,9 +233,13 @@ def _real_install(args) -> int:
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    except KeyboardInterrupt:
-        print("interrupted; the installer may still be running or half-finished.",
-              file=sys.stderr)
+    except KeyboardInterrupt as exc:
+        if hasattr(exc, "notes"):  # interrupted while the prefix was being created
+            print(_prefix_interrupt_message(exc), file=sys.stderr)
+            print("The installer was not started.", file=sys.stderr)
+        else:
+            print("interrupted; the installer may still be running or half-finished.",
+                  file=sys.stderr)
         return 130
     if control.cancelled:
         print("The run was cancelled, not completed.")
