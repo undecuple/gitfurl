@@ -94,6 +94,35 @@ CANCEL_REMAINS = (
 )
 
 
+class _SigintGuard:
+    """Hold SIGINT back on the main thread: remember it instead of raising KeyboardInterrupt.
+
+    Outside the main thread (where Python never delivers SIGINT) it does nothing.
+    """
+
+    def __init__(self):
+        self.hits = 0
+        self._previous = None
+        self._active = False
+
+    def __enter__(self):
+        if threading.current_thread() is threading.main_thread():
+            try:
+                self._previous = signal.signal(signal.SIGINT, self._note)
+                self._active = True
+            except (ValueError, OSError):
+                pass
+        return self
+
+    def _note(self, signum, frame):
+        self.hits += 1
+
+    def __exit__(self, *exc):
+        if self._active and self._previous is not None:
+            signal.signal(signal.SIGINT, self._previous)
+        return False
+
+
 class RunControl:
     """Stops the run gitfurl started, and only that run.
 
@@ -107,6 +136,11 @@ class RunControl:
     A process-group id can be reused once the group is empty, so the group leader is kept
     unreaped until any stop has finished, every signal is sent under the lock, and nothing
     is signalled after the run has ended (a stop then does nothing).
+
+    Starting the leader and recording its group happen under the same lock as a stop
+    request, so a stop either sees the group or prevents the start; it cannot fall between.
+    A run counts as cancelled only if the stop took effect: before the start, or by
+    signalling a group that still had a live member.
     """
 
     def __init__(self, grace_s: float = STOP_GRACE_S):
@@ -114,19 +148,36 @@ class RunControl:
         self.cancelled = False
         self.notes: list[str] = []
         self._pgid: int | None = None
+        self._ended = False  # the leader has exited: no new stop may signal anything
         self._finished = False
         self._stopping = False
         self._stop_done = threading.Event()
         self._lock = threading.Lock()
         self._server_argv: list[str] | None = None
         self._server_env: dict[str, str] | None = None
+        self._server_configured = False
 
     def configure_server(self, argv: list[str] | None, env: dict[str, str] | None) -> None:
+        """Wine runtime only. argv None means no wineserver was found."""
         self._server_argv, self._server_env = argv, env
+        self._server_configured = True
 
-    def attach(self, pid: int) -> None:
+    def start(self, popen_fn):
+        """Start the leader unless a stop was already requested. Returns it, or None.
+
+        The check, the start and the recording of the group are one step under the lock.
+        """
         with self._lock:
-            self._pgid = pid  # the leader is its own group leader (start_new_session)
+            if self.cancelled:
+                return None
+            proc = popen_fn()
+            self._pgid = proc.pid  # the leader is its own group leader (start_new_session)
+            return proc
+
+    def mark_exited(self) -> None:
+        """The leader has exited (it is not yet reaped). A stop requested from now on does nothing."""
+        with self._lock:
+            self._ended = True
 
     def _signal(self, sig) -> bool:
         """Signal the run's group, only while the run is active. False if it was refused."""
@@ -161,42 +212,76 @@ class RunControl:
                 continue
         return False
 
+    def _wait_group(self, seconds: float, guard=None) -> None:
+        """Wait for the group to end. A Ctrl-C held back by the guard ends the wait early."""
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline and not (guard and guard.hits) and self._group_alive():
+            time.sleep(0.1)
+
     def request_stop(self) -> list[str]:
-        """Stop the run: TERM to its group, KILL after the grace period. Safe to call twice."""
-        with self._lock:
-            if self._stopping or self._finished:
-                return list(self.notes)
-            self._stopping = True
-            self.cancelled = True
-            started = self._pgid is not None
-        try:
-            if started and self._signal(signal.SIGTERM):
-                deadline = time.monotonic() + self.grace_s
-                while time.monotonic() < deadline and self._group_alive():
-                    time.sleep(0.1)
-                if self._group_alive() and self._signal(signal.SIGKILL):
-                    self.notes.append(f"some processes did not stop within {self.grace_s:g} s "
-                                      "and were force-killed")
-                    end = time.monotonic() + 3
-                    while time.monotonic() < end and self._group_alive():
-                        time.sleep(0.1)
-                    if self._group_alive():
-                        self.notes.append("could not confirm that every process of the run ended")
-            if started and self._server_argv:
+        """Stop the run: TERM to its group, KILL after the grace period. Safe to call twice.
+
+        It always runs to completion: Ctrl-C is held back while it works (a second one skips
+        the grace period and forces the stop), KILL is sent even if something goes wrong in
+        between, and a waiting finish() is always released.
+        """
+        mine = False
+        with _SigintGuard() as guard:
+            try:
+                with self._lock:
+                    if self._stopping or self._ended or self._finished:
+                        return list(self.notes)
+                    self._stopping = mine = True
+                    started = self._pgid is not None
+                    if not started:
+                        self.cancelled = True  # start() will refuse
+                terminated = False
                 try:
-                    subprocess.run(self._server_argv, env=self._server_env, timeout=30,
-                                   check=False, stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL)
-                    self.notes.append("asked this prefix's Wine server to exit (wineserver -k)")
-                except (OSError, subprocess.TimeoutExpired) as exc:
-                    self.notes.append(f"could not stop this prefix's Wine server: {exc}")
-        finally:
-            self._stop_done.set()
+                    if started and self._group_alive() and self._signal(signal.SIGTERM):
+                        terminated = True
+                        self.cancelled = True
+                        self._wait_group(self.grace_s, guard)
+                finally:
+                    if terminated and self._group_alive() and self._signal(signal.SIGKILL):
+                        self.notes.append(
+                            "stop was forced by a second Ctrl-C: remaining processes were "
+                            "force-killed" if guard.hits else
+                            f"some processes did not stop within {self.grace_s:g} s and "
+                            "were force-killed")
+                        self._wait_group(3)
+                        if self._group_alive():
+                            self.notes.append(
+                                "could not confirm that every process of the run ended")
+                if self.cancelled and started:
+                    self._ask_server_to_exit()
+            finally:
+                if mine:
+                    self._stop_done.set()
         return list(self.notes)
+
+    def _ask_server_to_exit(self) -> None:
+        if not self._server_configured:
+            return  # not the wine runtime
+        if not self._server_argv:
+            self.notes.append("wineserver was not found, so this prefix's Wine server was not "
+                              "asked to exit; anything it still runs may be left over")
+            return
+        try:
+            done = subprocess.run(self._server_argv, env=self._server_env, timeout=30,
+                                  check=False, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL)
+            if done.returncode == 0:
+                self.notes.append("asked this prefix's Wine server to exit (wineserver -k)")
+            else:
+                self.notes.append(f"wineserver -k for this prefix exited with status "
+                                  f"{done.returncode}; its server may still be running")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            self.notes.append(f"could not stop this prefix's Wine server: {exc}")
 
     def finish(self) -> None:
         """Called by the run once the leader has exited (not yet reaped): waits for a stop in
         progress, then closes the run so nothing can be signalled any more."""
+        self.mark_exited()
         with self._lock:
             stopping = self._stopping
         if stopping:
@@ -207,12 +292,17 @@ class RunControl:
 
 def _run_in_group(argv, cwd, env, stdout, control: RunControl):
     """Start argv in its own process group and wait. Ctrl-C stops it gracefully."""
-    if control.cancelled:  # stopped before it started
+    def popen():
+        return subprocess.Popen(argv, cwd=cwd, env=env, stdout=stdout, stderr=subprocess.STDOUT,
+                                start_new_session=True)
+
+    with _SigintGuard() as guard:  # a Ctrl-C between the start and the recording waits
+        proc = control.start(popen)
+    if proc is None:  # stopped before it started
         return subprocess.CompletedProcess(argv, CANCELLED_STATUS)
-    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=stdout, stderr=subprocess.STDOUT,
-                            start_new_session=True)
-    control.attach(proc.pid)
     try:
+        if guard.hits:
+            control.request_stop()
         while True:
             try:  # wait without reaping, so the group id stays ours until finish()
                 os.waitid(os.P_PID, proc.pid, os.WEXITED | os.WNOWAIT)
@@ -221,6 +311,10 @@ def _run_in_group(argv, cwd, env, stdout, control: RunControl):
                 control.request_stop()
             except ChildProcessError:
                 break
+        control.mark_exited()
+    except BaseException:
+        control.request_stop()  # never leave the leader running unmanaged
+        raise
     finally:
         control.finish()
         proc.wait()  # reap
@@ -322,8 +416,9 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
                                stderr=subprocess.STDOUT, check=False)
                 else:
                     if plan.runtime == "wine":
-                        server = Path(wine).with_name("wineserver")
-                        server = str(server) if server.is_file() else shutil.which("wineserver")
+                        # an absolute path only: a bare name would resolve against the cwd
+                        server = Path(wine).with_name("wineserver") if Path(wine).is_absolute() else None
+                        server = str(server) if server and server.is_file() else shutil.which("wineserver")
                         control.configure_server([server, "-k"] if server else None,
                                                  {**child_env, "WINEPREFIX": str(plan.prefix)})
                     proc = _run_in_group(argv, cwd=plan.cwd, env=child_env, stdout=log,

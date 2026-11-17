@@ -1148,7 +1148,7 @@ class StopTests(unittest.TestCase):
 
     def test_a_finished_run_can_no_longer_be_signalled(self):
         control = self.RunControl()
-        control.attach(os_getpid_other())
+        control.start(lambda: mock.Mock(pid=os_getpid_other()))
         control.finish()
         with mock.patch("os.killpg") as killpg:
             self.assertFalse(control._signal(15))
@@ -1193,6 +1193,175 @@ class StopTests(unittest.TestCase):
         self.assertTrue(control.cancelled)
         self.assertIn("cancelled by user", Path(log).read_text())
 
+    def _spy_killpg(self):
+        import os
+
+        real, calls = os.killpg, []
+
+        def spy(pgid, sig):
+            calls.append((pgid, sig))
+            return real(pgid, sig)
+
+        return calls, mock.patch("os.killpg", side_effect=spy)
+
+    def test_a_stop_between_the_check_and_the_start_cannot_be_lost(self):
+        # R1: the stop arrives while the leader is being started. It must wait for the start
+        # and then end the run, never let it run on while being reported as cancelled.
+        import subprocess
+        import threading
+
+        control = self.RunControl(grace_s=5)
+        real_popen = subprocess.Popen
+
+        def slow_popen(*a, **k):
+            threading.Thread(target=control.request_stop).start()
+            self.time.sleep(0.4)  # the stop is now waiting for the lock
+            proc = real_popen(*a, **k)
+            self.stray.append(proc.pid)
+            return proc
+
+        calls, spy = self._spy_killpg()
+        with spy, mock.patch("subprocess.Popen", side_effect=slow_popen):
+            status, _ = self.execute(self.plan_for("normal"), str(Path(self.tmp.name) / "wine"),
+                                       self.env, options=self.RunOptions(control=control))
+        self.assertEqual(status, 130)
+        self.assertTrue(control.cancelled)
+        self.assertIn((self.stray[0], __import__("signal").SIGTERM), calls)
+        self.assertTrue(self.gone(self.stray[0]))
+
+    def test_ctrl_c_between_the_start_and_the_recording_is_not_lost(self):
+        import os
+        import signal
+        import subprocess
+
+        control = self.RunControl(grace_s=5)
+        real_popen = subprocess.Popen
+
+        def popen_then_sigint(*a, **k):
+            proc = real_popen(*a, **k)
+            self.stray.append(proc.pid)
+            os.kill(os.getpid(), signal.SIGINT)  # our own process only
+            return proc
+
+        with mock.patch("subprocess.Popen", side_effect=popen_then_sigint):
+            status, _ = self.execute(self.plan_for("normal"), str(Path(self.tmp.name) / "wine"),
+                                       self.env, options=self.RunOptions(control=control))
+        self.assertEqual(status, 130)
+        self.assertTrue(control.cancelled)
+        self.assertTrue(self.gone(self.stray[0]))
+
+    def test_second_ctrl_c_skips_the_wait_and_forces_the_stop(self):
+        # R3: a long grace period, a program that ignores TERM, two Ctrl-C presses.
+        import os
+        import signal
+        import threading
+
+        control = self.RunControl(grace_s=60)
+
+        def presses():
+            p = self.pids(["leader", "child", "grandchild"])
+            os.kill(os.getpid(), signal.SIGINT)
+            self.time.sleep(1.0)
+            os.kill(os.getpid(), signal.SIGINT)
+            return p
+
+        th = threading.Thread(target=presses)
+        th.start()
+        t0 = self.time.monotonic()
+        status, log = self.execute(self.plan_for("ignore"), str(Path(self.tmp.name) / "wine"),
+                                   self.env, options=self.RunOptions(control=control))
+        th.join(5)
+        self.assertLess(self.time.monotonic() - t0, 30)
+        self.assertEqual(status, 130)
+        self.assertTrue(any("second Ctrl-C" in n for n in control.notes), control.notes)
+        for pid in self.stray:
+            self.assertTrue(self.gone(pid), pid)
+        self.assertIn("force-killed", Path(log).read_text())
+
+    def test_stop_after_the_leader_exited_is_not_a_cancel(self):
+        # R2, in the gap between the leader exiting and the run being closed.
+        control = self.RunControl(grace_s=1)
+        real_mark = control.mark_exited
+
+        def mark_then_stop():
+            real_mark()
+            control.request_stop()
+
+        calls, spy = self._spy_killpg()
+        with spy, mock.patch.object(control, "mark_exited", side_effect=mark_then_stop):
+            status, log = self.execute(self.plan_for("quick"), str(Path(self.tmp.name) / "wine"),
+                                       self.env, options=self.RunOptions(control=control))
+        self.assertEqual(status, 0)
+        self.assertFalse(control.cancelled)
+        self.assertEqual(calls, [])
+        self.assertFalse((Path(self.tmp.name) / "server.txt").exists())  # no wineserver -k
+        self.assertIn("--- exit status 0", Path(log).read_text())
+
+    def test_stop_racing_the_leader_exit_signals_nothing_when_the_group_is_empty(self):
+        import os
+
+        control = self.RunControl(grace_s=1)
+        real = os.waitid
+
+        def waitid_then_stop(*a):
+            res = real(*a)  # the leader has exited (a zombie, not reaped)
+            control.request_stop()
+            return res
+
+        calls, spy = self._spy_killpg()
+        with spy, mock.patch("os.waitid", side_effect=waitid_then_stop):
+            status, _ = self.execute(self.plan_for("quick"), str(Path(self.tmp.name) / "wine"),
+                                       self.env, options=self.RunOptions(control=control))
+        self.assertEqual(status, 0)
+        self.assertFalse(control.cancelled)
+        self.assertEqual(calls, [])
+
+    def test_wineserver_failure_and_absence_are_reported_honestly(self):
+        t = Path(self.tmp.name)
+        (t / "wineserver").write_text("#!/bin/sh\nexit 7\n")
+        control = self.RunControl(grace_s=5)
+        th, _ = self.start("normal", control)
+        self.pids(["leader", "child", "grandchild"])
+        control.request_stop()
+        th.join(20)
+        self.assertTrue(any("exited with status 7" in n for n in control.notes), control.notes)
+        self.assertFalse(any(n.startswith("asked this prefix") for n in control.notes))
+        missing = self.RunControl(grace_s=5)
+        missing.configure_server(None, None)
+        missing.start(lambda: mock.Mock(pid=os_getpid_other()))
+        with mock.patch("os.killpg"), mock.patch.object(missing, "_group_alive", return_value=True):
+            missing.request_stop()
+        self.assertTrue(any("wineserver was not found" in n for n in missing.notes), missing.notes)
+
+    def test_a_bare_wine_name_never_resolves_wineserver_against_the_cwd(self):
+        import os
+
+        t = Path(self.tmp.name)
+        marker = t / "cwd-server-ran.txt"
+        (t / "cwd").mkdir()
+        (t / "cwd" / "wineserver").write_text(f'#!/bin/sh\necho x >> "{marker}"\n')
+        (t / "cwd" / "wineserver").chmod(0o755)
+        control = self.RunControl(grace_s=1)
+        plan = self.plan_for("normal")
+        plan = type(plan)(argv=plan.argv, prefix=plan.prefix, cwd=t / "cwd", runtime="wine",
+                          env_overrides=plan.env_overrides)
+        old = os.getcwd()
+        os.chdir(t / "cwd")
+        self.addCleanup(os.chdir, old)
+        # "wine" is not absolute, so only a PATH lookup may find a wineserver
+        (t / "bin").mkdir()
+        (t / "bin" / "wine").write_text(f'#!/bin/sh\nexec "{self.py}" "$@"\n')
+        (t / "bin" / "wine").chmod(0o755)
+        env = {**self.env, "PATH": f"{t / 'bin'}:/usr/bin:/bin"}
+        with mock.patch("shutil.which", return_value=None):
+            th = __import__("threading").Thread(target=lambda: self.execute(
+                plan, str(t / "bin" / "wine"), env, options=self.RunOptions(control=control)))
+            th.start()
+            self.pids(["leader", "child", "grandchild"])
+            control.request_stop()
+            th.join(20)
+        self.assertFalse(marker.exists())
+
     def test_cancelled_event_in_the_json_log(self):
         import json
 
@@ -1221,7 +1390,7 @@ class StopTests(unittest.TestCase):
             (Path(data) / "gitfurl" / "prefixes" / "p1").mkdir(parents=True)
 
             def fake(plan, wine, create, track, env=None, run=None, options=None):
-                options.control.cancelled = True
+                options.control.request_stop()  # a real stop: nothing was started yet
                 return 130, Path(state) / "x.log", None
 
             with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data, "XDG_STATE_HOME": state}), \
@@ -1296,7 +1465,7 @@ class PreflightTests(unittest.TestCase):
     def test_labels_separate_measured_from_estimate_and_required_space_is_unknown(self):
         text = self._measure(10**12, 2000, 8_000_000).describe()
         self.assertIn("measured: free space", text)
-        self.assertIn("measured: size of the installer's own files", text)
+        self.assertIn("measured: size of the files in the installer's folder", text)
         self.assertIn("space the install needs: unknown", text)
         self.assertIn("estimate:", text)
         self.assertNotIn("advisory", text)  # nothing to warn about

@@ -54,13 +54,17 @@ Limits: it assumes the large files next to the installer are its payload. The es
 ### Checks before a run
 The dry run and the approval step show a read-only preflight. Everything is advisory: it never blocks a run and never changes anything.
 - **Measured:** free space on the disk that will hold the prefix, the total size of the files in the installer's folder (symlinks are not followed; if counting stops early the value is shown as "at least"), memory available, CPU threads.
-- **Estimate:** the installed size. gitfurl cannot know how much space an install needs, so it says "unknown" and does not multiply the installer's size. It warns only when free space is smaller than the installer's own files (an estimate: the install will very likely not fit) and when under 2 GB of memory is available (an estimate). You can still go ahead.
+- **Estimate:** the installed size. gitfurl cannot know how much space an install needs, so it says "unknown" and does not multiply the installer's size. It warns only when free space is smaller than the files in the installer's folder (an estimate: the install may not fit) and when under 2 GB of memory is available (an estimate). You can still go ahead.
 
 ### Stopping a run
 While an installer runs, the **Stop** button (and **Ctrl-C** on the command line) stops it. A confirmation explains what happens, with "No" as the default.
 1. gitfurl sends a polite stop (SIGTERM) to the programs of the run it started, and only those: the installer is started in its own process group and nothing is ever found by name.
 2. It waits 10 seconds, then forces (SIGKILL) whatever is left in that same group.
 3. With Wine (not Proton), it then asks this prefix's own Wine server to exit (`wineserver -k` for that one prefix). That also ends anything you started by hand in the same prefix.
+
+A second **Ctrl-C** while a stop is in progress skips the 10-second wait and force-kills what is left. A run counts as cancelled only if the stop took effect: before the installer started, or by signalling a group that still had a running program. If the installer had already exited when you pressed Stop, it is reported as finished with its own exit status and nothing is signalled. If `wineserver` cannot be found or exits with an error, the notes say so.
+
+Stopping while the prefix is still being created (before the installer starts) does not interrupt that step: it finishes, and then the installer is not started and the run is shown as cancelled.
 
 The run is shown as **cancelled**, not as a success or a failure. On the command line the exit status is 130 and the event log has a `cancelled` event. The log is kept. The original installer is never deleted after a cancelled run.
 

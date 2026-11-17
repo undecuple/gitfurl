@@ -94,6 +94,15 @@ RUNTIME_DOWNLOAD_NOTE = ("\n\nProton runs through umu-run. If its runtime is not
                          "machine, umu-run downloads it on first use (a network download).")
 
 
+def stop_applies(pending: dict, control) -> bool:
+    """True while `control` belongs to the run in progress and has not been stopped yet.
+
+    The Stop dialog is modal and the run can end while it is open, so this is checked again
+    after the answer, before anything on screen is changed.
+    """
+    return control is not None and pending.get("control") is control and not control.cancelled
+
+
 def main(start: str = "library", prefix: str | None = None) -> int:
     try:
         import tkinter as tk
@@ -616,6 +625,7 @@ def main(start: str = "library", prefix: str | None = None) -> int:
         pending["control"], pending["proton"] = control, proton
         options = RunOptions(on_progress=ui_updates.put, progress_interval=3.0,
                              detailed_log=detail_var.get(), control=control)
+        stop_btn.state(["!disabled"])  # a Stop from an earlier run must not leave it disabled
         stop_btn.pack(side="right", padx=10)
         run_in_thread(lambda: run_tracked(plan, tool, create, track,
                                           options=options), results)
@@ -623,7 +633,7 @@ def main(start: str = "library", prefix: str | None = None) -> int:
 
     def stop_clicked():
         control = pending["control"]
-        if control is None or control.cancelled:
+        if not stop_applies(pending, control):
             return
         server = ("" if pending["proton"] else
                   "\n\nThen this prefix's Wine server is asked to exit (wineserver -k). That also "
@@ -637,6 +647,8 @@ def main(start: str = "library", prefix: str | None = None) -> int:
                 "itself out of the run's group, or (for Proton) the runtime's own container, may keep "
                 "running; this is not guaranteed to end everything. The run is reported as "
                 "cancelled and the log is kept.\n\nStop it?", icon="warning", default="no"):
+            return
+        if not stop_applies(pending, control):  # the run ended while the dialog was open
             return
         stop_btn.state(["disabled"])
         status_var.set("Stopping the installer...")

@@ -35,7 +35,7 @@ class Preflight:
         out.append("measured: free space where the prefix will live ("
                    f"{self.free_where}): " + ("unknown" if self.free_bytes is None else gb(self.free_bytes)))
         size = gb(self.folder_bytes)
-        out.append("measured: size of the installer's own files: "
+        out.append("measured: size of the files in the installer's folder: "
                    + (size if self.folder_complete else f"at least {size} (stopped counting early)"))
         out.append("measured: memory available: "
                    + ("unknown" if self.mem_bytes is None else gb(self.mem_bytes))
@@ -47,8 +47,8 @@ class Preflight:
     def warnings(self) -> list[str]:
         out = []
         if self.free_bytes is not None and self.free_bytes < self.folder_bytes:
-            out.append("advisory, estimate: free space is smaller than the installer's own files, "
-                       "so the install will very likely not fit. You can still go ahead.")
+            out.append("advisory, estimate: free space is smaller than the files in the installer's "
+                       "folder, so the install may not fit. You can still go ahead.")
         if self.mem_bytes is not None and self.mem_bytes < LOW_MEMORY_BYTES:
             out.append("advisory, estimate: under 2 GB of memory is available; heavy decompression "
                        "may be slow or fail. You can still go ahead.")
