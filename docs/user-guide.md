@@ -52,6 +52,7 @@ If the prefix does not exist and "Create the prefix if it does not exist" is on 
 - **Detailed log.** Also writes a JSON-lines event log next to the normal log (see "Logs").
 - **Find the installed program.** After the run, gitfurl guesses which new `.exe` is the installed program (largest first, ignoring uninstallers, redistributables, crash handlers and Windows folders) and prints a command you can run yourself. It guesses from names and sizes only. It does not run the program, add it to any launcher, or look anything up online.
 - **Runtime:** `wine` (default) or `proton`. Proton runs through `umu-run` and needs a Proton folder you already have, given with `--proton-path` or the `PROTONPATH` variable. gitfurl never downloads one. `umu-run` itself downloads the Steam Linux Runtime the first time it runs if it is not already on the machine; the confirmation dialog says so. This was tested only as far as starting an installer in a sandbox.
+- **Portable install (no changes outside this prefix).** Off by default. Normal install is the default and runs the installer as today. Portable runs the installer inside bubblewrap (`bwrap`) so that, as far as bwrap isolates it, the only writable places are the dedicated prefix and a temporary home and `/tmp` that vanish afterwards. The network is off, your home folder, the session and system D-Bus sockets are hidden, and Wine's menu and file-association builder is disabled, so entries in desktop menus, file-type handlers and `~/.cache/wine` are reduced, not guaranteed absent. See "Portable install" below. It is disabled when `bwrap` is not found or the runtime is `proton`, and then it says why.
 - **Delete the original installer after a good run:** `none` (default), `installer` (just the file) or `folder` (**everything in the installer's folder**, including other files and sub-folders). See "Cleanup".
 
 ### Progress
@@ -104,6 +105,7 @@ Options for `install`:
 | `--detailed-log` | Also write the JSON event log. |
 | `--wine-debug CHANNELS` | Set `WINEDEBUG` for the run, for more output in the log (for example `err+all`). |
 | `--show-changes` | List what the installer changed afterwards. |
+| `--portable` | Portable install: run the installer in bwrap (see "Portable install"). Off by default. `--dry-run` prints the full bwrap argument list. Needs `bwrap` on PATH and the wine runtime; without them it stops and does not fall back to a normal install. |
 | `--find-exe` | Guess which new program was installed (local only). |
 | `--runtime wine\|proton` | Runtime to use (default `wine`). `--proton-path DIR` or `PROTONPATH` names the Proton folder. |
 | `--cleanup installer\|folder` | Delete the installer (file or folder) after exit status 0. |
@@ -122,6 +124,21 @@ Deleting the original installer is off by default. `folder` mode **deletes every
 - The dialog lists exactly what will be deleted before you approve.
 - Symlinks are removed as links and never followed.
 - It refuses your home folder, general-purpose folders directly under it (`Downloads`, `Desktop`, `Documents`, `Music`, `Pictures`, `Videos`, `Public`, `Templates`, `Games`, `Projects`), the filesystem root, mount points, system folders (`/usr`, `/nix`, `/var` and similar), folders holding gitfurl's own data, and folders with more than 200 entries. Put an installer in its own folder to use `folder` mode; `installer` mode works anywhere that is not a system folder.
+
+## Portable install
+Two modes per run. **Normal install** (default) is the installer's usual behaviour inside the dedicated prefix. **Portable install** wraps the same Wine command in `bwrap`:
+- Writable: the dedicated prefix, a temporary home folder and a temporary `/tmp` (both in memory; they vanish when the run ends).
+- Network off. An installer that needs the network, for example to download its files, will fail.
+- Your home folder is replaced by an empty temporary one, and `HOME` and the XDG folders point into it. The session and system D-Bus sockets are hidden.
+- The installer's folder is mounted read-only, **all of it**, so keep the installer in a folder of its own. The rest of the file system is mounted read-only, so the installer can still read it.
+- Wine's `winemenubuilder.exe` is disabled (`WINEDLLOVERRIDES=winemenubuilder.exe=d`, shown in the plan). Without it Wine does not create menu entries or file associations.
+- The X11 or Wayland socket (and your `XAUTHORITY` file, or `~/.Xauthority`, read-only) is allowed so the installer window can show. A hostile installer can still use that connection. Audio is not provided and GPU access is limited to `/dev/dri`; other devices are not available.
+- If the prefix has to be created first, that step (`wineboot --init`) runs outside bwrap.
+- Stop ends the run through its own process group; bwrap is started with `--die-with-parent` and a private PID namespace. `wineserver -k` is not run, since the sandboxed Wine server lives in a private `/tmp`.
+- If you turn on the changes report, it covers the checked places only and says nothing about places gitfurl did not check.
+- Not supported with the `proton` runtime, as root, or when wine itself is installed under your home folder (hidden inside the sandbox).
+
+This reduces what an installer changes outside its prefix, as far as bwrap isolates it. It is **not a guarantee** and not a security boundary: a Wine prefix and bwrap do not contain a hostile installer, and some other host sockets and files remain reachable. The result is meant to be self-contained in the prefix folder, but this has not been checked against a complete real install.
 
 ## Safer runs
 A Wine prefix is **not** a sandbox. The installer can read and write anything your user can. Variables starting with `WINE` in your shell are not passed on, so the plan shows what is set. For an installer you do not fully trust:
