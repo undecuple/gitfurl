@@ -250,6 +250,28 @@ class WindowPolishTests(unittest.TestCase):
         self.assertEqual(r["settings"], "settings")  # Esc is only specified for the details page
         self.assertEqual(r["details"], "library")
 
+    def test_escape_does_not_leave_the_details_page_while_a_run_is_busy(self):
+        r = run_window('''
+            root.focus_force()
+            ui["show"]("details")
+            settle(root)
+            ui["busy"]["on"] = True            # what start_busy sets for a run
+            ui["stop_btn"].state(["!disabled"])
+            key(root, "<Escape>", root)
+            for _ in range(20):
+                root.update()
+            result["busy_page"] = ui["nav_state"]["page"]
+            result["stop_enabled"] = ui["stop_btn"]._state == "normal"
+            ui["busy"]["on"] = False           # the run ended: Esc works again
+            key(root, "<Escape>", root)
+            pump_until(root, lambda: ui["nav_state"]["page"] == "library")
+            result["after_page"] = ui["nav_state"]["page"]
+            finish(root)
+        ''', start="library")
+        self.assertEqual(r["busy_page"], "details")  # the Stop button stays reachable
+        self.assertTrue(r["stop_enabled"])
+        self.assertEqual(r["after_page"], "library")
+
     def test_space_and_return_activate_and_focus_ring_shows(self):
         r = run_window('''
             root.focus_force()

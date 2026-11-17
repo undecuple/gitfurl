@@ -430,6 +430,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         refresh_footer()
 
     def go_back(_e=None):
+        if busy["on"]:  # during a run the page with the Stop button stays put, like the sidebar
+            return
         if nav_state["page"] == "details":
             show("library")
 
