@@ -1497,6 +1497,8 @@ class PrefixGroupTests(unittest.TestCase):
         "        signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         "    open(out, 'a').write(f'child {os.getpid()}\\n'); time.sleep(120)\n"
         "else:\n"
+        "    if 'ignoreleader' in sys.argv[3:]:\n"
+        "        signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         "    open(out, 'a').write(f'leader {os.getpid()}\\n')\n"
         "    subprocess.Popen([sys.executable, __file__, out, 'child'] + sys.argv[3:])\n"
         "    time.sleep(120)\n"
@@ -1684,6 +1686,46 @@ class PrefixGroupTests(unittest.TestCase):
         self.assertTrue(any("second Ctrl-C" in n for n in cm.exception.notes), cm.exception.notes)
         self.assertTrue((Path(self.tmp.name) / "server.txt").exists())  # the later steps still ran
 
+    def test_a_ctrl_c_held_before_the_start_still_gets_the_normal_grace(self):
+        import signal
+        import subprocess
+
+        from gitfurl.prefixes import run_in_group
+
+        real_popen = subprocess.Popen
+
+        def popen_then_sigint(*a, **k):
+            import time
+
+            proc = real_popen(*a, **k)
+            self.stray.append(proc.pid)
+            out = Path(self.tmp.name) / "pids.txt"
+            end = time.monotonic() + 15
+            while time.monotonic() < end and not (out.exists() and "leader" in out.read_text()):
+                time.sleep(0.02)  # the leader now ignores TERM
+            os.kill(os.getpid(), signal.SIGINT)  # held by the guard: this is the first Ctrl-C
+            return proc
+
+        with mock.patch("subprocess.Popen", side_effect=popen_then_sigint), \
+                self.assertRaises(KeyboardInterrupt) as cm:
+            run_in_group(self.argv + ["ignoreleader"], self.env, 60,
+                         str(Path(self.tmp.name) / "wine"), grace_s=1)
+        self._gone(self.stray)
+        # the leader ignores TERM, so KILL follows; but only after the normal grace period,
+        # and the note must not blame a second Ctrl-C for it
+        self.assertTrue(any("did not stop within 1 s" in n for n in cm.exception.notes),
+                        cm.exception.notes)
+        self.assertFalse(any("second Ctrl-C" in n for n in cm.exception.notes), cm.exception.notes)
+
+    def test_ctrl_c_while_the_prefix_folder_is_made_says_nothing_was_run(self):
+        from gitfurl.prefixes import create_prefix
+
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch("pathlib.Path.mkdir", side_effect=KeyboardInterrupt), \
+                self.assertRaises(KeyboardInterrupt) as cm:
+            create_prefix("p1", "/x/wine", {"XDG_DATA_HOME": d, "HOME": d})
+        self.assertIn("nothing was run", cm.exception.notes[0])
+
     def test_notes_say_when_wineserver_failed_or_was_missing(self):
         import subprocess
 
@@ -1694,8 +1736,9 @@ class PrefixGroupTests(unittest.TestCase):
         with self.assertRaises(subprocess.TimeoutExpired) as cm:
             run_in_group(self.argv, self.env, 0.5, str(t / "wine"), grace_s=1)
         self.assertTrue(any("exited with status 7" in n for n in cm.exception.notes))
-        with self.assertRaises(subprocess.TimeoutExpired) as cm:
-            run_in_group(self.argv, {"PATH": "."}, 0.5, "wine", grace_s=1)  # relative PATH entry
+        with mock.patch("shutil.which", return_value=None), \
+                self.assertRaises(subprocess.TimeoutExpired) as cm:
+            run_in_group(self.argv, self.env, 0.5, "wine", grace_s=1)  # a bare wine name
         self.assertTrue(any("wineserver was not found" in n for n in cm.exception.notes))
 
     def test_wineserver_is_never_taken_from_a_relative_path_entry(self):

@@ -150,6 +150,7 @@ def run_in_group(argv: list[str], env: dict[str, str], timeout: float, wine: str
                 raise KeyboardInterrupt
             return subprocess.CompletedProcess(argv, proc.wait(timeout))
         except BaseException as exc:
+            guard.hits = 0  # a Ctrl-C held before the start is this exception, not a second one
             guard.__enter__()
             exc.notes = _cleanup_group(proc, env, wine, grace_s, guard)
             raise
@@ -170,8 +171,12 @@ def create_prefix(name: str, wine: str, env: dict[str, str] | None = None, run=N
     path: Path = plan["path"]
     if path.exists():
         raise FileExistsError(f"prefix path already exists, not touching it: {path}")
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.mkdir(mode=0o700)
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.mkdir(mode=0o700)
+    except KeyboardInterrupt as exc:
+        exc.notes = ["wineboot had not been started yet; nothing was run"]
+        raise
     child = child_env(os.environ if env is None else env, plan["env_overrides"])
     try:
         if run is None:
