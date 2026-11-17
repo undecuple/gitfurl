@@ -25,6 +25,7 @@ class InstallPlan:
     env_overrides: dict[str, str] = field(default_factory=dict)
     prerequisites: list[str] = field(default_factory=list)
     runtime: str = "wine"
+    portable: bool = False  # run inside bwrap (see gitfurl.portable); off by default
 
     def preview(self) -> str:
         """Readable preview only. The real call would use argv, never a shell string."""
@@ -64,9 +65,14 @@ def runtime_env(runtime: str, proton_path: str | None) -> dict[str, str]:
 
 
 def build_plan(installer: Path, prefix_name: str, env: dict[str, str] | None = None,
-               runtime: str = "wine", proton_path: str | None = None) -> InstallPlan:
+               runtime: str = "wine", proton_path: str | None = None,
+               portable: bool = False) -> InstallPlan:
     prefix = prefix_path(prefix_name, env)
     extra = runtime_env(runtime, proton_path)
+    if portable:
+        from gitfurl.portable import MENU_OVERRIDE
+
+        extra = {**extra, **MENU_OVERRIDE}
     if runtime == "proton":
         needs = [
             "umu-run available on PATH",
@@ -75,6 +81,8 @@ def build_plan(installer: Path, prefix_name: str, env: dict[str, str] | None = N
         ]
     else:
         needs = ["wine available on PATH (run 'gitfurl doctor')"]
+    if portable:
+        needs.append("bwrap (bubblewrap) available on PATH (portable install)")
     return InstallPlan(
         argv=["umu-run" if runtime == "proton" else "wine", str(installer)],
         prefix=prefix,
@@ -82,6 +90,7 @@ def build_plan(installer: Path, prefix_name: str, env: dict[str, str] | None = N
         env_overrides={"WINEPREFIX": str(prefix), **extra},
         prerequisites=[*needs, f"dedicated prefix at {prefix}, created with approval"],
         runtime=runtime,
+        portable=portable,
     )
 
 
@@ -350,6 +359,15 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     log_path = log_dir / f"{plan.prefix.name}-{stamp}.log"
     argv = [wine, *plan.argv[1:]]
+    base_env = os.environ if env is None else env
+    if plan.portable:  # no silent fallback: refuse before anything is created or run
+        from dataclasses import replace
+
+        from gitfurl.portable import build_portable_argv, find_bwrap
+
+        bwrap = find_bwrap(base_env)
+        argv = build_portable_argv(replace(plan, argv=argv), bwrap or "", Path(plan.argv[-1]),
+                                   dict(base_env))
     overrides = dict(plan.env_overrides)
     if options.wine_debug:
         overrides["WINEDEBUG"] = validate_wine_debug(options.wine_debug)
@@ -381,7 +399,7 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
     t0 = time.monotonic()
     # Variable names only, never values: the environment can hold secrets.
     event("start", command=shlex.join(argv), cwd=str(plan.cwd), prefix=str(plan.prefix),
-          env_overrides=sorted(overrides), wine=wine)
+          env_overrides=sorted(overrides), wine=wine, portable=plan.portable)
     fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "w") as log:
@@ -394,7 +412,7 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
                     proc = run(argv, cwd=plan.cwd, env=child_env, stdout=log,
                                stderr=subprocess.STDOUT, check=False)
                 else:
-                    if plan.runtime == "wine":
+                    if plan.runtime == "wine" and not plan.portable:
                         server = wineserver_for(wine)
                         control.configure_server([server, "-k"] if server else None,
                                                  {**child_env, "WINEPREFIX": str(plan.prefix)})
@@ -402,6 +420,9 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
                                          control=control)
             finally:
                 final = monitor.stop() if monitor else None
+            if control.cancelled and plan.portable:
+                control.notes.append("portable run: the sandbox ended with the run's process "
+                                     "group; wineserver -k was not run")
             if control.cancelled:
                 log.write(f"\n--- cancelled by user (process exit status {proc.returncode})\n")
                 for note in control.notes:
@@ -429,6 +450,11 @@ def run_with_prefix(plan: InstallPlan, wine: str, create_if_missing: bool,
     """
     from gitfurl.prefixes import create_prefix
 
+    if plan.portable:  # refuse before a prefix is created for a run that cannot happen
+        from gitfurl.portable import check_portable_supported, find_bwrap
+
+        base = os.environ if env is None else env
+        check_portable_supported(plan, find_bwrap(base), dict(base), Path(plan.argv[-1]))
     if not plan.prefix.is_dir():
         if not create_if_missing:
             raise FileNotFoundError(
