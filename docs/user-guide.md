@@ -1,6 +1,6 @@
 # gitfurl user guide
 
-gitfurl helps you run a Windows installer you already have on Linux, through Wine, in a separate Wine environment ("prefix") that it creates for that purpose. It is experimental. This guide says what works, what has been tested, and what to do when something goes wrong.
+gitfurl helps you run a Windows installer you already have on Linux, through Wine, in a separate Wine environment ("prefix") that it creates for that purpose. Compatibility with any given installer is unverified. This guide says what works, what has been tested, and what to do when something goes wrong.
 
 ## What gitfurl does and does not do
 - It runs an installer file that **you chose**, from your own disk.

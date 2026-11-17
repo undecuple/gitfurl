@@ -182,7 +182,7 @@ def main(start: str = "library", prefix: str | None = None) -> int:
     side.pack(side="left", fill="y")
     side.pack_propagate(False)
     w.Wordmark(side, cell=5, outer=SIDE).pack(anchor="w", padx=18, pady=(20, 2))
-    label(side, f"v{__version__}  experimental", 9, False, w.MUTED, SIDE).pack(anchor="w", padx=20)
+    label(side, f"v{__version__}  first release", 9, False, w.MUTED, SIDE).pack(anchor="w", padx=20)
     nav = tk.Frame(side, bg=SIDE)
     nav.pack(fill="x", pady=(22, 0), padx=10)
 

@@ -1,7 +1,7 @@
 # Roadmap
 
 ## Scope
-Gitfurl runs a Windows installer you already have, in a dedicated Wine prefix, with settings you can inspect, and keeps local logs. It is for Linux users, and it is experimental.
+Gitfurl runs a Windows installer you already have, in a dedicated Wine prefix, with settings you can inspect, and keeps local logs. It is for Linux users. Compatibility with any given installer is unverified.
 
 It does not search for, download or bundle installers or games, and it does not remove DRM, bypass activation or apply cracks. It does not claim that any use is lawful.
 

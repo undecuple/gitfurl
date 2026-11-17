@@ -34,7 +34,7 @@ DEFAULT_PREFIX = "default"
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="gitfurl cli",
-        description="Experimental helper for running user-supplied Windows installers "
+        description="Helper for running user-supplied Windows installers "
         "through Wine. Wine prefixes are not security sandboxes.",
     )
     p.add_argument("--version", action="version", version=f"gitfurl {__version__}")

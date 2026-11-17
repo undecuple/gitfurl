@@ -15,7 +15,7 @@ To report a vulnerability, open a private security advisory on the repository. P
 **Cleanup.** The option to delete the original installer is off by default and needs an installer exit status of 0. An exit status of 0 does not prove the install was complete, so keep the files until you have checked the result.
 
 ## Status and threat model
-Gitfurl is experimental and has not been audited. Only the latest commit is supported.
+Gitfurl 1.0.0 is a first release. Compatibility is unverified and the code has not been audited. Only the latest commit is supported.
 
 What it tries to prevent: a run or a deletion you did not approve, a run in your main Wine prefix, silent network use by gitfurl itself, and a log or report that leaks your environment.
 

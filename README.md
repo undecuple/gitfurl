@@ -16,9 +16,11 @@
 
 gitfurl is a graphical app (with an optional command line) for running a Windows installer on Linux through Wine. **You supply the installer.** Gitfurl does not find, download or include any.
 
-> **Status: experimental, version 1.0.0 (the first release, not yet published), as of 2026-11-16.** The app, the command line and the tests exist. Installers have been *started* in a sandbox; a complete install has not been tested. Not audited. Details under [Status](#status).
+> **Status: version 1.0.0 is the first release and is not yet published, as of 2026-11-16.** 1.0.0 means the app, the command line and the safety checks are complete for the scope below. It does **not** mean any particular installer works: compatibility is unverified. Installers have been *started* in a sandbox, but a complete install has not been tested, and the code has not been audited. Details under [Status](#status).
 
 ![The Library page: a list of Wine prefixes](docs/screenshot.png)
+
+*The Library page with demo prefixes (empty folders). No installer was run to make this picture.*
 
 *The Library page. Work in progress.*
 
