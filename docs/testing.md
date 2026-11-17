@@ -89,7 +89,7 @@ Each failed test unit was then cleared with `systemctl --user reset-failed <that
 
 ## The single-file build (release workflow)
 `release.yml` builds one Linux program with PyInstaller. Checked on 2026-11-16 by running the workflow by hand (it builds and uploads only):
-- The checksum file matches. `cli --version` prints the release version (1.0.0 for that build) and `cli doctor` runs. The 1.1.0 and 1.2.0 builds have not been checked this way yet.
+- The checksum file matches. `cli --version` prints the release version (1.0.0 for that build) and `cli doctor` runs. The 1.1.0, 1.2.0 and 1.2.1 builds have not been checked this way yet.
 - The window opens (stays open 6 s under a virtual display) in CI and in a Debian image that has Tk and fonts.
 - On a bare Debian with no fonts it loads its bundled Tk but cannot create a window; the app now prints that reason.
 - On NixOS it stops with `libxcb.so.1: cannot open shared object file`, because the build expects the system's standard X11 libraries.

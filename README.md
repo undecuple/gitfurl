@@ -21,7 +21,7 @@
 
 gitfurl is a graphical app (with an optional command line) for running a Windows installer on Linux through Wine. **You supply the installer.** Gitfurl does not find, download or include any.
 
-> **Status: version 1.2.0, released on 2026-11-17 (the first release, 1.0.0, was on 2026-11-16).** It means the app, the command line and the safety checks are complete for the scope below. It does **not** mean any particular installer works: compatibility is unverified. Installers have been *started* in a sandbox, but a complete install has not been tested, and the code has not been audited. Details under [Status](#status).
+> **Status: version 1.2.1, released on 2026-11-17 (the first release, 1.0.0, was on 2026-11-16).** It means the app, the command line and the safety checks are complete for the scope below. It does **not** mean any particular installer works: compatibility is unverified. Installers have been *started* in a sandbox, but a complete install has not been tested, and the code has not been audited. Details under [Status](#status).
 
 ![The Library page: a list of Wine prefixes](docs/screenshot.png)
 
@@ -46,7 +46,7 @@ Running a Windows installer under Wine by hand works, until it does not. These a
 - Wine prefixes are not sandboxes. Gitfurl makes the run visible and tidy; it does not make an untrusted installer safe.
 
 ## Screenshots
-These were made with gitfurl 1.2.0 under a virtual display, in a demo home folder (`/home/demo`) with empty example prefixes. No real installer and no real Wine were run: a small stand-in script took Wine's place.
+These were made with gitfurl 1.2.1 under a virtual display, in a demo home folder (`/home/demo`) with empty example prefixes. No real installer and no real Wine were run: a small stand-in script took Wine's place.
 
 ![A prefix's page with an installer chosen: the checklist, the installer field and the options, with the memory limit on](docs/screenshot-plan.png)
 
@@ -99,7 +99,7 @@ As of 2026-11-16, on Linux x86_64, Wine 11.0, tested headless (no GPU, a virtual
 - Gitfurl refuses to create prefixes or run installers as root.
 - The memory limit is on by default. Without a user systemd manager, or without the memory controller delegated to it, runs are refused until you turn the limit off (`--no-memory-limit`, or the option in the window). Swap is not limited.
 - Proton needs a Proton folder you already have, and umu-run downloads its own runtime on first use if it is missing.
-- The single-file Linux build in the 1.0.0 release starts and runs `cli` here, and its window opens in a Debian image with Tk and fonts. The 1.1.0 and 1.2.0 builds are made by the same workflow and have not been checked separately. It is **not proven on every desktop**: it expects the system's standard X11 libraries and at least one font. On NixOS it stops with `libxcb.so.1: cannot open shared object file` unless the libraries are provided (for example with nix-ld) or you run from source with `nix develop`. See the [roadmap](ROADMAP.md).
+- The single-file Linux build in the 1.0.0 release starts and runs `cli` here, and its window opens in a Debian image with Tk and fonts. The 1.1.0, 1.2.0 and 1.2.1 builds are made by the same workflow and have not been checked separately. It is **not proven on every desktop**: it expects the system's standard X11 libraries and at least one font. On NixOS it stops with `libxcb.so.1: cannot open shared object file` unless the libraries are provided (for example with nix-ld) or you run from source with `nix develop`. See the [roadmap](ROADMAP.md).
 
 ## What goes online
 Nothing, from gitfurl itself. (Inherited `WINE*` variables from your shell are not passed to the installer, so the plan shows everything that is set.) It makes no network requests, sends no telemetry and uploads nothing. Two things you start yourself can use the network: umu-run downloading its runtime on first use, and anything the installer does. The [sandbox wrapper](docs/development.md#running-an-installer-in-a-sandbox) turns the network off for the installer.
