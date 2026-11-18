@@ -4,6 +4,12 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Added
+- **Unattended install for Inno Setup installers** (`gitfurl cli install --unattended`, and the window option "Install without the installer's windows (Inno Setup only)"), off by default. When the read-only check finds an Inno Setup ID, gitfurl starts the installer with Inno Setup's documented switches (`/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=C:\Games\PREFIX /LOG=...`): no wizard and no installer windows, every choice at the script's default. The installer still unpacks its own files under Wine. Afterwards gitfurl reads the log Inno Setup wrote in the prefix and reports the exit status's meaning, whether the log says the installation succeeded, how many files it lists, error lines, and whether the install folder exists. Refused, with nothing run, for installers without an Inno Setup ID. Tested with mocks and with one Inno Setup 7.1.1 installer built for the test, under Wine in the sandbox; not with third-party installers.
+
+### Documentation
+- Memory limit: the first run with Wine and an installer (the test installer above, in the sandbox inside a scope with the limits). Over the hard limit with swap available, the run was slowed down and moved to swap, not stopped, and the install finished.
+
 ## [1.2.1] - 2026-11-17
 A fix to the memory limit's end text and wording. Checked against systemd 262 with test programs and a stand-in for Wine; still never run with Wine, Proton or a real installer.
 

@@ -65,6 +65,11 @@ def build_parser() -> argparse.ArgumentParser:
                       help="run the installer inside bwrap with only the prefix writable, no "
                            "network and no menu entries (reduces changes outside the prefix; "
                            "not a guarantee); default: off")
+    inst.add_argument("--unattended", action="store_true",
+                      help="Inno Setup installers only: run without the installer's wizard and "
+                           "windows (Inno's /VERYSILENT switches), install to C:\\Games\\PREFIX "
+                           "in the prefix, and read Inno's log afterwards. The installer still "
+                           "does the unpacking. Default: off")
     inst.add_argument("--no-memory-limit", action="store_true",
                       help="run without the memory limit. By default the run is put in a "
                            "systemd user scope with a soft and a hard memory limit, which reduces "
@@ -122,7 +127,9 @@ def main(argv: list[str] | None = None) -> int:
         scan_plan = _scan_plan(args, installer)
         plan = build_plan(installer, args.prefix or DEFAULT_PREFIX, runtime=args.runtime,
                           proton_path=args.proton_path, portable=args.portable, scan=scan_plan,
-                          memory_limit=not args.no_memory_limit)
+                          memory_limit=not args.no_memory_limit,
+                          unattended=_unattended_plan(args, args.prefix or DEFAULT_PREFIX,
+                                                      installer))
         portable_lines = _portable_lines(plan, installer, shutil.which("wine") or "wine",
                                          full=True) if args.portable else []
     except ValueError as exc:
@@ -139,6 +146,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  - {item}")
     for line in portable_lines:
         print(line)
+    for line in _unattended_lines(plan):
+        print(line)
     if scan_plan is not None:
         from gitfurl.scan import describe_scan_plan
 
@@ -154,6 +163,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {line}")
     print("Running an installer can expose files the current user can access.")
     return 0
+
+
+def _unattended_plan(args, prefix_name, installer):
+    """The unattended plan when --unattended is given, else None. Reads the installer's
+    headers only. Raises ValueError (UnattendedRefused) when it is not Inno Setup."""
+    if not args.unattended:
+        return None
+    from gitfurl.unattended import plan_unattended
+
+    return plan_unattended(prefix_name, detect(installer))
+
+
+def _unattended_lines(plan) -> list[str]:
+    return plan.unattended.describe(plan.prefix) if plan.unattended is not None else []
 
 
 def _scan_plan(args, installer):
@@ -263,7 +286,8 @@ def _real_install(args) -> int:
         scan_plan = _scan_plan(args, installer)
         plan = build_plan(installer, args.prefix, runtime=args.runtime,
                           proton_path=args.proton_path, portable=args.portable, scan=scan_plan,
-                          memory_limit=not args.no_memory_limit)
+                          memory_limit=not args.no_memory_limit,
+                          unattended=_unattended_plan(args, args.prefix, installer))
         if args.portable and args.runtime != "wine":
             raise ValueError("portable install is only supported with the wine runtime")
     except ValueError as exc:
@@ -315,6 +339,8 @@ def _real_install(args) -> int:
             print(line)
     else:
         print("Wine prefixes are not sandboxes: the installer can reach files you can reach.")
+    for line in _unattended_lines(plan):
+        print(line)
     for line in memory_lines:
         print(line)
     print("Only run installers you are authorised to use and have chosen to trust.")

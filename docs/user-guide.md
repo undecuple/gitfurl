@@ -49,6 +49,7 @@ If the prefix does not exist and "Create the prefix if it does not exist" is on 
 ### Options (all off unless stated)
 - **Create the prefix if it does not exist** (on by default).
 - **Limit memory (reduces the chance of running out)** (on by default). See "Memory limit" below. If it cannot be used on this machine, the checklist says why and Run stays off until you turn the option off.
+- **Install without the installer's windows (Inno Setup only).** Off by default. See "Unattended install" below.
 - **Show what the installer changed on my system.** After the run, a window lists new, changed and removed files in the prefix, new registry keys, and changes in a few places outside the prefix (menu entries, autostart, `~/.local/bin`, `~/Desktop`, the top level of your home folder). It lists names only, never contents. It is best effort: it cannot see changes elsewhere on your disk.
 - **Detailed log.** Also writes a JSON-lines event log next to the normal log (see "Logs").
 - **Find the installed program.** After the run, gitfurl guesses which new `.exe` is the installed program (largest first, ignoring uninstallers, redistributables, crash handlers and Windows folders) and prints a command you can run yourself. It guesses from names and sizes only. It does not run the program, add it to any launcher, or look anything up online.
@@ -109,6 +110,7 @@ Options for `install`:
 | `--wine-debug CHANNELS` | Set `WINEDEBUG` for the run, for more output in the log (for example `err+all`). |
 | `--show-changes` | List what the installer changed afterwards. |
 | `--portable` | Portable install: run the installer in bwrap (see "Portable install"). Off by default. `--dry-run` prints the full bwrap argument list. Needs `bwrap` on PATH and the wine runtime; without them it stops and does not fall back to a normal install. |
+| `--unattended` | Inno Setup installers only: run without the installer's wizard and windows (see "Unattended install"). Off by default. Refused, with nothing run, when no Inno Setup ID is found. |
 | `--no-memory-limit` | Run without the memory limit (see "Memory limit"). The limit is on by default; if it cannot be used, a run stops with status 2 and the reason, and nothing is run, until you add this option. |
 | `--find-exe` | Guess which new program was installed (local only). |
 | `--scan` | Scan the installer and the files beside it with the `clamscan` on PATH before anything runs (see "ClamAV scan"). Off by default. A match or a scan error stops the run; a scan error can not be overridden. `--dry-run` prints the scan command. |
@@ -160,12 +162,25 @@ Optional and off by default (`--scan`, or "Scan the installer with ClamAV first"
 - **What a clean result means.** "No known signature matched (ClamAV, database dated ...)". It does **not** mean the installer is safe or free of malware: it only means that none of the signatures in your database matched. The result is written to the run's log.
 - **Big files.** `clamscan` scans at most 100 MB of each file by default (its `--max-filesize`, maximum 2 GB), and its manual does not say what it reports for a larger file. gitfurl does not change that limit. Instead the plan and the result name every file larger than 100 MB, and a clean result then reads "no known signature matched in the parts ClamAV scanned". The data files beside a game installer are often far larger, so for those the scan says little. `clamscan` has other default limits as well, which gitfurl also leaves unchanged and does not report: for example `--max-scansize` (the most data scanned per file, including what is unpacked from it; 400 MB by default) and limits on how deep and how many files it unpacks inside archives (`--max-recursion`, `--max-files`). gitfurl only names files larger than 100 MB; a file below that can still have been scanned only in part.
 
+## Unattended install (Inno Setup)
+Off by default (`--unattended`, or the window option "Install without the installer's windows (Inno Setup only)"). It is offered only when the read-only check found an Inno Setup ID in the installer ("likely"); for any other installer it is refused and nothing runs.
+
+gitfurl then starts the installer with Inno Setup's own documented switches instead of showing its wizard:
+
+    wine setup.exe /SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=C:\Games\PREFIX /LOG=C:\gitfurl-setup-TIME.log
+
+- No wizard and no installer windows. Every choice the wizard would ask (components, tasks, the language) takes the setup script's default; message boxes take their default answer.
+- The files go to `C:\Games\PREFIX`, that is `drive_c/Games/PREFIX` inside the prefix.
+- The installer still does all the work: its own code unpacks its own files, in the prefix, under Wine. gitfurl does not open or extract anything. Progress, Stop, the memory limit and portable install work as for any run.
+- After the run gitfurl reads the log Inno Setup wrote (`drive_c/gitfurl-setup-TIME.log`, only its last 4 MiB). The end text gives the meaning of Inno Setup's exit status, whether the log says "Installation process succeeded", how many files it lists, up to five error lines from it, and whether the install folder exists. The log stays in the prefix.
+- **Limits:** a setup script can show its own windows, ask its own questions, or ignore these switches; that is only known when it runs. A script that needs an answer other than its default cannot be steered. Tested with one Inno Setup 7.1.1 installer built for the test (see `docs/testing.md`), not with third-party installers.
+
 ## Memory limit
 On by default, for the wine and proton runtimes and for a portable install. It reduces the chance that the system runs out of memory; it does not guarantee that the installer succeeds. Above the soft limit the installer is slowed down; at the hard limit the kernel stops a process of this run and systemd then ends the whole run (`OOMPolicy=stop`). Swap is not limited, and programs already running outside the scope are not limited.
 
 **Visible change:** if this machine has no user systemd manager, or the memory controller is not delegated to it, gitfurl refuses to run until you turn the limit off (`--no-memory-limit`, or the option in the window). It never runs without the limit silently.
 
-**Not tested:** Wine, Proton and installers were never run under the limit. It was checked with stand-ins and test programs in a real scope only (see `docs/testing.md`).
+**Tested so far:** stand-ins and test programs in a real scope, and Wine with one installer built for the test, run in the sandbox inside a scope with these limits (see `docs/testing.md`). That run showed what "swap is not limited" means in practice: with the installer holding 1,500 MiB under a 1 GiB hard limit, the run was slowed down (about 9,000 times at the soft limit), its memory stayed at the limit, 1.66 GB went to swap, and the install finished. It was not stopped. Not tested: Proton under the limit, gitfurl's own scope wrapping a Wine run (the sandbox hides the user systemd manager, so the scope was started from outside it), and an out-of-memory stop of a Wine run.
 
 How it works: the run's command (`wine`, `umu-run` or `bwrap`) is started through your own systemd user manager, in a scope unit of its own, with no root:
 

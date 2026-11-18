@@ -32,6 +32,14 @@ class InstallPlan:
     # Run inside a memory-limited systemd user scope (see gitfurl.memlimit). Off in this
     # library default; the CLI and the window turn it on unless the user turns it off.
     memory_limit: bool = False
+    # A gitfurl.unattended.UnattendedPlan: run an Inno Setup installer without its wizard
+    # (its switches are already in argv). Off by default.
+    unattended: object = None
+
+    @property
+    def installer(self) -> Path:
+        """The installer file: argv[1] for both runtimes (switches, if any, follow it)."""
+        return Path(self.argv[1])
 
     def preview(self) -> str:
         """Readable preview only. The real call would use argv, never a shell string."""
@@ -73,7 +81,7 @@ def runtime_env(runtime: str, proton_path: str | None) -> dict[str, str]:
 def build_plan(installer: Path, prefix_name: str, env: dict[str, str] | None = None,
                runtime: str = "wine", proton_path: str | None = None,
                portable: bool = False, scan=None,
-               memory_limit: bool = False) -> InstallPlan:
+               memory_limit: bool = False, unattended=None) -> InstallPlan:
     prefix = prefix_path(prefix_name, env)
     extra = runtime_env(runtime, proton_path)
     if portable:
@@ -97,7 +105,8 @@ def build_plan(installer: Path, prefix_name: str, env: dict[str, str] | None = N
         needs.append("systemd-run and a user systemd manager with the memory controller "
                      "(memory limit; turn it off with --no-memory-limit)")
     return InstallPlan(
-        argv=["umu-run" if runtime == "proton" else "wine", str(installer)],
+        argv=["umu-run" if runtime == "proton" else "wine", str(installer),
+              *(unattended.args() if unattended is not None else [])],
         prefix=prefix,
         cwd=installer.parent,
         env_overrides={"WINEPREFIX": str(prefix), **extra},
@@ -106,6 +115,7 @@ def build_plan(installer: Path, prefix_name: str, env: dict[str, str] | None = N
         portable=portable,
         scan=scan,
         memory_limit=memory_limit,
+        unattended=unattended,
     )
 
 
@@ -390,6 +400,7 @@ class ExecResult:
     observation_measured: bool = False
     exit_status: int | None = None
     memory: object = None  # gitfurl.memlimit.MemoryReport when the memory limit was on
+    unattended: object = None  # gitfurl.unattended.UnattendedReport for an unattended run
 
     def as_tuple(self):
         return (self.status, self.log_path)
@@ -429,6 +440,8 @@ def describe_result(result) -> str | None:
         seen = "no (not seen; a short burst between samples would be missed)"
     text = (f"Started: yes.\nObserved activity (heuristic): {seen}.\n"
             f"Exit status: {result.exit_status}.")
+    if result.unattended is not None:
+        text += "\n" + "\n".join(result.unattended.lines())
     if result.memory is not None:
         text += "\n" + "\n".join(result.memory.lines())
     return text
@@ -465,7 +478,7 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
         bwrap = find_bwrap(base_env)
         # The sandbox starts from an empty environment; only the allowlist and these
         # overrides are set inside it (see gitfurl.portable.build_portable_argv).
-        argv = build_portable_argv(replace(plan, argv=argv), bwrap or "", Path(plan.argv[-1]),
+        argv = build_portable_argv(replace(plan, argv=argv), bwrap or "", plan.installer,
                                    dict(base_env), overrides)
     scope = None
     if plan.memory_limit:  # no silent fallback: refuse before anything is created or run
@@ -514,12 +527,13 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
                 options.on_progress(sample)
 
         observer = ActivityObserver()
-        monitor = ProgressMonitor(plan.argv and Path(plan.argv[-1]), plan.prefix, handle,
+        monitor = ProgressMonitor(plan.installer, plan.prefix, handle,
                                   options.progress_interval, options.proc_root)
     t0 = time.monotonic()
     # Variable names only, never values: the environment can hold secrets.
     event("start", command=shlex.join(argv), cwd=str(plan.cwd), prefix=str(plan.prefix),
-          env_overrides=sorted(overrides), wine=wine, portable=plan.portable)
+          env_overrides=sorted(overrides), wine=wine, portable=plan.portable,
+          unattended=plan.unattended is not None)
     if scope is not None:
         b = scope.budget
         event("memory_limit", unit=scope.unit, memory_high=b.high_bytes, memory_max=b.max_bytes,
@@ -532,6 +546,7 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
         scope.on_change = memory_changed
         scope.on_note = options.on_note
     memory_report = None
+    unattended_report = None
     fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "w") as log:
@@ -579,11 +594,21 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
                     log.write(f"--- {note}\n")
             else:
                 log.write(f"\n--- exit status {proc.returncode}\n")
+            if plan.unattended is not None and started:
+                from gitfurl.unattended import read_report
+
+                unattended_report = read_report(plan.unattended, plan.prefix,
+                                                None if control.cancelled else proc.returncode)
+                for line in unattended_report.lines():
+                    log.write(f"--- {line}\n")
             if memory_report is not None:
                 for line in memory_report.lines():
                     log.write(f"--- {line}\n")
         if final is not None:
             event("progress_final", line=final.line())
+        if unattended_report is not None:
+            event("unattended_result", log_found=unattended_report.log_found,
+                  succeeded=unattended_report.succeeded, files=unattended_report.files)
         if memory_report is not None:
             event("memory_limit_result", unit=scope.unit, oom_kill=memory_report.oom_kill,
                   oom_result=memory_report.oom_result, high_events=memory_report.high,
@@ -602,7 +627,7 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
         if events:
             events.close()
     return ExecResult(CANCELLED_STATUS if control.cancelled else proc.returncode, log_path,
-                      memory=memory_report, **facts)
+                      memory=memory_report, unattended=unattended_report, **facts)
 
 
 def run_with_prefix(plan: InstallPlan, wine: str, create_if_missing: bool,
@@ -618,7 +643,7 @@ def run_with_prefix(plan: InstallPlan, wine: str, create_if_missing: bool,
         from gitfurl.portable import check_portable_supported, find_bwrap
 
         base = os.environ if env is None else env
-        check_portable_supported(plan, find_bwrap(base), dict(base), Path(plan.argv[-1]))
+        check_portable_supported(plan, find_bwrap(base), dict(base), plan.installer)
     opts = options or RunOptions()
     if plan.memory_limit:  # refuse before a prefix is created for a run that cannot happen
         from gitfurl.memlimit import prepare

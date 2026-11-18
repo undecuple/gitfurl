@@ -199,7 +199,8 @@ def decide(det: Detection) -> Verdict:
     reasons = ["Wine/Proton is the default route"]
     if det.evidence:
         reasons.append("native extraction is not available in this version, so a detection "
-                       "changes nothing about the run")
+                       "changes nothing about the run unless you choose the unattended option "
+                       "(Inno Setup only)")
     return Verdict(ROUTE_WINE, reasons)
 
 
