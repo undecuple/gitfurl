@@ -8,6 +8,34 @@ gitfurl helps you run a Windows installer you already have on Linux, through Win
 - It makes no network requests of its own, sends no telemetry and uploads nothing.
 - You must be authorised to use the software you run. gitfurl makes no claim that any use is lawful.
 
+## What it is for
+
+Running a Windows installer under Wine by hand works, until it does not. These are the problems gitfurl is for:
+
+- **You do not want it to use your main Wine prefix.** Run `wine setup.exe` with no setup and it uses `~/.wine`. Gitfurl makes a separate prefix for each thing you install and never uses `~/.wine` as the prefix. (Wine and the installer can still write elsewhere, for example `~/.cache/wine` and menu entries; the optional changes report shows some of that.)
+- **You want to see what will happen before it happens.** Gitfurl shows the exact command, prefix, folder and environment variable first, and nothing runs until you approve.
+- **Big installers look frozen.** Some installers sit for a long time with a bar that does not move. Gitfurl watches how far the installer has read into the large files beside it and shows a percentage, a rate and a rough time left, without relying on the installer's own display.
+- **You want to know what it changed.** An optional report lists new files and registry keys in the prefix, and changes in a few places outside it (menu entries, autostart, your home folder's top level).
+- **You want a log you can read.** Each run gets a log. An optional JSON event log and Wine debug output are there when you need more.
+- **You want to tidy up afterwards.** An optional, guarded step deletes the original installer after a run that exits cleanly. It is off by default.
+- **You want to try Proton instead of Wine.** One setting switches the runtime, through umu-run, with a Proton folder you already have.
+- **You want a stricter box.** The repository includes a bubblewrap wrapper that runs an installer with no network and an empty home folder. It is a manual script, tested on NixOS only, and it opens no window.
+
+## Screenshots
+These were made with gitfurl 1.3.0 under a virtual display, in a demo home folder (`/home/demo`) with empty example prefixes. No real installer and no real Wine were run: a small stand-in script took Wine's place.
+
+![A prefix's page with an installer chosen: the checklist, the installer field and the options, with the memory limit on](screenshot-plan.png)
+
+*Before a run: the checklist, the chosen installer and the options. Nothing runs until you approve the plan.*
+
+![A run in progress: the progress bar at 58 percent, with payload read, rate, estimate, data written and the process count](screenshot-run.png)
+
+*During a run. The numbers are real readings from `/proc`, but of the stand-in, which slowly read 0.21 GB of example files (sparse files of zeros) and wrote the same amount into the prefix. That is why the process shown is `python3.14`.*
+
+![The Settings page: Wine, bubblewrap, umu-run and platform, and the About card](screenshot-settings.png)
+
+*Settings, made on the maintainer's machine: the bubblewrap version and the platform line are real, the Wine version is the stand-in's.*
+
 ## Before you start
 You need:
 - Linux with Python 3.11 or newer.
