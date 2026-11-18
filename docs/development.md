@@ -11,6 +11,16 @@ Tests use temporary directories and mocked subprocess calls. They need no Wine, 
 
 CI also fails if a tracked file is an installer, archive or key, or is over 1 MiB. A pre-commit hook in `.githooks/` blocks installers, archives, keys and files over 1 MiB. Enable it with `git config core.hooksPath .githooks`.
 
+## Repository layout
+```
+src/gitfurl/   the app, command line and core
+tests/         mock-based tests (no Wine, no network, no installers)
+docs/          user guide, scope, architecture, development
+tools/         sandbox wrapper and the asset generator
+assets/        banner, icon, favicon, social preview
+.github/       CI and issue forms
+```
+
 ## Running an installer in a sandbox
 This wrapper is a manual script, **tested on NixOS only**: it binds `/nix` and `/run/current-system` and exits on other systems. It is not part of the app. It sets no `DISPLAY`, so a graphical installer opens no window unless you start Xvfb inside it. With `SANDBOX_ETC=1` it also exposes `/etc/passwd`, `/etc/group`, `/etc/hosts`, `/etc/machine-id`, `/etc/zoneinfo` and `/sys` read-only, which weakens the "empty home" idea.
 

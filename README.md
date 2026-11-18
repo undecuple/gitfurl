@@ -15,139 +15,61 @@
   <img src="https://img.shields.io/badge/runtime-Wine%20%7C%20Proton-FF6400?labelColor=0C1021&style=flat-square" alt="Runtime: Wine, optional Proton">
 </p>
 
-<p align="center"><a href="#getting-started">Getting started</a> · <a href="#why-would-i-want-this">Why would I want this?</a> · <a href="#status">Status</a> · <a href="#known-issues">Known issues</a> · <a href="#ai-use">AI use</a> · <a href="docs/user-guide.md">User guide</a> · <a href="#building">Building</a> · <a href="#community">Community</a> · <a href="https://github.com/undecuple/gitfurl/issues/new/choose">Report a bug</a></p>
+<p align="center"><a href="#getting-started">Getting started</a> · <a href="docs/user-guide.md">User guide</a> · <a href="docs/status.md">Status and known issues</a> · <a href="#ai-use">AI use</a> · <a href="#community">Community</a> · <a href="https://github.com/undecuple/gitfurl/issues/new/choose">Report a bug</a></p>
 
 ---
 
 gitfurl is a graphical app (with an optional command line) for running a Windows installer on Linux through Wine. **You supply the installer.** Gitfurl does not find, download or include any.
 
-> **Status: version 1.3.0, released on 2026-11-18 (the first release, 1.0.0, was on 2026-11-16).** It means the app, the command line and the safety checks are complete for the scope below. It does **not** mean any particular installer works: compatibility is unverified. Installers have been *started* in a sandbox; a complete install has been tested only with an installer built for the test. The code has not been audited. Details under [Status](#status).
+<p align="center">
+  <img src="docs/project-facts.svg" alt="Project Facts: what gitfurl does, its limits and how to use it" width="420">
+</p>
+
+> **Version 1.3.0, released 2026-11-18.** The app, the command line and the safety checks are complete for the scope in [docs/scope.md](docs/scope.md). That does **not** mean any particular installer works: compatibility is unverified, a complete install has been tested only with an installer built for the test, and the code has not been audited. Details: [docs/status.md](docs/status.md).
 
 ![The Library page: a list of Wine prefixes](docs/screenshot.png)
 
-*The Library page with demo prefixes (empty folders). No installer was run to make this picture.*
-
-## Why would I want this?
-
-Running a Windows installer under Wine by hand works, until it does not. These are the problems gitfurl is for:
-
-- **You do not want it to use your main Wine prefix.** Run `wine setup.exe` with no setup and it uses `~/.wine`. Gitfurl makes a separate prefix for each thing you install and never uses `~/.wine` as the prefix. (Wine and the installer can still write elsewhere, for example `~/.cache/wine` and menu entries; the optional changes report shows some of that.)
-- **You want to see what will happen before it happens.** Gitfurl shows the exact command, prefix, folder and environment variable first, and nothing runs until you approve.
-- **Big installers look frozen.** Some installers sit for a long time with a bar that does not move. Gitfurl watches how far the installer has read into the large files beside it and shows a percentage, a rate and a rough time left, without relying on the installer's own display.
-- **You want to know what it changed.** An optional report lists new files and registry keys in the prefix, and changes in a few places outside it (menu entries, autostart, your home folder's top level).
-- **You want a log you can read.** Each run gets a log. An optional JSON event log and Wine debug output are there when you need more.
-- **You want to tidy up afterwards.** An optional, guarded step deletes the original installer after a run that exits cleanly. It is off by default.
-- **You want to try Proton instead of Wine.** One setting switches the runtime, through umu-run, with a Proton folder you already have.
-- **You want a stricter box.** The repository includes a bubblewrap wrapper that runs an installer with no network and an empty home folder. It is a manual script, tested on NixOS only, and it opens no window.
-
-### When you probably do not need it
-- If you are happy running Wine yourself, you do not.
-- Gitfurl is for the installer step. It is **not** a game launcher or a library manager, and it does not claim to run any particular installer. Tools built for managing prefixes or launching games cover more than this does.
-- Wine prefixes are not sandboxes. Gitfurl makes the run visible and tidy; it does not make an untrusted installer safe.
-
-## Screenshots
-These were made with gitfurl 1.3.0 under a virtual display, in a demo home folder (`/home/demo`) with empty example prefixes. No real installer and no real Wine were run: a small stand-in script took Wine's place.
-
-![A prefix's page with an installer chosen: the checklist, the installer field and the options, with the memory limit on](docs/screenshot-plan.png)
-
-*Before a run: the checklist, the chosen installer and the options. Nothing runs until you approve the plan.*
-
-![A run in progress: the progress bar at 58 percent, with payload read, rate, estimate, data written and the process count](docs/screenshot-run.png)
-
-*During a run. The numbers are real readings from `/proc`, but of the stand-in, which slowly read 0.21 GB of example files (sparse files of zeros) and wrote the same amount into the prefix. That is why the process shown is `python3.14`.*
-
-![The Settings page: Wine, bubblewrap, umu-run and platform, and the About card](docs/screenshot-settings.png)
-
-*Settings, made on the maintainer's machine: the bubblewrap version and the platform line are real, the Wine version is the stand-in's.*
+*The Library page with demo prefixes (empty folders). No installer was run to make this picture. More pictures are in the [user guide](docs/user-guide.md).*
 
 ## Getting started
 
-The [latest release](https://github.com/undecuple/gitfurl/releases/latest) has a single-file Linux program and a `SHA256SUMS` file (check it with `sha256sum -c SHA256SUMS`). It is not proven on every desktop; see Known issues. Or run it from source. Either way you need Linux and Wine; from source you also need Python 3.11 or newer and tkinter (`python3-tk` on Debian and Ubuntu).
+The [latest release](https://github.com/undecuple/gitfurl/releases/latest) has a single-file Linux program and a `SHA256SUMS` file (check it with `sha256sum -c SHA256SUMS`). It is not proven on every desktop (see [docs/status.md](docs/status.md#known-issues)). Or run it from source. You need Linux and Wine; from source also Python 3.11 or newer and tkinter (`python3-tk` on Debian and Ubuntu).
 
-1. **Get the code.** `git clone https://github.com/undecuple/gitfurl.git && cd gitfurl`
-2. **Check your setup.** `python -m gitfurl cli doctor` reports Wine, tkinter, bubblewrap and umu-run. With Nix, `nix develop .#wine` gives you Python with tkinter and Wine.
-3. **Open the app.** `python -m gitfurl`, then press **+ New prefix**, name it, and open it.
-4. **Choose your installer and run it.** Pick the file, read the plan, press **Run installer** and confirm. The installer's own window opens; use it as normal.
-5. **Check the result.** Gitfurl shows the exit status and where the log is. The [user guide](docs/user-guide.md) explains every option.
+1. `git clone https://github.com/undecuple/gitfurl.git && cd gitfurl`
+2. `python -m gitfurl cli doctor` reports Wine, tkinter, bubblewrap and umu-run.
+3. `python -m gitfurl`, press **+ New prefix**, name it, open it.
+4. Pick your installer, read the plan, press **Run installer** and confirm.
+5. Gitfurl shows the exit status and where the log is.
 
-Prefer a terminal? `python -m gitfurl cli --help`. The command line uses the same code and the same approvals.
+Terminal instead: `python -m gitfurl cli --help` (same code, same approvals).
 
-## Status
+## When you probably do not need it
+- If you are happy running Wine yourself, you do not.
+- Gitfurl is for the installer step. It is **not** a game launcher or a library manager, and it does not claim to run any particular installer.
+- Wine prefixes are not sandboxes. Gitfurl makes the run visible and tidy; it does not make an untrusted installer safe.
 
-As of 2026-11-16, on Linux x86_64, Wine 11.0, tested headless (no GPU, a virtual display):
+## Read more
+| Topic | Where |
+|---|---|
+| What it is for, every option, screenshots, the command line | [docs/user-guide.md](docs/user-guide.md) |
+| What it does and does not do; who it is for | [docs/scope.md](docs/scope.md) |
+| Tested setups, known issues | [docs/status.md](docs/status.md) |
+| How the core, app and progress reading fit together | [docs/architecture.md](docs/architecture.md) |
+| Building, tests, the sandbox wrapper, repository layout | [docs/development.md](docs/development.md), [docs/testing.md](docs/testing.md) |
+| Docker image and compose file (experimental) | [docs/docker.md](docs/docker.md) |
+| What is read from `/proc` and what is not | [SECURITY.md](SECURITY.md) |
+| Plans for later | [ROADMAP.md](ROADMAP.md) |
 
-| Setup | How it runs | State | Tested on |
-|---|---|---|---|
-| Unit tests | `pytest`, mocks only | verified | passing at the last commit; see [docs/testing.md](docs/testing.md) |
-| Graphical app | tkinter | verified (renders and starts) | headless screenshot; never used by a person on a real desktop here |
-| Installer start, Wine | `gitfurl cli install`, in a no-network bubblewrap sandbox | verified: two user-supplied installers started and stayed open 120 s | Wine 11.0; then stopped. No install was completed. The installers are not published (see [docs/testing.md](docs/testing.md)) |
-| Installer start, Proton | `umu-run` with GE-Proton, same sandbox | verified: one installer started and stayed open 120 s | one error line in Proton's output, source not found |
-| Complete install | Wine, `--unattended` | verified with one installer built for the test (Inno Setup 7.1.1, random payload), in the sandbox | Wine 11.0, 2026-11-17; no third-party installer completed |
-| Running an installed program | any runtime | **not tested** | - |
-| Progress numbers on a real install | `/proc` read offsets | implemented | tested only against fake `/proc` data |
-| Proton from the app | runtime setting | implemented | not run end to end |
-| ClamAV scan (optional) | `clamscan` on PATH | implemented | tested with a stand-in `clamscan` only; a real `clamscan` was never run |
-| Memory limit (on by default) | `systemd-run --user --scope` | implemented | stand-ins and test programs in a real scope (systemd 262); Wine with the test installer in the sandbox inside a scope with the limits: over the limit it moved to swap and was not stopped. Not Proton, not gitfurl's own scope around Wine |
-| Docker image and compose file | - | planned, after the first release | - |
-| Flatpak | - | planned | - |
-
-"verified" means a run with a named setup. "implemented" means the code is in but not run there. "planned" means neither.
-
-## Known issues
-- Compatibility with any particular installer is unverified.
-- Progress and the "installed program" guess are heuristics. They can be wrong or show nothing for installers that read their files in another way.
-- The app is dark only, with a fixed pixel font. Tab and Return/space work on buttons, switches and the sidebar (added 2026-11-16, lightly tested). Screen readers cannot read it: Tk does not expose its widgets to them.
-- Gitfurl refuses to create prefixes or run installers as root.
-- The memory limit is on by default. Without a user systemd manager, or without the memory controller delegated to it, runs are refused until you turn the limit off (`--no-memory-limit`, or the option in the window). Swap is not limited.
-- Proton needs a Proton folder you already have, and umu-run downloads its own runtime on first use if it is missing.
-- The single-file Linux build in the 1.0.0 release starts and runs `cli` here, and its window opens in a Debian image with Tk and fonts. The 1.1.0, 1.2.0, 1.2.1 and 1.3.0 builds are made by the same workflow and have not been checked separately. It is **not proven on every desktop**: it expects the system's standard X11 libraries and at least one font. On NixOS it stops with `libxcb.so.1: cannot open shared object file` unless the libraries are provided (for example with nix-ld) or you run from source with `nix develop`. See the [roadmap](ROADMAP.md).
-
-## What goes online
-Nothing, from gitfurl itself. (Inherited `WINE*` variables from your shell are not passed to the installer, so the plan shows everything that is set.) It makes no network requests, sends no telemetry and uploads nothing. Two things you start yourself can use the network: umu-run downloading its runtime on first use, and anything the installer does. The [sandbox wrapper](docs/development.md#running-an-installer-in-a-sandbox) turns the network off for the installer.
-
-## Where your data goes
-- Prefixes: `~/.local/share/gitfurl/prefixes/` (or under `$XDG_DATA_HOME`).
-- Logs: `~/.local/state/gitfurl/logs/` (or under `$XDG_STATE_HOME`), readable only by you. They can contain your user name and local paths; remove those before sharing one.
-- Nothing is written to `~/.wine`.
-
-## Building
-The code has no runtime dependencies. For tests and lint, enter `nix develop`, or install `pytest` and `ruff`, then `PYTHONPATH=src python -m pytest -q` and `ruff check .`. See [docs/development.md](docs/development.md).
-
-## How it works, briefly
-- **Core:** plain Python that builds an execution plan (argument list, prefix, environment) and shows it before anything runs.
-- **Interfaces:** the app and the command line are thin layers over that core, with the same approvals.
-- **Progress:** reads, through `/proc`, how far running processes are into the big files beside the installer, and which of your processes run in the prefix (see [SECURITY.md](SECURITY.md) for exactly what is read). It does not read the contents of your files.
-- More in [docs/architecture.md](docs/architecture.md).
-
-## Related projects
-- **[Wine](https://www.winehq.org/):** the compatibility layer gitfurl drives.
-- **[umu-launcher](https://github.com/Open-Wine-Components/umu-launcher):** used for the optional Proton runtime.
-
-- **[Proton](https://github.com/ValveSoftware/Proton) and [GE-Proton](https://github.com/GloriousEggroll/proton-ge-custom):** the optional runtime umu-launcher uses. Gitfurl does not ship either.
-- **[vim-tictoc](https://github.com/adonaldson/vim-tictoc):** the colour scheme the app and the images follow.
-
-Gitfurl is not affiliated with these projects or with any software publisher.
-
-## Roadmap
-First a release that has been tested on a complete install, then a runtime choice in the app with Proton checked end to end, then a Docker image and compose file. See [ROADMAP.md](ROADMAP.md).
+## Privacy
+Nothing goes online from gitfurl itself: no network requests, no telemetry, no uploads. Two things you start yourself can use the network: umu-run downloading its runtime on first use, and anything the installer does. Prefixes live in `~/.local/share/gitfurl/prefixes/` and logs in `~/.local/state/gitfurl/logs/` (readable only by you; they can hold your user name and local paths, so remove those before sharing one). Nothing is written to `~/.wine`.
 
 ## Community
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/W8fMT78Q7k)
 
-Questions and discussion: the gitfurl forum on the [undecuple Discord server](https://discord.gg/W8fMT78Q7k). Bugs still go to [GitHub issues](https://github.com/undecuple/gitfurl/issues/new/choose), and security problems to [private advisories](SECURITY.md). Do not post logs there without removing your user name and local paths.
+Questions and discussion: the gitfurl forum on the [undecuple Discord server](https://discord.gg/W8fMT78Q7k). Bugs go to [GitHub issues](https://github.com/undecuple/gitfurl/issues/new/choose), security problems to [private advisories](SECURITY.md). Remove your user name and local paths from logs before posting them. Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Contributing
-See [CONTRIBUTING.md](CONTRIBUTING.md). Security problems: [SECURITY.md](SECURITY.md).
-
-## Repository layout
-```
-src/gitfurl/   the app, command line and core
-tests/         mock-based tests (no Wine, no network, no installers)
-docs/          user guide, scope, architecture, development
-tools/         sandbox wrapper and the asset generator
-assets/        banner, icon, favicon, social preview
-.github/       CI and issue forms
-```
+## Related projects
+[Wine](https://www.winehq.org/) (the compatibility layer gitfurl drives), [umu-launcher](https://github.com/Open-Wine-Components/umu-launcher) with [Proton](https://github.com/ValveSoftware/Proton) and [GE-Proton](https://github.com/GloriousEggroll/proton-ge-custom) (the optional runtime; gitfurl ships none of them) and [vim-tictoc](https://github.com/adonaldson/vim-tictoc) (the colour scheme). Gitfurl is not affiliated with these projects or with any software publisher.
 
 ## Licence
 Copyright (C) 2026 undecuple. GPL-3.0-or-later; see [LICENSE](LICENSE). The images in `assets/` are generated by `tools/make_assets.py` and are under the same licence. The licence covers gitfurl only, not any installer or software you run with it.

@@ -1,0 +1,34 @@
+# Status and known issues
+
+What has been tried, on which setup, and what is known not to work. The [testing notes](testing.md) have the details of each run.
+
+## Status
+
+Last updated 2026-11-18. On Linux x86_64, Wine 11.0, tested headless (no GPU, a virtual display):
+
+| Setup | How it runs | State | Tested on |
+|---|---|---|---|
+| Unit tests | `pytest`, mocks only | verified | passing at the last commit; see [docs/testing.md](testing.md) |
+| Graphical app | tkinter | verified (renders and starts) | headless screenshot; never used by a person on a real desktop here |
+| Installer start, Wine | `gitfurl cli install`, in a no-network bubblewrap sandbox | verified: two user-supplied installers started and stayed open 120 s | Wine 11.0; then stopped. No install was completed. The installers are not published (see [docs/testing.md](testing.md)) |
+| Installer start, Proton | `umu-run` with GE-Proton, same sandbox | verified: one installer started and stayed open 120 s | one error line in Proton's output, source not found |
+| Complete install | Wine, `--unattended` | verified with installers built for the test (Inno Setup 7.1.1: random payload, a custom page, `[Run]` entries), in the sandbox, from the command line and from the window | Wine 11.0, 2026-11-17 and 2026-11-18; no third-party installer completed |
+| Running an installed program | any runtime | **not tested** | - |
+| Progress numbers on a real install | `/proc` read offsets | implemented | tested only against fake `/proc` data |
+| Proton from the app | runtime setting | implemented | not run end to end |
+| ClamAV scan (optional) | `clamscan` on PATH | implemented | tested with a stand-in `clamscan` only; a real `clamscan` was never run |
+| Memory limit (on by default) | `systemd-run --user --scope` | implemented | stand-ins and test programs in a real scope (systemd 262); Wine with the test installer in the sandbox inside a scope with the limits: over the limit it moved to swap and was not stopped. Not Proton, not gitfurl's own scope around Wine |
+| Docker image and compose file | container, [docs/docker.md](docker.md) | experimental: the image builds, `cli doctor` runs and the window opens | Podman 6.1, 2026-11-16; not Docker itself, and no installer run in it |
+| Flatpak | - | planned | - |
+
+"verified" means a run with a named setup. "implemented" means the code is in but not run there. "planned" means neither.
+
+## Known issues
+- Compatibility with any particular installer is unverified.
+- Progress and the "installed program" guess are heuristics. They can be wrong or show nothing for installers that read their files in another way.
+- The app is dark only, with a fixed pixel font. Tab and Return/space work on buttons, switches and the sidebar (added 2026-11-16, lightly tested). Screen readers cannot read it: Tk does not expose its widgets to them.
+- Gitfurl refuses to create prefixes or run installers as root.
+- The memory limit is on by default. Without a user systemd manager, or without the memory controller delegated to it, runs are refused until you turn the limit off (`--no-memory-limit`, or the option in the window). Swap is not limited.
+- Proton needs a Proton folder you already have, and umu-run downloads its own runtime on first use if it is missing.
+- The single-file Linux build in the 1.0.0 release starts and runs `cli` here, and its window opens in a Debian image with Tk and fonts. The 1.1.0, 1.2.0, 1.2.1 and 1.3.0 builds are made by the same workflow and have not been checked separately. It is **not proven on every desktop**: it expects the system's standard X11 libraries and at least one font. On NixOS it stops with `libxcb.so.1: cannot open shared object file` unless the libraries are provided (for example with nix-ld) or you run from source with `nix develop`. See the [roadmap](../ROADMAP.md).
+
