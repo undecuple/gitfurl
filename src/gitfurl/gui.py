@@ -1285,6 +1285,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                     "installer_var": installer_var,
                     "create_var": create_var,
                     "memory_var": memory_var,
+                    "unattended_var": unattended_var,
                     "memory_switch": memory_switch,
                     "run": run,
                     "busy": busy,
