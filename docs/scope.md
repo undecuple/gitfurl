@@ -1,6 +1,6 @@
 # Scope
 
-Status: early release (1.2.1). Compatibility is unverified. Planned support is not verified support.
+Status: early release (1.3.0). Compatibility is unverified. Planned support is not verified support.
 
 ## Problem
 Some Windows installers are hard to run on Linux. Gitfurl helps a user run an installer they already have, in a dedicated Wine prefix, with settings they can inspect, and keeps local logs.
