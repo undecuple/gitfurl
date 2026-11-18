@@ -82,11 +82,12 @@ As of 2026-11-16, on Linux x86_64, Wine 11.0, tested headless (no GPU, a virtual
 | Graphical app | tkinter | verified (renders and starts) | headless screenshot; never used by a person on a real desktop here |
 | Installer start, Wine | `gitfurl cli install`, in a no-network bubblewrap sandbox | verified: two user-supplied installers started and stayed open 120 s | Wine 11.0; then stopped. No install was completed. The installers are not published (see [docs/testing.md](docs/testing.md)) |
 | Installer start, Proton | `umu-run` with GE-Proton, same sandbox | verified: one installer started and stayed open 120 s | one error line in Proton's output, source not found |
-| Complete install, then running the result | any runtime | **not tested** | - |
+| Complete install | Wine, `--unattended` | verified with one installer built for the test (Inno Setup 7.1.1, random payload), in the sandbox | Wine 11.0, 2026-11-17; no third-party installer completed |
+| Running an installed program | any runtime | **not tested** | - |
 | Progress numbers on a real install | `/proc` read offsets | implemented | tested only against fake `/proc` data |
 | Proton from the app | runtime setting | implemented | not run end to end |
 | ClamAV scan (optional) | `clamscan` on PATH | implemented | tested with a stand-in `clamscan` only; a real `clamscan` was never run |
-| Memory limit (on by default) | `systemd-run --user --scope` | implemented | stand-ins, and test programs in a real scope on one NixOS machine (systemd 262); never with Wine, Proton or an installer |
+| Memory limit (on by default) | `systemd-run --user --scope` | implemented | stand-ins and test programs in a real scope (systemd 262); Wine with the test installer in the sandbox inside a scope with the limits: over the limit it moved to swap and was not stopped. Not Proton, not gitfurl's own scope around Wine |
 | Docker image and compose file | - | planned, after the first release | - |
 | Flatpak | - | planned | - |
 

@@ -101,6 +101,25 @@ MEMORY_NOTE = ("On by default. Runs the installer in a systemd user scope with a
                "scope are not limited.")
 
 
+UNATTENDED_TITLE = "Install without the installer's windows (Inno Setup only)"
+UNATTENDED_NOTE = ("Off by default. For Inno Setup installers, gitfurl starts Setup with its own "
+                   "silent switches: no wizard, no installer windows, every choice left at the "
+                   "script's default, and the files go to C:\\Games\\<prefix> inside the prefix. "
+                   "The installer still unpacks its own files. Afterwards gitfurl reads the log "
+                   "Setup wrote. A setup script can still show its own windows or ignore the "
+                   "switches. Refused for installers that are not Inno Setup.")
+
+
+def unattended_for(installer, prefix: str, enabled: bool, now=None):
+    """The UnattendedPlan for the window, or None when off. Reads the installer's headers
+    only. Raises ValueError when the installer is not Inno Setup."""
+    if not enabled:
+        return None
+    from gitfurl.unattended import plan_unattended
+
+    return plan_unattended(prefix, detect(installer), now)
+
+
 def memory_problem(enabled: bool, avail=None, meminfo: str = "/proc/meminfo") -> str | None:
     """Why Run must stay off for the memory limit, or None. Reads files only."""
     if not enabled:
@@ -114,7 +133,8 @@ def memory_problem(enabled: bool, avail=None, meminfo: str = "/proc/meminfo") ->
 
 def describe_plan(installer: str, prefix: str, runtime: str = "wine",
                   proton_path: str | None = None, portable: bool = False,
-                  scan: bool = False, memory_limit: bool = False) -> tuple[str, str | None]:
+                  scan: bool = False, memory_limit: bool = False, unattended: bool = False,
+                  now=None) -> tuple[str, str | None]:
     """Return (preview text, error). No side effects: the scan is described, never run; the
     memory limit lines read files only."""
     if not installer.strip():
@@ -126,7 +146,9 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
                                             scanmod.find_clamscan()) if scan else None
         plan = build_plan(validate_installer(installer.strip()), prefix.strip(),
                           runtime=runtime, proton_path=proton_path, portable=portable,
-                          scan=scan_plan, memory_limit=memory_limit)
+                          scan=scan_plan, memory_limit=memory_limit,
+                          unattended=unattended_for(validate_installer(installer.strip()),
+                                                    prefix.strip(), unattended, now))
         portable_lines = []
         if portable:
             from gitfurl.portable import check_portable_supported, describe_portable, find_bwrap
@@ -148,6 +170,8 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
     )
     if portable_lines:
         text += "\n".join(portable_lines) + "\n"
+    if plan.unattended is not None:
+        text += "\n".join(plan.unattended.describe(plan.prefix)) + "\n"
     if scan_plan is not None:
         text += "\n".join(scanmod.describe_scan_plan(scan_plan)) + "\n"
     text += "\n".join(describe_memory(memory_limit, memory_availability() if memory_limit
@@ -322,6 +346,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     portable_var = tk.BooleanVar(value=False)
     scan_var = tk.BooleanVar(value=False)
     memory_var = tk.BooleanVar(value=True)  # the memory limit: on by default
+    unattended_var = tk.BooleanVar(value=False)
     progress_var = tk.StringVar(value="Shown while an installer runs: payload read, rate, rough ETA.")
     pending = {"cleanup": None, "control": None, "proton": False}
     proton_var = tk.StringVar(value=os.environ.get("PROTONPATH", ""))
@@ -692,6 +717,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         return memory_switch["w"]
 
     row(c, MEMORY_TITLE, MEMORY_NOTE, memory_widget)
+    row(c, UNATTENDED_TITLE, UNATTENDED_NOTE,
+        lambda p: w.Switch(p, unattended_var, command=lambda: refresh_plan()))
     row(c, "Show what the installer changed on my system",
         "Lists new files and registry keys in the prefix and in a few places outside it.",
         lambda p: w.Switch(p, changes_var))
@@ -842,7 +869,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             sub_var.set("invalid name")
         runtime = runtime_var.get()
         text, err = describe_plan(installer_var.get(), name, runtime, proton_dir(),
-                                  portable_var.get(), scan_var.get(), memory_var.get())
+                                  portable_var.get(), scan_var.get(), memory_var.get(),
+                                  unattended_var.get())
         set_text(plan_box, text or (err or ""))
         tool = wine_path["umu"] if runtime == "proton" else wine_path["value"]
         rows = plan_checklist(installer_problem(installer_var.get()), prefix_error, exists,
@@ -961,9 +989,12 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
 
     def run_clicked():
         proton = runtime_var.get() == "proton"
+        from datetime import datetime
+
+        now = datetime.now()  # one time stamp: the approved text names the same Inno log
         text, err = describe_plan(installer_var.get(), selected_prefix(), runtime_var.get(),
                                   proton_dir(), portable_var.get(), scan_var.get(),
-                                  memory_var.get())
+                                  memory_var.get(), unattended_var.get(), now)
         err = err or memory_problem(memory_var.get())
         if err:
             messagebox.showerror("Cannot run", err)
@@ -983,7 +1014,9 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         plan = build_plan(validate_installer(installer_var.get().strip()), selected_prefix(),
                           runtime=runtime_var.get(), proton_path=proton_dir(),
                           portable=portable_var.get(), scan=scan_plan,
-                          memory_limit=memory_var.get())
+                          memory_limit=memory_var.get(),
+                          unattended=unattended_for(validate_installer(installer_var.get().strip()),
+                                                    selected_prefix(), unattended_var.get(), now))
         missing = not plan.prefix.is_dir()
         if missing and not create_var.get():
             messagebox.showerror("Prefix missing", f"{plan.prefix} does not exist. Create it first, "
@@ -1022,9 +1055,13 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             return
         pending["cleanup"] = clean
         cleanup_var.set("none")  # one run at a time; choose again for the next
-        start_busy("Preparing the prefix, then running the installer. Close its window when done."
-                   if missing else "Installer running. Close its window when it is done.",
-                   "install")
+        if plan.unattended is not None:
+            busy = ("Preparing the prefix, then running the installer without its windows."
+                    if missing else "Installer running without its windows.")
+        else:
+            busy = ("Preparing the prefix, then running the installer. Close its window when done."
+                    if missing else "Installer running. Close its window when it is done.")
+        start_busy(busy, "install")
         create, track = create_var.get(), changes_var.get() or find_var.get()
         ctx = {"prefix": selected_prefix_path(), "changes": changes_var.get(), "find": find_var.get(),
                "portable": plan.portable}
