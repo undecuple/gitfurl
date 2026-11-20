@@ -4,8 +4,8 @@ What it reads: the footer block at the end of the file and the directory blocks 
 to (the archive's own index), with bounded reads. From those it reports the files, their
 sizes, where the archive starts (the size of a self-extracting program before it, if any),
 whether the archive is locked, and for each data block whether its method is one gitfurl
-decodes (a chain of `storing`, `lzma`, `exe`, `delta` and `rep` stages) or a method gitfurl
-does not handle.
+decodes (a chain of `storing`, `lzma`, `exe`, `delta`, `rep`, `4x4` (with `lzma` inside) and
+`srep` stages) or a method gitfurl does not handle.
 
 What it never does (extraction is in extract.py, which uses this reader): it never
 extracts, decodes or verifies file data, never writes or
@@ -52,6 +52,12 @@ MAX_METHOD_TEXT = 2048  # bytes of one compressor string (FreeArc's own limit)
 MAX_STAGE_TEXT = 512  # bytes of one method in it
 MAX_FIELDS = 200  # ":"-separated fields of one method
 MAX_STAGES = 8  # methods in one chain that gitfurl decodes
+X4_PIECE_CAP = DICT_CAP  # a larger 4x4 piece size in the method's own fields is refused
+SREP_BLOCK_DEFAULT = 8 << 20  # srep blocks up to this size are always accepted
+SREP_BLOCK_MAX = 64 << 20  # an srep block size option above this is refused
+# Names under which installers' configuration files register srep; the stream's own header
+# decides whether it is one gitfurl reads.
+SREP_NAMES = frozenset(["srep", "srep64", "srep_new", "srep_old"])
 MAX_EXAMPLES = 3  # unsafe names shown in a summary
 MAX_KINDS = 4  # chains of supported methods named in a summary (besides storing and lzma)
 NAME_LIMIT = 80  # characters of one name shown in a summary
@@ -82,9 +88,11 @@ class FarcError(ValueError):
 class Stage:
     """One method of a supported chain, by gitfurl's own name (never the archive's text)."""
 
-    name: str  # "storing", "lzma", "exe", "delta" or "rep"
-    lzma: dict | None = None  # lzma: dict_size, lc, lp, pb
-    size: int = 0  # delta: block size; rep: window size (from the method's parameters)
+    name: str  # "storing", "lzma", "exe", "delta", "rep", "4x4" or "srep"
+    lzma: dict | None = None  # lzma, and the lzma inside 4x4: dict_size, lc, lp, pb
+    # delta: block size; rep: window size; 4x4: piece size named in its fields (0: none);
+    # srep: largest block accepted (from the method's parameters)
+    size: int = 0
 
 
 @dataclass(frozen=True)
@@ -260,9 +268,69 @@ def _parse_rep(params: list[str]) -> int | None:
     return window
 
 
+_X4_R = re.compile(r"r\d+(\.\d+)?")
+
+
+def _parse_4x4(fields: list[str]) -> tuple[Stage | None, str]:
+    """4x4's own fields (piece size, threads, buffers, threshold), then the method inside it,
+    which must be lzma. The own fields only steer compression; they are checked for form."""
+    piece = 0
+    for i, f in enumerate(fields):
+        if not f:
+            return None, "4x4 settings gitfurl does not understand"
+        own = f[0].isascii() and f[0].isdigit() or \
+            len(f) > 1 and f[1].isascii() and f[1].isdigit()
+        if not own:
+            inner = fields[i:]
+            break
+        if f.isascii() and f.isdigit():
+            continue  # thread count
+        if f[0] in "ti":
+            ok = _parse_int(f[1:]) is not None
+        elif f[0] == "r":
+            ok = _X4_R.fullmatch(f) is not None
+        else:
+            size = _parse_size(f[1:] if f[0] == "b" else f)
+            ok = size is not None
+            if ok:
+                piece = size
+        if not ok:
+            return None, "4x4 settings gitfurl does not understand"
+    else:
+        return None, KIND_OTHER  # no method inside: 4x4's own default, which is not lzma
+    if piece > X4_PIECE_CAP:
+        return None, f"a 4x4 piece size over the {X4_PIECE_CAP >> 20} MiB limit"
+    if inner[0] != "lzma":
+        return None, KIND_OTHER
+    opts, reason = _parse_lzma(inner[1:])
+    return (Stage("4x4", lzma=opts, size=piece), "") if opts else (None, reason)
+
+
+def _parse_srep(params: list[str]) -> tuple[Stage | None, str]:
+    """srep's options are its packer's command-line switches. The stream carries everything
+    the decoder needs, except: `index=` (the match lists kept in a file outside the archive)
+    is refused, and `b<size>` raises the largest block accepted."""
+    block = SREP_BLOCK_DEFAULT
+    for p in params:
+        if not p or p.startswith("index"):
+            return None, "srep settings gitfurl does not understand"
+        if p[0] == "b" and p[1:2].isascii() and p[1:2].isdigit():
+            size = _parse_size(p[1:])
+            if size is None:
+                return None, "srep settings gitfurl does not understand"
+            if size > SREP_BLOCK_MAX:
+                return None, f"an srep block size over the {SREP_BLOCK_MAX >> 20} MiB limit"
+            block = max(block, size)
+    return Stage("srep", size=block), ""
+
+
 def _parse_stage(text: str) -> tuple[Stage | None, str]:
     params = text.split(":")
     name, rest = params[0], params[1:]
+    if name == "4x4":
+        return _parse_4x4(rest)
+    if name in SREP_NAMES:
+        return _parse_srep(rest)
     if name == "storing":
         return (Stage("storing"), "") if not rest else (None, KIND_OTHER)
     if name == "exe":
@@ -283,8 +351,8 @@ def _parse_stage(text: str) -> tuple[Stage | None, str]:
 
 
 def parse_method(text: str) -> Method:
-    """Classify one compressor string: a chain of storing, lzma, exe, delta and rep stages,
-    or unsupported. Never raises; the string itself is not kept."""
+    """Classify one compressor string: a chain of storing, lzma, exe, delta, rep, 4x4 and srep
+    stages, or unsupported. Never raises; the string itself is not kept."""
     encrypted = any(c in text.lower() for c in _CIPHERS)
 
     def no(reason: str) -> Method:
@@ -306,7 +374,7 @@ def parse_method(text: str) -> Method:
         if stage is None:
             return no(reason)
         stages.append(stage)
-    single = stages[0].lzma if len(stages) == 1 else None
+    single = stages[0].lzma if len(stages) == 1 and stages[0].name == "lzma" else None
     return Method(True, lzma=single, stages=tuple(stages))
 
 

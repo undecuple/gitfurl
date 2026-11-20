@@ -5,8 +5,8 @@ FreeArc archives' own indexes beside it (bounded reads, through gitfurl.extract.
 and writes nothing. The route is:
 
   native  when the installer is Inno Setup (or is itself a FreeArc archive), every FreeArc
-          archive beside it reads cleanly, uses only storing, lzma, exe, delta and rep, and
-          holds only names gitfurl can write safely, and (for the automatic choice) the
+          archive beside it reads cleanly, uses only storing, lzma, exe, delta, rep, 4x4
+          (lzma inside) and srep, and holds only names gitfurl can write safely, and (for the automatic choice) the
           archives are linked to the installer by name and no option that only a Setup run
           uses was given. Setup is then NOT run at all: gitfurl
           unpacks the archives itself into C:\\Games\\<prefix>, after creating the prefix with

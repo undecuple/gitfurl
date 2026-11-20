@@ -19,8 +19,8 @@ It recognises two things, each with a confidence that says how sure it is:
     archive's own index is read with gitfurl.farc (bounded reads, CRC-32 checked) from the
     same open file whose signature was checked, so the file is opened once. When the
     index reads cleanly the evidence is "likely" and the plan shows its file count, total
-    size and, per data block, whether it uses storing, lzma or a method gitfurl does not
-    handle. When it does not, the evidence stays "possible" and says why.
+    size and, per data block, whether it uses storing, lzma, another chain of methods gitfurl
+    decodes, or a method gitfurl does not handle. When it does not, the evidence stays "possible" and says why.
 
 The data inside an archive is never decoded, and the files in it are never extracted. The
 route itself (native or Wine/Proton) is chosen in gitfurl.route; describe() prints that
