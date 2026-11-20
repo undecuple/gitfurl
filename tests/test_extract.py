@@ -100,7 +100,7 @@ class Extracts(Base):
         text = "\n".join(plan.describe())
         self.assertIn("The installer is not run", text)
         self.assertIn(r"C:\Games\p1", text)
-        self.assertIn("lzma decoder", text)
+        self.assertIn("memory: up to", text)
         seen = []
         res = extract.extract(plan, on_progress=lambda done, total: seen.append(done))
         self.assertTrue(res.ok, res.lines())
@@ -173,7 +173,7 @@ class Extracts(Base):
 
     def test_decoder_out_of_memory_is_reported_not_raised(self):
         self.arc("a.arc", make_archive([("lzma:1mb", [F("a", TEXT)])]))
-        with mock.patch.object(extract.lzma, "LZMADecompressor", side_effect=MemoryError):
+        with mock.patch.object(extract.farc_codecs.lzma, "LZMADecompressor", side_effect=MemoryError):
             res = extract.extract(self.plan())
         self.assertIn("decoder could not be started", res.error)
         self.assertTrue(self.dest.is_dir())
