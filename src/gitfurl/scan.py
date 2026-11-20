@@ -56,7 +56,7 @@ FORBIDDEN_OPTIONS = ("--remove", "--move", "--copy")
 
 CLEAN, HIT, ERROR = "clean", "hit", "error"
 
-FALSE_POSITIVE_NOTE = ("ClamAV often flags game installers and repacks falsely (packers and "
+FALSE_POSITIVE_NOTE = ("ClamAV often flags game installers falsely (packers and "
                        "self-extractors look like malware to signatures).")
 
 
