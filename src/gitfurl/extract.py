@@ -1,4 +1,6 @@
-"""Native extraction of FreeArc archives (storing and lzma only), without running the installer.
+"""Native extraction of FreeArc archives, without running the installer.
+
+Methods decoded: storing, lzma, exe, delta and rep, alone or chained (farc_codecs.py).
 
 Off unless asked for, per run, after an approval that shows the plan. gitfurl reads each
 FreeArc archive beside the installer itself (gitfurl.farc) and writes the files into a new
@@ -7,7 +9,7 @@ installer is not run: no registry entries, no redistributables, no shortcuts and
 own steps, so the result may not work.
 
 Refused before anything is written: no FreeArc archive found; an archive gitfurl cannot read;
-any data block with a method other than storing or a single lzma (including encryption); a
+any data block whose method is not a chain of those (including encryption); a
 name that is not a safe relative path; a name Windows cannot use (a trailing dot or space, a
 character from <>:"|?*, or a device name such as CON or NUL); two files, or a file and a
 folder, whose names would be the same with letter case ignored (as Windows does); more than
@@ -18,7 +20,8 @@ are one folder, as on Windows: the first spelling is used.
 While writing: every file is created new (O_CREAT|O_EXCL|O_NOFOLLOW) inside folders this
 run created, opened relative to the destination's own file descriptor, so nothing outside it
 is written and nothing is overwritten. Output per data block stops at the sum of its files'
-declared sizes. Each file's CRC-32 is checked; a mismatch is reported and the file is kept.
+declared sizes; every decoder's buffers are capped before the block is read, and damaged data
+is reported in the result. Each file's CRC-32 is checked; a mismatch is reported and the file is kept.
 File times are set through the open file. Nothing from an archive is run or passed to a
 program. Stop (a cancel flag, or Ctrl-C) ends the extraction between chunks; files already
 written stay, and nothing is deleted. At most _Tree.CACHE folders are held open at a time.
@@ -26,7 +29,6 @@ written stay, and nothing is deleted. At most _Tree.CACHE folders are held open 
 
 from __future__ import annotations
 
-import lzma
 import os
 import re
 import threading
@@ -35,7 +37,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from gitfurl import farc
+from gitfurl import farc, farc_codecs
 from gitfurl.detect import clean
 from gitfurl.prefixes import prefix_path, validate_prefix_name
 
@@ -91,7 +93,7 @@ class ExtractPlan:
     archives: list[ArchivePlan]
     total_size: int
     file_count: int
-    max_dict: int  # largest lzma dictionary the decoder will allocate
+    memory: int  # most bytes the decoders of one data block may hold at once
     notes: list[str] = field(default_factory=list)
     # folder id -> (parent id, name on disk); id 0 is the destination itself
     folders: list[tuple[int, str]] = field(default_factory=lambda: [(-1, "")])
@@ -143,8 +145,8 @@ class ExtractPlan:
 
     def describe(self) -> list[str]:
         lines = [
-            ("NATIVE EXTRACTION (FreeArc, storing and lzma only): gitfurl reads the archives "
-            "itself."),
+            ("NATIVE EXTRACTION (FreeArc: storing, lzma, exe, delta and rep): gitfurl reads "
+            "the archives itself."),
             f"  {EXTRACTS_ONLY}",
             (f"  destination: {self.target} (in the prefix: {self.dest}); it must not exist "
             "yet, and no existing file is overwritten"),
@@ -154,8 +156,9 @@ class ExtractPlan:
                          f", {farc._n(len(ap.files), 'file', 'files')})")
         lines.append(f"  in total: {farc._n(self.file_count, 'file', 'files')}, "
                      f"{farc._size(self.total_size)} to write")
-        if self.max_dict:
-            lines.append(f"  memory: up to {farc._size(self.max_dict)} for the lzma decoder")
+        if self.memory:
+            lines.append(f"  memory: up to {farc._size(self.memory)} to decode one data block "
+                         "(the decoders of its methods added together)")
         lines.append("  each archive's own folder layout is used; the installer's script may "
                      "have placed files differently")
         lines.append("  each file's CRC-32 is checked; a file that does not match is kept and "
@@ -216,7 +219,7 @@ def plan_extract(installer: Path, prefix_name: str,
     # the work and memory are linear in the names' length, however deep the paths are.
     names: dict[tuple[int, str], int] = {}
     merged: str | None = None
-    total = count = max_dict = 0
+    total = count = memory = 0
     for path in paths:
         name = clean(path.name, 80)
         try:
@@ -226,7 +229,8 @@ def plan_extract(installer: Path, prefix_name: str,
         if arc.unsupported:
             raise ExtractRefused(f"{name} uses {farc.KIND_OTHER} "
                                  f"({len(arc.unsupported)} of {len(arc.blocks)} data blocks); "
-                                 "only storing and lzma can be extracted")
+                                 "only storing, lzma, exe, delta and rep, alone or chained, "
+                                 "can be extracted")
         ap = ArchivePlan(path, arc, [], [])
         for entry in arc.entries:
             parts = farc.relative_parts(entry.path)
@@ -275,13 +279,12 @@ def plan_extract(installer: Path, prefix_name: str,
                 total += entry.size
                 count += 1
         for blk in arc.blocks:
-            if blk.method.lzma:
-                max_dict = max(max_dict, _dict_size(blk))
+            memory = max(memory, farc_codecs.chain_memory(blk.method, blk.origsize, CHUNK))
         archives.append(ap)
     if merged:
         notes.append(merged)
     dest = prefix / "drive_c" / "Games" / prefix_name
-    return ExtractPlan(installer, prefix_name, prefix, dest, archives, total, count, max_dict,
+    return ExtractPlan(installer, prefix_name, prefix, dest, archives, total, count, memory,
                        notes, folders)
 
 
@@ -296,11 +299,6 @@ def _check_length(name: str, stored: str, parts: list[str]) -> None:
     if max(sizes) > NAME_MAX or sum(sizes) + len(sizes) > PATH_MAX:
         raise ExtractRefused(f"{name} holds a name too long for this system: "
                              f"{clean(stored, 80)!r}")
-
-
-def _dict_size(blk: farc.DataBlock) -> int:
-    """The decoder never needs a dictionary larger than the block's output."""
-    return min(blk.method.lzma["dict_size"], max(4096, blk.origsize))
 
 
 # --- extraction ---------------------------------------------------------------------------
@@ -449,60 +447,31 @@ def _make_dest(plan: ExtractPlan) -> int:
 
 
 def _chunks(fd: int, blk: farc.DataBlock, stop):
-    """The block's decoded bytes, exactly blk.origsize of them, CHUNK at a time. The lzma
-    decoder is made here, before the block's first file is opened; raises _DataError."""
-    dec = None
-    if blk.method.lzma is not None:
-        opts = dict(blk.method.lzma, dict_size=_dict_size(blk))
-        try:
-            dec = lzma.LZMADecompressor(lzma.FORMAT_RAW,
-                                        filters=[{"id": lzma.FILTER_LZMA1, **opts}])
-        except (lzma.LZMAError, MemoryError, ValueError) as exc:
-            raise _DataError("the lzma decoder could not be started (not enough memory?)") \
-                from exc
-    return _decode(fd, blk, dec, stop)
+    """The block's decoded bytes, exactly blk.origsize of them, CHUNK at a time. Every decoder
+    of the chain is made here, before the block's first file is opened; raises _DataError."""
+    try:
+        top = farc_codecs.open_chain(blk.method, fd, blk.offset, blk.compsize, blk.origsize,
+                                     CHUNK, stop)
+    except farc_codecs.StartError as exc:
+        raise _DataError(str(exc)) from exc
+    return _decode(top, blk.origsize, stop)
 
 
-def _decode(fd: int, blk: farc.DataBlock, dec, stop):
-    pos, end = blk.offset, blk.offset + blk.compsize
-
-    def read_in() -> bytes:
-        nonlocal pos
-        n = min(CHUNK, end - pos)
-        data = os.pread(fd, n, pos)
-        if len(data) != n:
-            raise _DataError("the archive could not be read completely (did it change?)")
-        pos += n
-        return data
-
-    left = blk.origsize
-    if dec is None:  # storing: compsize == origsize was checked by farc
-        while left:
-            stop()
-            data = read_in()
-            left -= len(data)
-            yield data
-        return
+def _decode(top, size: int, stop):
+    left = size
     while left:
         stop()
-        if dec.eof:
-            raise _DataError("a data block ended before all of its files were complete")
-        if dec.needs_input:
-            if pos >= end:
-                raise _DataError("a data block ended before all of its files were complete")
-            data = read_in()
-        else:
-            data = b""
         try:
-            out = dec.decompress(data, max_length=min(CHUNK, left))
-        except (lzma.LZMAError, EOFError) as exc:
-            raise _DataError("a data block could not be decompressed (damaged data)") from exc
+            out = top.read(min(CHUNK, left))
+        except farc_codecs.CodecError as exc:
+            raise _DataError(f"a data block could not be decompressed ({exc})") from exc
         except MemoryError as exc:
             raise _DataError("a data block could not be decompressed (not enough memory)") \
                 from exc
+        if not out:
+            raise _DataError("a data block ended before all of its files were complete")
         left -= len(out)
-        if out:
-            yield out
+        yield out
 
 
 def extract(plan: ExtractPlan, cancel: threading.Event | None = None,

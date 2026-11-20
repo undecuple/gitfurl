@@ -3,8 +3,9 @@
 What it reads: the footer block at the end of the file and the directory blocks it points
 to (the archive's own index), with bounded reads. From those it reports the files, their
 sizes, where the archive starts (the size of a self-extracting program before it, if any),
-whether the archive is locked, and for each data block whether its method is `storing`, a
-single `lzma`, or a method gitfurl does not handle.
+whether the archive is locked, and for each data block whether its method is one gitfurl
+decodes (a chain of `storing`, `lzma`, `exe`, `delta` and `rep` stages) or a method gitfurl
+does not handle.
 
 What it never does (extraction is in extract.py, which uses this reader): it never
 extracts, decodes or verifies file data, never writes or
@@ -13,13 +14,15 @@ is decompressed (when it is stored with `lzma`), and only up to MAX_CONTROL_BLOC
 
 What it refuses (FarcError): anything that is not a regular file; a file with no footer in
 its last FOOTER_SCAN bytes; an index whose CRC-32 does not match; an index that is
-encrypted or stored with a method other than `storing` or `lzma`; counts and sizes over
+encrypted or stored with a method other than a single `storing` or `lzma`; counts and sizes over
 the caps below (bytes read, bytes decoded, name length, and the total length of the
 folder-and-name paths, which a shared folder name could otherwise multiply); and offsets,
 lengths or blocks (header, directory and data blocks) that lie outside the file or overlap.
 
 All text from the archive (file and folder names) is untrusted. summarise() passes it
-through detect.clean() before it is shown, and never shows an archive's method string.
+through detect.clean() before it is shown, and never shows an archive's method string: a
+supported chain is shown by gitfurl's own stage names (Method.kind), anything else only as
+"a method gitfurl does not handle".
 
 The layout is restated from FreeArc's published format notes; no FreeArc code is used.
 """
@@ -42,8 +45,15 @@ MAX_NAME = 4096  # bytes of one stored string: a file name, folder name or metho
 MAX_PATH_TOTAL = 128 * 1024 * 1024  # characters of all folder/name paths of one archive
 MAX_FILES = 1_000_000
 MAX_BLOCKS = 100_000
-DICT_CAP = 1 << 30  # 1 GiB: larger LZMA dictionaries are not handled
+DICT_CAP = 1 << 30  # 1 GiB: larger LZMA dictionaries, rep windows or delta blocks are refused
+DELTA_DEFAULT = 8 << 20  # delta's block size when the method names none
+REP_DEFAULT = 64 << 20  # rep's window size when the method names none
+MAX_METHOD_TEXT = 2048  # bytes of one compressor string (FreeArc's own limit)
+MAX_STAGE_TEXT = 512  # bytes of one method in it
+MAX_FIELDS = 200  # ":"-separated fields of one method
+MAX_STAGES = 8  # methods in one chain that gitfurl decodes
 MAX_EXAMPLES = 3  # unsafe names shown in a summary
+MAX_KINDS = 4  # chains of supported methods named in a summary (besides storing and lzma)
 NAME_LIMIT = 80  # characters of one name shown in a summary
 
 HEADER_BLOCK = 1
@@ -58,6 +68,7 @@ _MEM_UNITS = {"b": 1, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30}
 _MATCH_FINDERS = {"bt2", "bt3", "bt4", "hc4", "ht4"}
 _PRESETS = {"fastest", "fast", "normal", "max", "ultra"}
 _CIPHERS = ("aes", "blowfish", "twofish", "serpent")
+_REP_LETTERS = frozenset("blcdsha")
 _DRIVE = re.compile(r"^[A-Za-z]:")
 _SEP = re.compile(r"[/\\]")
 _CONTROL = re.compile("[\x00-\x1f\x7f-\x9f]")  # exactly Unicode category Cc
@@ -68,19 +79,35 @@ class FarcError(ValueError):
 
 
 @dataclass(frozen=True)
+class Stage:
+    """One method of a supported chain, by gitfurl's own name (never the archive's text)."""
+
+    name: str  # "storing", "lzma", "exe", "delta" or "rep"
+    lzma: dict | None = None  # lzma: dict_size, lc, lp, pb
+    size: int = 0  # delta: block size; rep: window size (from the method's parameters)
+
+
+@dataclass(frozen=True)
 class Method:
     """A classified compressor string. The string itself is not kept, so it cannot be shown."""
 
     supported: bool
     reason: str = ""  # generic wording only; never contains the archive's text
-    lzma: dict | None = None  # dict_size, lc, lp, pb for a supported lzma method
+    lzma: dict | None = None  # dict_size, lc, lp, pb when the method is a single lzma
     encrypted: bool = False
+    stages: tuple[Stage, ...] = ()  # in the archive's order: stages[0] gives the file data
 
     @property
     def kind(self) -> str:
+        """Safe to show: gitfurl's own stage names joined with "+", or KIND_OTHER."""
         if not self.supported:
             return KIND_OTHER
-        return KIND_LZMA if self.lzma else KIND_STORING
+        return "+".join(st.name for st in self.stages)
+
+    @property
+    def single(self) -> bool:
+        """A single storing or lzma: the only methods used for the archive's own index."""
+        return self.supported and self.kind in (KIND_STORING, KIND_LZMA)
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,28 +166,25 @@ def _parse_mem(s: str) -> int | None:
     return n * _MEM_UNITS[unit] if unit in _MEM_UNITS else None
 
 
-def parse_method(text: str) -> Method:
-    """Classify one compressor string. Never raises."""
-    encrypted = any(c in text.lower() for c in _CIPHERS)
+def _parse_size(s: str) -> int | None:
+    """Sizes in delta and rep parameters: one optional '=', digits, then an optional lower-case
+    unit (as _parse_mem)."""
+    t = s.removeprefix("=")
+    i = 0
+    while i < len(t) and t[i].isascii() and t[i].isdigit():
+        i += 1
+    if i == 0 or (i < len(t) and t[i] not in "bkmg^"):
+        return None
+    return _parse_mem(t)
 
-    def no(reason: str) -> Method:
-        return Method(False, reason, encrypted=encrypted)
 
-    if encrypted:
-        return no("encryption")
-    if "+" in text:
-        return no("a chain of methods")
-    params = text.split(":")
-    name = params[0]
-    if name == "storing":
-        return Method(True) if len(params) == 1 else no(KIND_OTHER)
-    if name != "lzma":
-        return no(KIND_OTHER)
+def _parse_lzma(params: list[str]) -> tuple[dict | None, str]:
+    """lzma settings (dict_size, lc, lp, pb), or None and a generic reason."""
     d: int | None = 64 << 20
     lc: int | None = 3
     lp: int | None = 0
     pb: int | None = 2
-    for raw in params[1:]:
+    for raw in params:
         p = raw.removeprefix("*")
         value: int | None = 0
         if p.startswith("d"):
@@ -186,14 +210,104 @@ def parse_method(text: str) -> Method:
         else:
             value = None
         if value is None and not raw.startswith("*"):
-            return no("lzma settings gitfurl does not understand")
+            return None, "lzma settings gitfurl does not understand"
     if d is None or lc is None or lp is None or pb is None:
-        return no("lzma settings gitfurl does not understand")
+        return None, "lzma settings gitfurl does not understand"
     if d > DICT_CAP:
-        return no(f"an lzma dictionary over the {DICT_CAP >> 20} MiB limit")
+        return None, f"an lzma dictionary over the {DICT_CAP >> 20} MiB limit"
     if lc > 4 or lp > 4 or lc + lp > 4 or pb > 4:
-        return no("lzma settings the decoder does not support")
-    return Method(True, lzma={"dict_size": max(d, 4096), "lc": lc, "lp": lp, "pb": pb})
+        return None, "lzma settings the decoder does not support"
+    return {"dict_size": max(d, 4096), "lc": lc, "lp": lp, "pb": pb}, ""
+
+
+def _parse_delta(params: list[str]) -> int | None:
+    """The block size of a delta stage (default 8 MiB), or None."""
+    size = DELTA_DEFAULT
+    for p in params:
+        if p == "x":
+            continue
+        size = _parse_size(p.removeprefix("b"))
+        if size is None:
+            return None
+    return size
+
+
+def _parse_rep(params: list[str]) -> int | None:
+    """The window size of a rep stage (default 64 MiB), or None. The other parameters only
+    steer compression; they are checked for form and otherwise ignored."""
+    window = REP_DEFAULT
+    for p in params:
+        if p == "max":
+            continue
+        if p[:1] in _REP_LETTERS:
+            value = p[1:]
+            if p[0] in "bd":
+                size = _parse_size(value)
+                if size is None:
+                    return None
+                if p[0] == "b":
+                    window = size
+            elif _parse_int(value) is None:
+                return None
+        elif (p.endswith("%") and _parse_int(p[:-1]) is not None) \
+                or _parse_int(p) is not None:
+            continue  # a percentage, or the minimum match length
+        else:
+            size = _parse_size(p)
+            if size is None:
+                return None
+            window = size
+    return window
+
+
+def _parse_stage(text: str) -> tuple[Stage | None, str]:
+    params = text.split(":")
+    name, rest = params[0], params[1:]
+    if name == "storing":
+        return (Stage("storing"), "") if not rest else (None, KIND_OTHER)
+    if name == "exe":
+        return (Stage("exe"), "") if not rest else (None, KIND_OTHER)
+    if name == "lzma":
+        opts, reason = _parse_lzma(rest)
+        return (Stage("lzma", lzma=opts), "") if opts else (None, reason)
+    if name in ("delta", "rep"):
+        size = _parse_delta(rest) if name == "delta" else _parse_rep(rest)
+        if size is None:
+            return None, f"{name} settings gitfurl does not understand"
+        if size > DICT_CAP:
+            return None, f"a {name} buffer over the {DICT_CAP >> 20} MiB limit"
+        if name == "rep" and size == 0:
+            return None, "rep settings gitfurl does not understand"
+        return Stage(name, size=size), ""
+    return None, KIND_OTHER
+
+
+def parse_method(text: str) -> Method:
+    """Classify one compressor string: a chain of storing, lzma, exe, delta and rep stages,
+    or unsupported. Never raises; the string itself is not kept."""
+    encrypted = any(c in text.lower() for c in _CIPHERS)
+
+    def no(reason: str) -> Method:
+        return Method(False, reason, encrypted=encrypted)
+
+    if encrypted:
+        return no("encryption")
+    if len(text.encode("utf-8", "surrogatepass")) >= MAX_METHOD_TEXT:
+        return no(KIND_OTHER)
+    parts = text.split("+")
+    if len(parts) > MAX_STAGES:
+        return no("a longer chain of methods than gitfurl decodes")
+    stages = []
+    for part in parts:
+        if len(part.encode("utf-8", "surrogatepass")) >= MAX_STAGE_TEXT \
+                or part.count(":") >= MAX_FIELDS:
+            return no(KIND_OTHER)
+        stage, reason = _parse_stage(part)
+        if stage is None:
+            return no(reason)
+        stages.append(stage)
+    single = stages[0].lzma if len(stages) == 1 else None
+    return Method(True, lzma=single, stages=tuple(stages))
 
 
 class _Buf:
@@ -269,12 +383,12 @@ class _Reader:
 
     def control_block(self, method_text: str, pos: int, compsize: int, origsize: int,
                       crc: int) -> _Buf:
-        """Read, decode (storing or lzma only) and CRC-check one index block."""
+        """Read, decode (a single storing or lzma only) and CRC-check one index block."""
         method = parse_method(method_text)
         if method.encrypted:
             raise FarcError("the archive's own index is encrypted; gitfurl does not handle "
                             "encrypted archives")
-        if not method.supported:
+        if not method.single:
             raise FarcError(f"the archive's index uses {KIND_OTHER}")
         if origsize > MAX_CONTROL_BLOCK or compsize > MAX_CONTROL_BLOCK:
             raise FarcError("the archive's index is larger than gitfurl reads")
@@ -516,12 +630,22 @@ def summarise(arc: Archive) -> list[str]:
     folders = sum(1 for e in arc.entries if e.is_dir and e.path not in ("", "."))
     lines = [(f"{_n(files, 'file', 'files')} and {_n(folders, 'folder', 'folders')}, "
              f"{_size(arc.total_size)} in total")]
-    kinds = {KIND_STORING: 0, KIND_LZMA: 0, KIND_OTHER: 0}
+    kinds = {KIND_STORING: 0, KIND_LZMA: 0}
+    other = 0
     for blk in arc.blocks:
-        kinds[blk.method.kind] += 1
-    parts = [f"{kinds[KIND_STORING]:,} storing", f"{kinds[KIND_LZMA]:,} lzma"]
-    if kinds[KIND_OTHER]:
-        parts.append(f"{kinds[KIND_OTHER]:,} {KIND_OTHER}")
+        if blk.method.supported:
+            kinds[blk.method.kind] = kinds.get(blk.method.kind, 0) + 1
+        else:
+            other += 1
+    # The kinds are gitfurl's own stage names, never the archive's text. At most MAX_KINDS
+    # chains are named besides storing and lzma; the rest are counted together.
+    listed = list(kinds.items())
+    parts = [f"{n:,} {kind}" for kind, n in listed[:2 + MAX_KINDS]]
+    rest = sum(n for _, n in listed[2 + MAX_KINDS:])
+    if rest:
+        parts.append(f"{rest:,} with other chains of these methods")
+    if other:
+        parts.append(f"{other:,} {KIND_OTHER}")
     lines.append(f"{_n(len(arc.blocks), 'data block', 'data blocks')}: " + ", ".join(parts))
     if arc.sfx_size:
         lines.append(f"the archive starts after a {_size(arc.sfx_size)} program "

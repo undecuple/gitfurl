@@ -158,9 +158,10 @@ class Methods(FarcTestBase):
     def test_parse_method_table(self):
         ok = {"storing": KIND_STORING, "lzma": KIND_LZMA, "lzma:1gb": KIND_LZMA,
               "lzma:d64m:lc4:lp0:pb4": KIND_LZMA, "lzma:4mb:normal:bt4:128": KIND_LZMA,
-              "lzma:mfbt4:fb32:mc16:a1": KIND_LZMA, "lzma:*zz": KIND_LZMA, "lzma:31": KIND_LZMA}
+              "lzma:mfbt4:fb32:mc16:a1": KIND_LZMA, "lzma:*zz": KIND_LZMA, "lzma:31": KIND_LZMA,
+              "lzma+storing": "lzma+storing"}
         bad = ["lzma:1025mb", "lzma:2gb", "lzma:lc5", "lzma:lc3:lp2",
-               "lzma:pb9", "lzma:zz", "lzma:", "storing:1", "foo+lzma", "lzma+storing",
+               "lzma:pb9", "lzma:zz", "lzma:", "storing:1", "foo+lzma", "lzma+foo",
                "zzzmethod:42", "", "LZMA", "lzma:lc\u0663", "lzma:1mb+aes-256/ctr:n1000"]
         for text, kind in ok.items():
             self.assertEqual(farc.parse_method(text).kind, kind, text)

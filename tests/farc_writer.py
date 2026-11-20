@@ -1,9 +1,10 @@
 """A small FreeArc writer for the tests: archives are built in memory, as bytes.
 
-Storing, and raw LZMA1 from Python's own lzma module. The bytes are written to a temporary
-folder only for a test; no archive file is kept in the repository. It is written from the
-same reading of the format as gitfurl/farc.py, so agreement between the two does not show
-agreement with FreeArc itself.
+Storing, raw LZMA1 from Python's own lzma module, and test-only encoders for exe, delta and
+rep (ENCODERS), written from the same clean-room specifications as gitfurl/farc_codecs.py,
+so agreement between the two does not show agreement with FreeArc itself. Chains are encoded
+left to right. The bytes are written to a temporary folder only for a test; no archive file
+is kept in the repository.
 """
 
 import lzma
@@ -43,10 +44,189 @@ def lzma_opts(method: str) -> dict:
 
 
 def pack(method: str, data: bytes) -> bytes:
-    if method.startswith("lzma") and "+" not in method:
-        f = [{"id": lzma.FILTER_LZMA1, **lzma_opts(method)}]
-        return lzma.compress(data, format=lzma.FORMAT_RAW, filters=f)
-    return data  # storing, or a method the reader only names (its bytes are never decoded)
+    """Encode data with a chain of known methods, left to right. A method the writer does
+    not know leaves the data as it is (the reader only names it; its bytes are never
+    decoded)."""
+    stages = method.split("+")
+    if not all(st.split(":")[0] in ENCODERS for st in stages):
+        return data
+    for st in stages:
+        data = ENCODERS[st.split(":")[0]](data, st)
+    return data
+
+
+def _lzma(data: bytes, method: str) -> bytes:
+    f = [{"id": lzma.FILTER_LZMA1, **lzma_opts(method)}]
+    return lzma.compress(data, format=lzma.FORMAT_RAW, filters=f)
+
+
+# --- exe (x86 branch converter), encode direction ------------------------------------------
+EXE_ROUND = 262144
+
+
+def x86_walk(buf: bytearray, base: int, rejected: set, decode: bool) -> int:
+    """One piece of the x86 walk, a byte at a time. rejected: stream positions of rejected
+    opcodes (updated). Returns where the walk stopped."""
+    n, i = len(buf), 0
+    while i + 4 < n:
+        if buf[i] not in (0xE8, 0xE9):
+            i += 1
+            continue
+        at = base + i
+        hist = [t for t in (1, 2, 3) if at - t in rejected]
+        ok = len(hist) < 2
+        if ok and hist:
+            ok = buf[i + 1 + 3 - hist[0]] not in (0, 0xFF)
+        if ok:
+            ok = buf[i + 4] in (0, 0xFF)
+        if not ok:
+            rejected.add(at)
+            i += 1
+            continue
+        v = int.from_bytes(buf[i + 1:i + 5], "little")
+        a = (at + 5) % (1 << 32)
+        w = (v - a if decode else v + a) % (1 << 32)
+        if hist:
+            q = 3 - hist[0]
+            while ((w >> (8 * q)) & 0xFF) in (0, 0xFF):
+                v = w ^ ((1 << (8 * (q + 1))) - 1)
+                w = (v - a if decode else v + a) % (1 << 32)
+        buf[i + 1:i + 4] = (w % (1 << 24)).to_bytes(3, "little")
+        buf[i + 4] = 0xFF if (w >> 24) & 1 else 0
+        i += 5
+    return max(i, n - 4)
+
+
+def exe_encode(data: bytes, method: str = "exe", decode: bool = False) -> bytes:
+    """FreeArc's call schedule: rounds of EXE_ROUND bytes with 0-4 bytes carried; a round of
+    5 bytes or fewer passes unchanged."""
+    out, carry, base, at, rejected = bytearray(), b"", 0, 0, set()
+    while True:
+        new = data[at:at + EXE_ROUND - len(carry)]
+        at += len(new)
+        buf = bytearray(carry + new)
+        if not buf:
+            return bytes(out)
+        if len(buf) <= 5:
+            out += buf
+            base += len(buf)
+            carry = b""
+            continue
+        done = x86_walk(buf, base, rejected, decode)
+        out += buf[:done]
+        carry = bytes(buf[done:])
+        base += done
+
+
+# --- delta (binary tables), encode direction -----------------------------------------------
+def delta_block(data: bytes, tables=()) -> bytes:
+    """One delta block. tables: [(gap, shape, rows)], in order, as in the stream."""
+    buf = bytearray(data)
+    pos = 0
+    for gap, shape, rows in tables:
+        width = shape.bit_length() - 1
+        start = pos + gap
+        end = start + width * rows
+        kept = [c for c in range(width) if shape >> c & 1]
+        diffed = [c for c in range(width) if not shape >> c & 1]
+        orig = bytes(buf[start:end])
+        runs = []
+        for c in diffed:
+            if runs and runs[-1][0] + runs[-1][1] == c:
+                runs[-1][1] += 1
+            else:
+                runs.append([c, 1])
+        for r in range(1, rows):
+            for c0, n in runs:
+                a = start + r * width + c0
+                cur = int.from_bytes(orig[a - start:a - start + n], "little")
+                prev = int.from_bytes(orig[a - start - width:a - start - width + n], "little")
+                buf[a:a + n] = ((cur - prev) % (1 << (8 * n))).to_bytes(n, "little")
+        if 0 < len(kept) < width:
+            t = bytes(buf[start:end])
+            front = bytes(t[r * width + c] for r in range(rows) for c in kept)
+            back = bytes(t[r * width + c] for r in range(rows) for c in diffed)
+            buf[start:end] = front + back
+        pos = end
+    count = len(tables)
+    return (u32(len(data)) + u32(4 * count)
+            + b"".join(u32(t[0]) for t in tables) + b"".join(u32(t[1]) for t in tables)
+            + b"".join(u32(t[2]) for t in tables) + bytes(buf))
+
+
+def delta_encode(data: bytes, method: str = "delta", block: int = 8 << 20, find=None) -> bytes:
+    """Blocks of up to `block` bytes; find(chunk) -> tables for that chunk (default: one
+    table of 4-byte records over the whole chunk, if it holds at least 2 records)."""
+    def default(chunk):
+        rows = len(chunk) // 4
+        return [(0, 16, rows)] if rows >= 2 else []
+    find = find or default
+    return b"".join(delta_block(data[i:i + block], find(data[i:i + block]))
+                    for i in range(0, len(data), block))
+
+
+# --- rep (long repeats), encode direction --------------------------------------------------
+def rep_stream(window: int, blocks) -> bytes:
+    """A rep stream from explicit blocks: [(lits: [bytes] (N+1 runs), matches: [(len, dist)])].
+    Nothing is checked, so damaged streams can be made too."""
+    out = u32(window)
+    for lits, matches in blocks:
+        body = u32(len(matches)) + b"".join(u32(m[0]) for m in matches)
+        body += b"".join(u32(m[1]) for m in matches)
+        body += b"".join(u32(len(x)) for x in lits) + b"".join(lits)
+        out += u32(len(body)) + body
+    return out + u32(0)
+
+
+def rep_encode(data: bytes, method: str = "rep", window: int | None = None,
+               block: int = 1 << 16, min_len: int = 8) -> bytes:
+    """A simple greedy encoder: blocks of `block` input bytes, matches of at least min_len
+    bytes found through 4-byte keys, distances up to the window."""
+    if window is None:
+        window = 64 << 20
+        for p in method.split(":")[1:]:
+            if p.endswith("kb"):
+                window = int(p[:-2]) << 10
+            elif p.endswith("mb"):
+                window = int(p[:-2]) << 20
+            elif p.endswith("b") and p[:-1].isdigit():
+                window = int(p[:-1])
+    last: dict[bytes, int] = {}
+    blocks, i = [], 0
+    while i < len(data) or not blocks:
+        end = min(len(data), i + block)
+        lits, matches, run = [], [], bytearray()
+        while i < end:
+            key = data[i:i + 4]
+            j = last.get(key) if len(key) == 4 else None
+            if len(key) == 4:
+                last[key] = i
+            n = 0
+            if j is not None and 0 < i - j <= window:
+                while i + n < len(data) and data[j + n] == data[i + n] and n < 1 << 20:
+                    n += 1
+            if n >= min_len:
+                lits.append(bytes(run))
+                run = bytearray()
+                matches.append((n, i - j))
+                i += n
+            else:
+                run.append(data[i])
+                i += 1
+        lits.append(bytes(run))
+        blocks.append((lits, matches))
+        if i >= len(data):
+            break
+    return rep_stream(window, blocks)
+
+
+ENCODERS = {
+    "storing": lambda data, method: data,
+    "lzma": _lzma,
+    "exe": exe_encode,
+    "delta": delta_encode,
+    "rep": rep_encode,
+}
 
 
 def local_descriptor(btype: int, method: str, orig: int, comp: int, crc: int,

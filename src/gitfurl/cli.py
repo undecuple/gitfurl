@@ -105,8 +105,8 @@ def build_parser() -> argparse.ArgumentParser:
                       help=f"with --scan: stop the scan after this long (default {SCAN_TIMEOUT_S:g})")
     inst.add_argument("--yes", action="store_true", help="approve the run without prompting")
     ext = sub.add_parser(
-        "extract", help="extract FreeArc archives (storing and lzma only) into a prefix "
-                        "without running the installer")
+        "extract", help="extract FreeArc archives (storing, lzma, exe, delta and rep) into a "
+                        "prefix without running the installer")
     ext.add_argument("installer", help="the installer; FreeArc archives beside it are read")
     ext.add_argument("--prefix", required=True, help="name of an existing dedicated prefix; "
                      "files go to C:\\Games\\PREFIX in it")
