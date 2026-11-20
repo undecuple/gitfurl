@@ -320,7 +320,7 @@ def _extract_command(args) -> int:
     try:
         result = extract(plan)
     except ExtractRefused as exc:
-        print(f"error: {exc}. Nothing was written.", file=sys.stderr)
+        print(f"error: {exc}. {exc.outcome()}", file=sys.stderr)
         return 1
     for line in result.lines():
         print(line)

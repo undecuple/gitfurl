@@ -8,25 +8,30 @@ own steps, so the result may not work.
 
 Refused before anything is written: no FreeArc archive found; an archive gitfurl cannot read;
 any data block with a method other than storing or a single lzma (including encryption); a
-name that is not a safe relative path; two names that would be the same file (letter case
-ignored, as Windows does); a name used both as a file and as a folder; too little free space;
-a destination folder that already exists; a prefix that does not exist.
+name that is not a safe relative path; a name Windows cannot use (a trailing dot or space, a
+character from <>:"|?*, or a device name such as CON or NUL); two files, or a file and a
+folder, whose names would be the same with letter case ignored (as Windows does); more than
+MAX_FOLDERS folders; too little free space (blocks and inodes); a destination folder that
+already exists; a prefix that does not exist. Folders whose names differ only in letter case
+are one folder, as on Windows: the first spelling is used.
 
 While writing: every file is created new (O_CREAT|O_EXCL|O_NOFOLLOW) inside folders this
 run created, opened relative to the destination's own file descriptor, so nothing outside it
 is written and nothing is overwritten. Output per data block stops at the sum of its files'
 declared sizes. Each file's CRC-32 is checked; a mismatch is reported and the file is kept.
-Nothing from an archive is run or passed to a program. Stop (a cancel flag, or Ctrl-C) ends
-the extraction between chunks; files already written stay, and nothing is deleted.
+File times are set through the open file. Nothing from an archive is run or passed to a
+program. Stop (a cancel flag, or Ctrl-C) ends the extraction between chunks; files already
+written stay, and nothing is deleted. At most _Tree.CACHE folders are held open at a time.
 """
 
 from __future__ import annotations
 
 import lzma
 import os
-import shutil
+import re
 import threading
 import zlib
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -39,6 +44,12 @@ MAX_DIR_ENTRIES = 10_000  # directory entries looked at when searching for them
 CHUNK = 1 << 20  # bytes read or decoded at a time (also how often Stop is checked)
 NAME_MAX = 255  # bytes of one path part (Linux)
 PATH_MAX = 4000  # bytes of one relative path
+MAX_FOLDERS = 1_000_000  # distinct folders in one extraction (all archives together)
+FILE = -1  # in plan_extract's name table: the name is a file
+
+_WIN_BAD = re.compile(r'[<>:"|?*]')
+_WIN_DEVICES = frozenset(["CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+                          *(f"LPT{i}" for i in range(1, 10))])
 
 EXTRACTS_ONLY = ("This extracts files only. The installer is not run: no registry entries, no "
                  "redistributables, no shortcuts and none of its own steps. The result may "
@@ -46,15 +57,29 @@ EXTRACTS_ONLY = ("This extracts files only. The installer is not run: no registr
 
 
 class ExtractRefused(ValueError):
-    """Native extraction cannot be used for this installer, or not now. Nothing was written."""
+    """Native extraction cannot be used for this installer, or not now. No file was written.
+
+    `created` lists the empty folders this run made before the refusal (only when creating
+    the destination itself failed, for example in a race); they are kept, not deleted.
+    """
+
+    def __init__(self, message: str, created=()):
+        super().__init__(message)
+        self.created = [Path(p) for p in created]
+
+    def outcome(self) -> str:
+        if not self.created:
+            return "Nothing was written."
+        return ("No file was written; empty folders created and kept: "
+                + ", ".join(str(p) for p in self.created))
 
 
 @dataclass
 class ArchivePlan:
     path: Path
     archive: farc.Archive
-    files: list[tuple[tuple[str, ...], farc.Entry]]  # in archive order
-    dirs: list[tuple[str, ...]]
+    files: list[tuple[int, str, farc.Entry]]  # (folder id, name, entry), in archive order
+    dirs: list[int]  # folder ids of the archive's folder entries
 
 
 @dataclass
@@ -68,6 +93,17 @@ class ExtractPlan:
     file_count: int
     max_dict: int  # largest lzma dictionary the decoder will allocate
     notes: list[str] = field(default_factory=list)
+    # folder id -> (parent id, name on disk); id 0 is the destination itself
+    folders: list[tuple[int, str]] = field(default_factory=lambda: [(-1, "")])
+
+    def parts(self, folder: int) -> list[str]:
+        """The folder's path below the destination, as parts."""
+        out: list[str] = []
+        while folder > 0:
+            folder, name = self.folders[folder]
+            out.append(name)
+        out.reverse()
+        return out
 
     @property
     def target(self) -> str:
@@ -84,11 +120,26 @@ class ExtractPlan:
         if os.path.lexists(self.dest):
             return (f"the destination already exists: {self.dest}. gitfurl only extracts "
                     "into a new folder")
-        free = shutil.disk_usage(drive_c).free
-        if free < self.total_size:
-            return (f"not enough free space: {farc._size(self.total_size)} needed, "
-                    f"{farc._size(free)} free")
+        st = os.statvfs(drive_c)
+        block = st.f_frsize or st.f_bsize or 4096
+        need = self.disk_size(block)
+        free = st.f_bavail * block
+        if free < need:
+            return (f"not enough free space: about {farc._size(need)} needed on disk "
+                    f"({farc._size(self.total_size)} of file data), {farc._size(free)} free")
+        inodes = self.file_count + len(self.folders)
+        if st.f_files and st.f_favail < inodes:
+            return (f"not enough free inodes: {inodes:,} files and folders to create, "
+                    f"{st.f_favail:,} free")
         return None
+
+    def disk_size(self, block: int) -> int:
+        """Bytes on disk: each file rounded up to whole blocks, one block per folder."""
+        blocks = len(self.folders)
+        for ap in self.archives:
+            for _, _, entry in ap.files:
+                blocks += -(-entry.size // block)
+        return blocks * block
 
     def describe(self) -> list[str]:
         lines = [
@@ -160,7 +211,11 @@ def plan_extract(installer: Path, prefix_name: str,
                              "that starts with 'ArC' 0x01)")
     prefix = prefix_path(prefix_name, env)
     archives: list[ArchivePlan] = []
-    taken: dict[tuple[str, ...], str] = {}  # case-folded path -> "file" or "folder"
+    folders: list[tuple[int, str]] = [(-1, "")]  # id -> (parent id, first spelling)
+    # (parent folder id, case-folded name) -> folder id, or FILE. One step per path part, so
+    # the work and memory are linear in the names' length, however deep the paths are.
+    names: dict[tuple[int, str], int] = {}
+    merged: str | None = None
     total = count = max_dict = 0
     for path in paths:
         name = clean(path.name, 80)
@@ -183,31 +238,57 @@ def plan_extract(installer: Path, prefix_name: str,
                     continue
                 raise ExtractRefused(f"{name} holds a file with no name")
             _check_length(name, entry.path, parts)
-            key = tuple(p.casefold() for p in parts)
-            kind = "folder" if entry.is_dir else "file"
-            for i in range(1, len(key)):
-                if taken.get(key[:i]) == "file":
-                    raise ExtractRefused(f"{name}: {clean(entry.path, 80)!r} would go inside "
-                                         "a file of the same name")
-                taken.setdefault(key[:i], "folder")
-            if key in taken and (kind == "file" or taken[key] == "file"):
-                raise ExtractRefused(f"{name}: two entries would be the same file or folder "
-                                     f"(letter case ignored, as Windows does): "
+            if any(_windows_problem(p) for p in parts):
+                raise ExtractRefused(f"{name} holds a name Windows cannot use: "
                                      f"{clean(entry.path, 80)!r}")
-            taken[key] = kind
+            same = (f"{name}: two entries would be the same file or folder (letter case "
+                    f"ignored, as Windows does): {clean(entry.path, 80)!r}")
+            cur, last = 0, len(parts) - 1
+            for i, part in enumerate(parts):
+                key = (cur, part.casefold())
+                got = names.get(key)
+                if i == last and not entry.is_dir:
+                    if got is not None:
+                        raise ExtractRefused(same)
+                    names[key] = FILE
+                    break
+                if got == FILE:
+                    if i < last:
+                        raise ExtractRefused(f"{name}: {clean(entry.path, 80)!r} would go "
+                                             "inside a file of the same name")
+                    raise ExtractRefused(same)
+                if got is None:
+                    if len(folders) > MAX_FOLDERS:
+                        raise ExtractRefused(f"more than {MAX_FOLDERS:,} folders")
+                    got = len(folders)
+                    folders.append((cur, part))
+                    names[key] = got
+                elif merged is None and folders[got][1] != part:
+                    merged = (f"folder names that differ only in letter case are one folder, "
+                              f"as on Windows (the first spelling is used), for example "
+                              f"{clean(part, 40)!r} goes into {clean(folders[got][1], 40)!r}")
+                cur = got
             if entry.is_dir:
-                ap.dirs.append(tuple(parts))
+                ap.dirs.append(cur)
             else:
-                ap.files.append((tuple(parts), entry))
+                ap.files.append((cur, parts[-1], entry))
                 total += entry.size
                 count += 1
         for blk in arc.blocks:
             if blk.method.lzma:
                 max_dict = max(max_dict, _dict_size(blk))
         archives.append(ap)
+    if merged:
+        notes.append(merged)
     dest = prefix / "drive_c" / "Games" / prefix_name
     return ExtractPlan(installer, prefix_name, prefix, dest, archives, total, count, max_dict,
-                       notes)
+                       notes, folders)
+
+
+def _windows_problem(part: str) -> bool:
+    """True for a name Windows (and Wine's Windows paths) would not open as itself."""
+    return (part[-1] in ". " or bool(_WIN_BAD.search(part))
+            or part.split(".", 1)[0].rstrip(" ").upper() in _WIN_DEVICES)
 
 
 def _check_length(name: str, stored: str, parts: list[str]) -> None:
@@ -266,72 +347,123 @@ class ExtractResult:
 
 
 class _Tree:
-    """Folders under the destination, created by this run and opened without following links."""
+    """Folders under the destination, created by this run and opened without following links.
 
-    def __init__(self, root_fd: int):
-        self.fds: dict[tuple[str, ...], int] = {(): root_fd}
+    At most CACHE folder fds are kept open (least recently used are closed), so the number of
+    folders and the depth of a path do not run into the open-file limit. A folder that is not
+    open is reached from its nearest open ancestor (or the destination), one part at a time,
+    with at most two fds of the walk open at once.
+    """
+
+    CACHE = 64
+
+    def __init__(self, root_fd: int, folders: list[tuple[int, str]]):
+        self.root = root_fd
+        self.folders = folders
+        self.open: OrderedDict[int, int] = OrderedDict()  # folder id -> fd
         self.made = 0
 
-    def fd(self, parts: tuple[str, ...]) -> int:
+    def fd(self, folder: int) -> int:
         """The folder's fd, creating it and any missing parents (no recursion: paths can be
         deep). Only folders this run made exist below the root, so an existing name is one
-        of them; O_NOFOLLOW and O_DIRECTORY refuse anything else."""
-        i = len(parts)
-        while parts[:i] not in self.fds:
-            i -= 1
-        while i < len(parts):
-            parent = self.fds[parts[:i]]
-            try:
-                os.mkdir(parts[i], 0o755, dir_fd=parent)
-                self.made += 1
-            except FileExistsError:
-                pass
-            self.fds[parts[:i + 1]] = os.open(
-                parts[i], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                dir_fd=parent)
-            i += 1
-        return self.fds[parts]
+        of them; O_NOFOLLOW and O_DIRECTORY refuse anything else. The fd stays valid until
+        the next call."""
+        if folder == 0:
+            return self.root
+        if folder in self.open:
+            self.open.move_to_end(folder)
+            return self.open[folder]
+        chain = []
+        cur = folder
+        while cur != 0 and cur not in self.open:
+            chain.append(cur)
+            cur = self.folders[cur][0]
+        parent = self.root if cur == 0 else self.open[cur]
+        walked = None  # an fd this walk opened, closed once its child is open
+        try:
+            for fid in reversed(chain):
+                name = self.folders[fid][1]
+                try:
+                    os.mkdir(name, 0o755, dir_fd=parent)
+                    self.made += 1
+                except FileExistsError:
+                    pass
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                                | os.O_CLOEXEC, dir_fd=parent)
+                if walked is not None:
+                    os.close(walked)
+                walked = parent = child
+        except BaseException:
+            if walked is not None:
+                os.close(walked)
+            raise
+        self.open[folder] = walked
+        if len(self.open) > self.CACHE:
+            os.close(self.open.popitem(last=False)[1])
+        return walked
 
     def close(self) -> None:
-        for parts, fd in self.fds.items():
-            if parts:
-                os.close(fd)
+        for fd in self.open.values():
+            os.close(fd)
+        self.open.clear()
 
 
-def _open_dir(parent: int, name: str, create: bool) -> int:
-    if create:
-        os.mkdir(name, 0o755, dir_fd=parent)
+def _open_dir(parent: int, name: str) -> int:
     return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
                    dir_fd=parent)
 
 
 def _make_dest(plan: ExtractPlan) -> int:
-    """Create the destination folder and return its fd. Raises ExtractRefused."""
+    """Create the destination folder and return its fd. Raises ExtractRefused, which lists
+    the (empty) folders this call created before it failed."""
     try:
         drive_c = os.open(plan.prefix / "drive_c",
                           os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError as exc:
         raise ExtractRefused(f"the prefix's drive_c could not be opened ({exc.strerror})") \
             from exc
+    created: list[Path] = []
     try:
         try:
-            games = _open_dir(drive_c, "Games", create=False)
+            games = _open_dir(drive_c, "Games")
         except FileNotFoundError:
-            games = _open_dir(drive_c, "Games", create=True)
+            try:
+                os.mkdir("Games", 0o755, dir_fd=drive_c)
+                created.append(plan.dest.parent)
+            except FileExistsError:  # made by something else meanwhile; opened as any other
+                pass
+            games = _open_dir(drive_c, "Games")
         try:
-            return _open_dir(games, plan.prefix_name, create=True)
+            os.mkdir(plan.prefix_name, 0o755, dir_fd=games)
+            created.append(plan.dest)
+            return _open_dir(games, plan.prefix_name)
         finally:
             os.close(games)
     except FileExistsError as exc:
-        raise ExtractRefused(f"the destination already exists: {plan.dest}") from exc
+        raise ExtractRefused(f"the destination already exists: {plan.dest}", created) from exc
     except OSError as exc:
-        raise ExtractRefused(f"the destination could not be created ({exc.strerror})") from exc
+        raise ExtractRefused(f"the destination could not be created ({exc.strerror})",
+                             created) from exc
     finally:
         os.close(drive_c)
 
 
 def _chunks(fd: int, blk: farc.DataBlock, stop):
-    """The block's decoded bytes, exactly blk.origsize of them, CHUNK at a time."""
+    """The block's decoded bytes, exactly blk.origsize of them, CHUNK at a time. The lzma
+    decoder is made here, before the block's first file is opened; raises _DataError."""
+    dec = None
+    if blk.method.lzma is not None:
+        opts = dict(blk.method.lzma, dict_size=_dict_size(blk))
+        try:
+            dec = lzma.LZMADecompressor(lzma.FORMAT_RAW,
+                                        filters=[{"id": lzma.FILTER_LZMA1, **opts}])
+        except (lzma.LZMAError, MemoryError, ValueError) as exc:
+            raise _DataError("the lzma decoder could not be started (not enough memory?)") \
+                from exc
+    return _decode(fd, blk, dec, stop)
+
+
+def _decode(fd: int, blk: farc.DataBlock, dec, stop):
     pos, end = blk.offset, blk.offset + blk.compsize
 
     def read_in() -> bytes:
@@ -344,15 +476,13 @@ def _chunks(fd: int, blk: farc.DataBlock, stop):
         return data
 
     left = blk.origsize
-    if blk.method.lzma is None:  # storing: compsize == origsize was checked by farc
+    if dec is None:  # storing: compsize == origsize was checked by farc
         while left:
             stop()
             data = read_in()
             left -= len(data)
             yield data
         return
-    opts = dict(blk.method.lzma, dict_size=_dict_size(blk))
-    dec = lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=[{"id": lzma.FILTER_LZMA1, **opts}])
     while left:
         stop()
         if dec.eof:
@@ -367,6 +497,9 @@ def _chunks(fd: int, blk: farc.DataBlock, stop):
             out = dec.decompress(data, max_length=min(CHUNK, left))
         except (lzma.LZMAError, EOFError) as exc:
             raise _DataError("a data block could not be decompressed (damaged data)") from exc
+        except MemoryError as exc:
+            raise _DataError("a data block could not be decompressed (not enough memory)") \
+                from exc
         left -= len(out)
         if out:
             yield out
@@ -407,7 +540,7 @@ def extract(plan: ExtractPlan, cancel: threading.Event | None = None,
 
 def _write_all(plan, opened, root, cancel, on_progress) -> ExtractResult:
     res = ExtractResult(plan.dest)
-    tree = _Tree(root)
+    tree = _Tree(root, plan.folders)
 
     def stop():
         if cancel is not None and cancel.is_set():
@@ -416,21 +549,23 @@ def _write_all(plan, opened, root, cancel, on_progress) -> ExtractResult:
     current: list[str] = []
     try:
         for fd, ap in opened:
-            for parts in ap.dirs:
-                tree.fd(parts)
+            for folder in ap.dirs:
+                tree.fd(folder)
             by_block: dict[int, list] = {}
-            for parts, entry in ap.files:
-                by_block.setdefault(entry.block, []).append((parts, entry))
+            for folder, name, entry in ap.files:
+                by_block.setdefault(entry.block, []).append((folder, name, entry))
             for k, blk in enumerate(ap.archive.blocks):
-                files = by_block.get(k, [])
+                files = by_block.get(k)
+                if not files:
+                    continue
                 stream = _chunks(fd, blk, stop)
                 buf, at = b"", 0
-                for parts, entry in files:
+                for folder, name, entry in files:
                     stop()
-                    shown = clean("/".join(parts), 120)
-                    out = os.open(parts[-1], os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                    shown = clean("/".join([*plan.parts(folder), name]), 120)
+                    out = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL
                                   | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644,
-                                  dir_fd=tree.fd(parts[:-1]))
+                                  dir_fd=tree.fd(folder))
                     current[:] = [shown]
                     crc, left = 0, entry.size
                     try:
@@ -443,6 +578,10 @@ def _write_all(plan, opened, root, cancel, on_progress) -> ExtractResult:
                             crc = zlib.crc32(piece, crc)
                             while piece:
                                 piece = piece[os.write(out, piece):]
+                        try:  # through the open file: never another file of that name
+                            os.utime(out, (entry.mtime, entry.mtime))
+                        except (OSError, OverflowError, ValueError):
+                            pass
                     finally:
                         os.close(out)
                     res.bytes_written += entry.size
@@ -450,11 +589,6 @@ def _write_all(plan, opened, root, cancel, on_progress) -> ExtractResult:
                     res.files += 1
                     if crc != entry.crc:
                         res.crc_errors.append(shown)
-                    try:
-                        os.utime(parts[-1], (entry.mtime, entry.mtime),
-                                 dir_fd=tree.fd(parts[:-1]), follow_symlinks=False)
-                    except (OSError, OverflowError, ValueError):
-                        pass
                     if on_progress is not None:
                         on_progress(res.bytes_written, plan.total_size)
     except _Stopped:
@@ -467,6 +601,10 @@ def _write_all(plan, opened, root, cancel, on_progress) -> ExtractResult:
         res.error = str(exc)
     except OSError as exc:
         res.error = f"writing failed ({exc.strerror or exc})"
+    except MemoryError:
+        res.error = "not enough memory"
+    except Exception as exc:  # noqa: BLE001 - once the destination exists, report, never raise
+        res.error = f"unexpected error ({type(exc).__name__})"
     finally:
         res.folders = tree.made
         tree.close()
