@@ -4,6 +4,9 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+### Added
+- **FreeArc inspection (read-only).** When the installer, or a large file beside it, starts with the FreeArc signature, the plan now reads that archive's own index and checks its CRC-32 values. It shows the file and folder count, the total size, how many data blocks use storing, lzma or "a method gitfurl does not handle", the self-extracting stub size, the locked flag and names that would not be safe to extract. A readable index makes the detection "likely"; otherwise it stays "possible" and the plan says why. Nothing is extracted and the route stays Wine/Proton. Tested with archives built in memory by the tests, and checked read-only against 15 archives made in the sandbox with seb3773/freearc-c; not yet against archives written by the original FreeArc.
+
 ## [1.3.0] - 2026-11-18
 An unattended install for Inno Setup installers, and the first runs of Wine with an installer under the memory limit (an installer built for the test, in the sandbox). Compatibility with any particular third-party installer is still unverified.
 

@@ -17,7 +17,7 @@ Some Windows installers are hard to run on Linux. Gitfurl helps a user run an in
 Local installer files supplied by the user, Wine detection, dedicated prefixes, inspectable launch settings, local logs.
 
 ## Hybrid direction (approved in principle, 2026-11-16)
-Gitfurl keeps Wine/Proton as the default route. Phase 1 (this version) only *detects*: it reads installer headers and the first 4 bytes of a few large files beside it, and shows a guess in the plan preview and in `doctor`. It never extracts, never runs an extraction tool, and never selects a native route. Any later native extraction would be optional, off by default, chosen by the user for each run, and shown in an approval first. The out-of-scope list below still applies.
+Gitfurl keeps Wine/Proton as the default route. This version only *detects*: it reads installer headers and the first 4 bytes of a few large files beside it, and for a FreeArc archive its own index (the list of files, read-only), and shows a guess in the plan preview. It never extracts, never runs an extraction tool, and never selects a native route. Any later native extraction would be optional, off by default, chosen by the user for each run, and shown in an approval first. The out-of-scope list below still applies.
 
 ## Out of scope
 Searching for or downloading installers or games, bundled installers or assets, keys, cracks, DRM removal, activation bypasses, automatic package installs or sudo, changes to an existing prefix without approval, telemetry, uploads, background network access. Nothing here is a claim that any use is lawful. Users must be authorised to use the software they run.
