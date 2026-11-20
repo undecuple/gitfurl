@@ -172,8 +172,8 @@ class Methods(FarcTestBase):
         self.assertEqual(farc.parse_method("lzma:1gb").lzma["dict_size"], 1 << 30)
 
     def test_unsupported_method_reported_generically(self):
-        secret = "zzzmethod:42:qq"
-        blocks = [(secret, [F("x.bin", b"x" * 100)]), ("storing", [F("y.bin", b"y" * 10)])]
+        unknown_method = "zzzmethod:42:qq"
+        blocks = [(unknown_method, [F("x.bin", b"x" * 100)]), ("storing", [F("y.bin", b"y" * 10)])]
         arc = self.read(make_archive(blocks))
         self.assertEqual([b.method.kind for b in arc.blocks], [KIND_OTHER, KIND_STORING])
         lines = farc.summarise(arc)
