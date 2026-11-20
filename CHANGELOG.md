@@ -7,6 +7,11 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 ### Added
 - **FreeArc inspection (read-only).** When the installer, or a large file beside it, starts with the FreeArc signature, the plan now reads that archive's own index and checks its CRC-32 values. It shows the file and folder count, the total size, how many data blocks use storing, lzma or "a method gitfurl does not handle", the self-extracting stub size, the locked flag and names that would not be safe to extract. A readable index makes the detection "likely"; otherwise it stays "possible" and the plan says why. Nothing is extracted and the route stays Wine/Proton. Tested with archives built in memory by the tests, and checked read-only against 15 archives made in the sandbox with seb3773/freearc-c; not yet against archives written by the original FreeArc.
 
+- **FreeArc extraction (storing and lzma), command line only.** `gitfurl cli extract INSTALLER --prefix NAME` writes the files of the FreeArc archives beside the installer to `C:\Games\NAME` in an existing prefix, with gitfurl's own reader. The installer is not run, so nothing of its own steps happens; the result is "files extracted", not "installed". A plan and an approval come first (`--dry-run` shows it). Encryption and every method other than storing or a single lzma are refused before anything is written, as are unsafe or clashing names, an existing destination and too little space. Files are created new, never overwrite anything, are not written outside the destination, and are CRC-checked. Tested with archives built by the tests and with 8 storing/lzma archives made in the sandbox with seb3773/freearc-c; not with archives written by the original FreeArc.
+
+### Changed
+- FreeArc names: `\` now counts as a folder separator, like `/`, so names from an archive made on Windows are no longer counted as unsafe for that alone.
+
 ## [1.3.0] - 2026-11-18
 An unattended install for Inno Setup installers, and the first runs of Wine with an installer under the memory limit (an installer built for the test, in the sandbox). Compatibility with any particular third-party installer is still unverified.
 

@@ -375,13 +375,22 @@ class Names(FarcTestBase):
                  F("g", b"9", 2), F(".", is_dir=True), F("deep/./ok", b"0")]
         arc = self.read(make_archive([("storing", files)], folders=("", "..", "x/D:")))
         flagged = [e.path for e in arc.entries if farc.unsafe_name(e.path)]
-        self.assertEqual(flagged, ["/abs", "../up", "C:win", "a\\b", "ctl\x01\x1b[31m", "",
+        self.assertEqual(flagged, ["/abs", "../up", "C:win", "ctl\x01\x1b[31m", "",
                                    "../f", "x/D:/g"])
         line = next(s for s in farc.summarise(arc) if "safe" in s)
-        self.assertTrue(line.startswith("8 names would not be safe to extract as stored: "))
+        self.assertTrue(line.startswith("7 names would not be safe to extract as stored: "))
         self.assertEqual(line.count("'"), 2 * farc.MAX_EXAMPLES)
         self.assertTrue(line.endswith(", ..."))
         self.assertTrue(all(c.isprintable() for c in line))
+
+    def test_relative_parts(self):
+        rp = farc.relative_parts
+        self.assertEqual(rp("a\\b/c"), ["a", "b", "c"])
+        self.assertEqual(rp("./x//y/./z/"), ["x", "y", "z"])
+        self.assertEqual(rp("."), [])
+        for bad in ("", "/a", "\\a", "a\\..\\b", "a/../b", "C:x", "a/c:/b", "a\x00b",
+                    "a\x7fb"):
+            self.assertIsNone(rp(bad), bad)
 
     def test_long_name_capped(self):
         arc = self.read(make_archive([("storing", [F("/" + "n" * 4000, b"1")])]))
