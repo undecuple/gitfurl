@@ -33,12 +33,24 @@ def blocks(method="lzma:1mb"):
 
 
 def remove_deep(top):
-    """Remove a deep folder chain by path: shutil.rmtree holds one fd per level and runs out
-    under a soft open-file limit of 1024."""
-    for root, dirs, files in os.walk(top, topdown=False):
-        for name in files:
-            os.unlink(os.path.join(root, name))
-        os.rmdir(root)
+    """Remove a deep folder tree without recursion. shutil.rmtree holds one fd per level (it
+    runs out under a soft open-file limit of 1024), and on Python 3.11 both it and os.walk
+    recurse once per level (RecursionError at about 1,000 levels)."""
+    stack = [str(top)]
+    while stack:
+        path = stack[-1]
+        with os.scandir(path) as it:
+            subdirs = []
+            for e in it:
+                if e.is_dir(follow_symlinks=False):
+                    subdirs.append(e.path)
+                else:
+                    os.unlink(e.path)
+        if subdirs:
+            stack.extend(subdirs)
+        else:
+            os.rmdir(path)
+            stack.pop()
 
 
 class Base(unittest.TestCase):
