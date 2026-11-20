@@ -6,7 +6,8 @@ sizes, where the archive starts (the size of a self-extracting program before it
 whether the archive is locked, and for each data block whether its method is `storing`, a
 single `lzma`, or a method gitfurl does not handle.
 
-What it never does: it never extracts, decodes or verifies file data, never writes or
+What it never does (extraction is in extract.py, which uses this reader): it never
+extracts, decodes or verifies file data, never writes or
 creates anything, never runs anything, and never follows a symlink. Only the index itself
 is decompressed (when it is stored with `lzma`), and only up to MAX_CONTROL_BLOCK bytes.
 
@@ -58,6 +59,7 @@ _MATCH_FINDERS = {"bt2", "bt3", "bt4", "hc4", "ht4"}
 _PRESETS = {"fastest", "fast", "normal", "max", "ultra"}
 _CIPHERS = ("aes", "blowfish", "twofish", "serpent")
 _DRIVE = re.compile(r"^[A-Za-z]:")
+_SEP = re.compile(r"[/\\]")
 _CONTROL = re.compile("[\x00-\x1f\x7f-\x9f]")  # exactly Unicode category Cc
 
 
@@ -470,18 +472,29 @@ def _check_overlap(regions: list[tuple[int, int]]) -> None:
         end = offset + size
 
 
-def unsafe_name(path: str) -> bool:
-    """True when a stored name could not be used as-is under a destination folder later.
+def relative_parts(path: str) -> list[str] | None:
+    """The folder parts of a stored name as a relative path, or None when it is not safe.
 
-    Empty names, absolute paths, ".." parts, drive letters, backslashes and control
-    characters all count. Nothing is extracted here; this only feeds the summary.
+    "/" and "\\" both separate folders (an archive made on Windows may use either); empty
+    and "." parts are dropped. None for an empty name, an absolute path, a ".." part, a
+    drive letter, or a control character anywhere. An empty list means the name is only
+    "." (the archive's own top folder).
     """
-    if not path or path.endswith("/") or path.startswith("/") or "\\" in path:
-        return True
-    if _CONTROL.search(path):
-        return True
-    parts = path.split("/")
-    return any(p == ".." or _DRIVE.match(p) for p in parts)
+    if not path or path[0] in "/\\" or _CONTROL.search(path):
+        return None
+    parts = _SEP.split(path)
+    if any(p == ".." or _DRIVE.match(p) for p in parts):
+        return None
+    return [p for p in parts if p not in ("", ".")]
+
+
+def unsafe_name(path: str) -> bool:
+    """True when a stored name could not be used under a destination folder.
+
+    The same rule extraction uses (relative_parts). Nothing is extracted here; this only
+    feeds the summary.
+    """
+    return relative_parts(path) is None
 
 
 def _size(n: int) -> str:

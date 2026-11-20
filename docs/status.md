@@ -20,6 +20,7 @@ Last updated 2026-11-19. On Linux x86_64, Wine 11.0, tested headless (no GPU, a 
 | Memory limit (on by default) | `systemd-run --user --scope` | implemented | stand-ins and test programs in a real scope (systemd 262); Wine with the test installer in the sandbox inside a scope with the limits: over the limit it moved to swap and was not stopped. Not Proton, not gitfurl's own scope around Wine |
 | Docker image and compose file | container, [docs/docker.md](docker.md) | experimental: the image builds, `cli doctor` runs and the window opens | Podman 6.1, 2026-11-16; not Docker itself, and no installer run in it |
 | FreeArc inspection (read-only) | the plan reads an archive's own index; nothing is extracted, the route stays Wine/Proton | implemented | synthetic archives built in memory by the tests; on 2026-11-19 a read-only parse of 15 archives made in the sandbox with seb3773/freearc-c. Not checked against archives written by the original FreeArc |
+| FreeArc extraction (storing, lzma) | `gitfurl cli extract`, gitfurl's own reader; the installer is not run | implemented | synthetic archives built by the tests; on 2026-11-19, 8 storing/lzma archives made in the sandbox with seb3773/freearc-c extracted byte for byte (6 others correctly refused). Not checked against archives written by the original FreeArc or third-party installers; no window option |
 | Flatpak | - | planned | - |
 
 "verified" means a run with a named setup. "implemented" means the code is in but not run there. "planned" means neither.

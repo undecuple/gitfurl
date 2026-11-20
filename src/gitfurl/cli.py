@@ -104,6 +104,14 @@ def build_parser() -> argparse.ArgumentParser:
     inst.add_argument("--scan-timeout", type=float, default=SCAN_TIMEOUT_S, metavar="SECONDS",
                       help=f"with --scan: stop the scan after this long (default {SCAN_TIMEOUT_S:g})")
     inst.add_argument("--yes", action="store_true", help="approve the run without prompting")
+    ext = sub.add_parser(
+        "extract", help="extract FreeArc archives (storing and lzma only) into a prefix "
+                        "without running the installer")
+    ext.add_argument("installer", help="the installer; FreeArc archives beside it are read")
+    ext.add_argument("--prefix", required=True, help="name of an existing dedicated prefix; "
+                     "files go to C:\\Games\\PREFIX in it")
+    ext.add_argument("--dry-run", action="store_true", help="show the plan and change nothing")
+    ext.add_argument("--yes", action="store_true", help="approve without prompting")
     pre = sub.add_parser("prefix", help="manage dedicated prefixes")
     pre_sub = pre.add_subparsers(dest="prefix_command", required=True)
     create = pre_sub.add_parser("create", help="create a dedicated prefix")
@@ -120,6 +128,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "prefix":
         return _prefix_command(args)
+    if args.command == "extract":
+        return _extract_command(args)
     if not args.dry_run:
         return _real_install(args)
     try:
@@ -271,6 +281,52 @@ def _prefix_command(args) -> int:
         return 1
     print(f"wine exited with status {status}")
     return 0 if status == 0 else 1
+
+
+def _extract_command(args) -> int:
+    """Native extraction: plan, approval, then gitfurl's own FreeArc reader writes the files."""
+    from gitfurl.extract import ExtractRefused, extract, plan_extract
+
+    if not args.dry_run and running_as_root():
+        print(f"error: {ROOT_MESSAGE}", file=sys.stderr)
+        return 1
+    try:
+        installer = validate_installer(args.installer)
+        plan = plan_extract(installer, args.prefix)
+    except ValueError as exc:  # ExtractRefused is a ValueError
+        print(f"error: {exc}. Nothing was written.", file=sys.stderr)
+        return 1
+    problem = plan.problem()
+    if args.dry_run:
+        print("DRY RUN: nothing was extracted, created or changed.")
+    for line in plan.describe():
+        print(line)
+    print("Only extract installers you are authorised to use.")
+    if args.dry_run:
+        if problem:
+            print(f"a real extraction would stop now: {problem}")
+        return 0
+    if problem:
+        print(f"error: {problem}. Nothing was written.", file=sys.stderr)
+        return 1
+    print("Ctrl-C stops the extraction; files already written are kept.")
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print("Not approved: no terminal to ask on. Re-run with --yes to approve.")
+            return 2
+        if input("Type 'yes' to extract the files: ").strip() != "yes":
+            print("Not approved. Nothing was written.")
+            return 2
+    try:
+        result = extract(plan)
+    except ExtractRefused as exc:
+        print(f"error: {exc}. {exc.outcome()}", file=sys.stderr)
+        return 1
+    for line in result.lines():
+        print(line)
+    if result.stopped:
+        return 130
+    return 0 if result.ok else 1
 
 
 def _real_install(args) -> int:
