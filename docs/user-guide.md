@@ -96,7 +96,18 @@ The dry run and the approval step show a read-only preflight. Everything is advi
 - **Estimate:** the installed size. gitfurl cannot know how much space an install needs, so it says "unknown" and does not multiply the installer's size. It warns only when free space is smaller than the files in the installer's folder (an estimate: the install may not fit) and when under 2 GB of memory is available (an estimate). You can still go ahead.
 
 ### What gitfurl guesses about the installer
-Before you approve a run, the preview shows what the installer looks like from a few bytes of its files: an Inno Setup ID string ("likely"), and the FreeArc signature at the start of the installer or of large files beside it ("possible", unverified). This reads files only: nothing is run, opened as an archive or extracted, and the route stays Wine/Proton. (`doctor` separately runs `innoextract --version` if that program is installed.) It never looks inside a payload. A guess can be wrong or missing, and it says nothing about whether the installer will work.
+Before you approve a run, the preview shows what the installer looks like from a few bytes of its files: an Inno Setup ID string ("likely"), and FreeArc archives (see below). This reads files only: nothing is run or extracted, and the route stays Wine/Proton. (`doctor` separately runs `innoextract --version` if that program is installed.) A guess can be wrong or missing, and it says nothing about whether the installer will work.
+
+**FreeArc.** When the installer, or a large file beside it, starts with the FreeArc signature, gitfurl reads that archive's own index (its list of files) and checks the index's CRC-32 values. If the index reads cleanly, the preview says "likely" and shows, for each archive:
+- how many files and folders it lists, and their total size;
+- how many data blocks it has, and for each whether it uses storing, lzma or "a method gitfurl does not handle";
+- the size of the program in front of the archive, if it is a self-extracting file;
+- whether the archive is locked;
+- how many stored names would not be safe to extract as they are (for example `..` or an absolute path), with up to three examples.
+
+If the index cannot be read (a damaged or cut-off file, an encrypted index, an index method gitfurl does not handle, or counts and sizes over gitfurl's limits), the preview says "possible" and gives the reason. Names from an archive are shown with unprintable characters replaced by `?`.
+
+This is read-only. Only the index is read; the data blocks are not decoded and nothing is extracted. Gitfurl still runs the installer itself with Wine/Proton: native extraction is not available. At most 16 large files beside the installer are opened, each once: the index is read from the same open file whose signature was checked. Names longer than 4096 bytes, and file lists whose joined folder-and-name paths would exceed 128 MiB of text, are refused rather than read. The index of the installer itself may take up to 256 MiB; for a file beside the installer the cap is 16 MiB (bytes read and decoded, and joined path text), so a folder of damaged or hostile files cannot hold up the plan for long. This was checked against archives made in the sandbox with seb3773/freearc-c, not yet against archives written by the original FreeArc.
 
 ### Stopping a run
 While an installer runs, the **Stop** button (and **Ctrl-C** on the command line) stops it. A confirmation explains what happens, with "No" as the default.

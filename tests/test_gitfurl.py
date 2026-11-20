@@ -9,6 +9,11 @@ from pathlib import Path
 from unittest import mock
 
 from gitfurl import cli, doctor
+
+try:  # pytest puts tests/ on sys.path; `python -m unittest tests.test_gitfurl` does not
+    from farc_writer import F, make_archive, sample_blocks
+except ImportError:
+    from tests.farc_writer import F, make_archive, sample_blocks
 from gitfurl.prefixes import prefix_path, validate_prefix_name
 
 
@@ -1853,10 +1858,13 @@ class DetectTests(unittest.TestCase):
         det = self.det("liar.exe", b"MZ" + b"\xff\xff\xff\xff" * 4 + self.INNO)
         self.assertEqual([e.format for e in det.evidence], ["Inno Setup"])
 
-    def test_freearc_signature_at_the_start_is_only_possible(self):
+    def test_freearc_signature_without_a_readable_index_is_only_possible(self):
         det = self.det("a.arc", b"ArC\x01" + b"\0" * 20)
         self.assertEqual([(e.format, e.confidence) for e in det.evidence], [("FreeArc", "possible")])
-        self.assertIn("unverified", det.evidence[0].detail)
+        self.assertIn("index could not be read", det.evidence[0].detail)
+        self.assertIn("footer", det.evidence[0].detail)
+        self.assertEqual(det.evidence[0].lines, [])
+        self.assertNotIn("unverified", det.evidence[0].detail)
 
     def test_large_files_beside_the_installer_are_checked_by_their_first_four_bytes(self):
         from gitfurl import detect as d
@@ -1869,9 +1877,10 @@ class DetectTests(unittest.TestCase):
             self.file("tiny.bin", b"ArC\x01")  # below the size floor
             det = d.detect(inst)
         free = [e for e in det.evidence if e.format == "FreeArc"]
-        self.assertEqual(len(free), 1)
-        self.assertIn("2 large file(s)", free[0].where)
-        self.assertNotIn("other.dat", free[0].detail)
+        self.assertEqual([e.where for e in free], ["large file beside the installer: p-01.bin",
+                                                   "large file beside the installer: p-02.bin"])
+        self.assertEqual({e.confidence for e in free}, {"possible"})  # not real archives
+        self.assertFalse(any("other.dat" in e.where + e.detail for e in free))
         self.assertIn("Inno Setup", [e.format for e in det.evidence])
 
     def test_symlinks_and_directories_are_not_followed_or_opened(self):
@@ -1955,8 +1964,8 @@ class DetectTests(unittest.TestCase):
         self.assertEqual(before, sorted(p.name for p in self.dir.iterdir()))
         self.assertIn("nothing was run", text)
         self.assertIn("not a promise", text)
-        self.assertNotIn("SREP", text)
-        self.assertNotIn("Oodle", text)
+        # no compressor is named: the only mention of methods is the fixed wording
+        self.assertEqual(text.count("method"), text.count("(names, sizes, methods)"))
 
     def test_the_file_is_never_made_executable_or_modified(self):
         from gitfurl import detect as d
@@ -1977,6 +1986,204 @@ class DetectTests(unittest.TestCase):
             self.assertIn("Inno Setup: likely", out)
             self.assertIn("route: wine", out)
             self.assertFalse((Path(data) / "gitfurl").exists())
+
+
+class FreeArcIndexInPlanTests(unittest.TestCase):
+    """FreeArc archives built in memory by tests/farc_writer.py; none is kept in the repo."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+
+    def file(self, name, data):
+        p = self.dir / name
+        p.write_bytes(data)
+        return p
+
+    def test_a_readable_index_is_likely_and_its_summary_is_in_the_plan(self):
+        from gitfurl import detect as d
+
+        blocks, folders = sample_blocks("lzma:1mb")
+        blocks.append(("storing", [F("c.txt", b"abc" * 100)]))
+        det = d.detect(self.file("game.arc", make_archive(blocks, folders, index="lzma:1mb")))
+        self.assertEqual([(e.format, e.confidence) for e in det.evidence], [("FreeArc", "likely")])
+        ev = det.evidence[0]
+        self.assertIn("CRC-32 checks match", ev.detail)
+        self.assertNotIn("unverified", ev.detail)
+        self.assertEqual(ev.lines[:2], ["3 files and 1 folder, 3.9 KiB in total",
+                                        "2 data blocks: 1 storing, 1 lzma"])
+        text = d.describe(det)
+        self.assertIn("FreeArc: likely.", text)
+        self.assertIn("    3 files and 1 folder, 3.9 KiB in total", text)
+        self.assertIn("    locked: no", text)
+        self.assertIn("nothing was run or extracted", text)
+        self.assertIn("only the archive's own index", text)
+        verdict = d.decide(det)
+        self.assertEqual(verdict.route, d.ROUTE_WINE)
+        self.assertTrue(any("native extraction is not available" in r for r in verdict.reasons))
+
+    def test_unhandled_method_is_named_generically_and_its_text_never_shown(self):
+        from gitfurl import detect as d
+
+        blocks = [("storing", [F("a.bin", b"a" * 10)]),
+                  ("zzzmethod:42:qqsecret", [F("b.bin", b"b" * 20)])]
+        text = d.describe(d.detect(self.file("x.arc", make_archive(blocks))))
+        self.assertIn("2 data blocks: 1 storing, 0 lzma, 1 a method gitfurl does not handle",
+                      text)
+        self.assertNotIn("zzzmethod", text)
+        self.assertNotIn("qqsecret", text)
+
+    def test_encrypted_or_damaged_index_stays_possible_and_says_why(self):
+        from gitfurl import detect as d
+
+        blocks, folders = sample_blocks()
+        cases = {
+            "enc.arc": (make_archive(blocks, folders, index="aes-256/ctr:n1000:qqkey"),
+                        "encrypted"),
+            "crc.arc": (make_archive(blocks, folders, bad_dir_crc=True), "CRC"),
+            "cut.arc": (make_archive(blocks, folders)[:-30], "footer"),
+        }
+        for name, (data, why) in cases.items():
+            det = d.detect(self.file(name, data))
+            self.assertEqual([(e.format, e.confidence) for e in det.evidence],
+                             [("FreeArc", "possible")], name)
+            self.assertIn("index could not be read", det.evidence[0].detail, name)
+            self.assertIn(why, det.evidence[0].detail, name)
+            text = d.describe(det)
+            self.assertNotIn("qqkey", text)
+            self.assertNotIn("aes", text)
+            self.assertEqual(d.decide(det).route, d.ROUTE_WINE)
+
+    def test_names_from_the_archive_are_cleaned(self):
+        from gitfurl import detect as d
+
+        files = [F("../evil\x1b[31m\nname", b"1"), F("ok.txt", b"2")]
+        text = d.describe(d.detect(self.file("n.arc", make_archive([("storing", files)]))))
+        self.assertIn("1 name would not be safe to extract", text)
+        self.assertNotIn("\x1b", text)
+        self.assertIn("../evil?[31m?name", text)
+
+    def test_an_unexpected_error_or_memory_error_never_leaves_detect(self):
+        from gitfurl import detect as d
+
+        path = self.file("a.arc", make_archive(*sample_blocks()))
+        for exc, why in ((RuntimeError("boom"), "could not be read"),
+                         (MemoryError(), "not enough memory")):
+            with mock.patch.object(d.farc, "read_fd", side_effect=exc):
+                det = d.detect(path)
+            self.assertEqual([e.confidence for e in det.evidence], ["possible"])
+            self.assertIn(why, det.evidence[0].detail)
+            self.assertNotIn("boom", det.evidence[0].detail)
+
+    def test_neighbours_each_get_their_own_index_line(self):
+        from gitfurl import detect as d
+
+        inst = self.file("setup.exe", b"MZ" + b"\0" * 100 + DetectTests.INNO)
+        blocks, folders = sample_blocks()
+        with mock.patch.object(d, "MIN_NEIGHBOUR_BYTES", 64):
+            self.file("data-1.bin", make_archive(blocks, folders))
+            self.file("data-2.bin", b"ArC\x01" + b"x" * 100)
+            self.file("\x1bodd.bin", make_archive(blocks, folders, locked=True))
+            det = d.detect(inst)
+        free = {e.where: e for e in det.evidence if e.format == "FreeArc"}
+        self.assertEqual(sorted(free), ["large file beside the installer: ?odd.bin",
+                                        "large file beside the installer: data-1.bin",
+                                        "large file beside the installer: data-2.bin"])
+        self.assertEqual(free["large file beside the installer: data-1.bin"].confidence, "likely")
+        self.assertEqual(free["large file beside the installer: data-2.bin"].confidence,
+                         "possible")
+        self.assertIn("locked: yes", free["large file beside the installer: ?odd.bin"].lines)
+        self.assertEqual(d.decide(det).route, d.ROUTE_WINE)
+
+    def test_each_freearc_file_is_opened_once_and_read_from_that_open_file(self):
+        # Review finding: the index was read from a second open by path, so the file could
+        # be swapped between the signature check and the index read.
+        from gitfurl import detect as d
+
+        data = make_archive(*sample_blocks())
+        inst = self.file("setup.arc", data)
+        with mock.patch.object(d, "MIN_NEIGHBOUR_BYTES", 8):
+            other = self.file("data-1.bin", data)
+            real_open = os.open
+            opened = []
+
+            def counting(path, *a, **kw):
+                opened.append(os.fspath(path))
+                return real_open(path, *a, **kw)
+
+            with mock.patch("os.open", side_effect=counting), \
+                    mock.patch.object(d.farc, "read_archive",
+                                      side_effect=AssertionError("opened by path again")):
+                det = d.detect(inst)
+        self.assertEqual(opened.count(os.fspath(inst)), 1)
+        self.assertEqual(opened.count(os.fspath(other)), 1)
+        self.assertEqual([e.confidence for e in det.evidence], ["likely", "likely"])
+
+    def test_index_reads_are_bounded_by_the_neighbour_cap(self):
+        from gitfurl import detect as d
+
+        inst = self.file("setup.exe", b"MZ")
+        data = make_archive(*sample_blocks())
+        for i in range(6):
+            self.file(f"p{i}.bin", data)
+        real = d.farc.read_fd
+        with mock.patch.object(d, "MIN_NEIGHBOUR_BYTES", 8), \
+                mock.patch.object(d, "MAX_NEIGHBOURS", 3), \
+                mock.patch.object(d.farc, "read_fd", side_effect=real) as reads:
+            det = d.detect(inst)
+        self.assertEqual(reads.call_count, 3)
+        self.assertEqual(len([e for e in det.evidence if e.format == "FreeArc"]), 3)
+        self.assertTrue(any("not all files" in n for n in det.notes))
+
+    def test_files_beside_the_installer_use_the_lower_index_cap(self):
+        from gitfurl import detect as d
+
+        inst = self.file("setup.exe", d.FREEARC_SIGNATURE + b"\0" * 4)
+        self.file("p.bin", make_archive(*sample_blocks()))
+        real = d.farc.read_fd
+        with mock.patch.object(d, "MIN_NEIGHBOUR_BYTES", 8), \
+                mock.patch.object(d.farc, "read_fd", side_effect=real) as reads:
+            d.detect(inst)
+        limits = sorted((c.args + (None,))[2] or 0 for c in reads.call_args_list)
+        self.assertEqual(limits, [0, d.NEIGHBOUR_INDEX_LIMIT])
+        self.assertLess(d.NEIGHBOUR_INDEX_LIMIT, d.farc.MAX_INDEX_TOTAL)
+
+    def test_reading_the_index_writes_nothing_and_runs_nothing(self):
+        from gitfurl import detect as d
+
+        path = self.file("a.arc", make_archive(*sample_blocks("lzma:1mb"), index="lzma:1mb"))
+        before = (sorted(p.name for p in self.dir.iterdir()), path.stat().st_mode,
+                  path.stat().st_mtime_ns, path.read_bytes())
+        with mock.patch("subprocess.Popen", side_effect=AssertionError("no process")), \
+                mock.patch("subprocess.run", side_effect=AssertionError("no process")), \
+                mock.patch("os.system", side_effect=AssertionError("no shell")):
+            det = d.detect(path)
+        self.assertEqual(det.evidence[0].confidence, "likely")
+        self.assertEqual(before, (sorted(p.name for p in self.dir.iterdir()),
+                                  path.stat().st_mode, path.stat().st_mtime_ns,
+                                  path.read_bytes()))
+
+    def test_dry_run_shows_the_index_summary(self):
+        with tempfile.TemporaryDirectory() as data:
+            f = self.file("game.arc", make_archive(*sample_blocks()))
+            with mock.patch.dict("os.environ", {"XDG_DATA_HOME": data}):
+                code, out, _ = run_cli("install", str(f), "--prefix", "p1", "--dry-run")
+            self.assertEqual(code, 0)
+            self.assertIn("FreeArc: likely", out)
+            self.assertIn("2 files and 1 folder, 3.6 KiB in total", out)
+            self.assertIn("1 data block: 1 storing, 0 lzma", out)
+            self.assertIn("route: wine", out)
+            self.assertFalse((Path(data) / "gitfurl").exists())
+
+    def test_the_window_uses_the_same_plan_text(self):
+        # The approval dialog adds describe_detection(detect(...)) to its text; the window
+        # itself is not driven here.
+        from gitfurl import detect as d
+        from gitfurl import gui
+
+        self.assertIs(gui.describe_detection, d.describe)
+        self.assertIs(gui.detect, d.detect)
 
 
 class PreflightTests(unittest.TestCase):
