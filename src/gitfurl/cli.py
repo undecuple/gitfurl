@@ -22,6 +22,7 @@ from gitfurl.prefixes import (
     validate_prefix_name,
 )
 from gitfurl.preflight import measure
+from gitfurl.route import ROUTE_CHOICES, ROUTE_NATIVE, choose_route
 from gitfurl.runner import (
     CANCEL_REMAINS,
     CANCELLED_STATUS,
@@ -65,8 +66,13 @@ def build_parser() -> argparse.ArgumentParser:
                       help="run the installer inside bwrap with only the prefix writable, no "
                            "network and no menu entries (reduces changes outside the prefix; "
                            "not a guarantee); default: off")
+    inst.add_argument("--route", choices=ROUTE_CHOICES, default="auto",
+                      help="auto (default): gitfurl picks the route and says why. native: "
+                           "gitfurl unpacks the FreeArc archives beside an Inno Setup installer "
+                           "itself and does not run Setup (refused, with the reason, when that "
+                           "is not possible). wine: Setup runs under Wine/Proton")
     inst.add_argument("--unattended", action="store_true",
-                      help="Inno Setup installers only: run without the installer's wizard and "
+                      help="Wine route only. Inno Setup installers only: run without the installer's wizard and "
                            "windows (Inno's /VERYSILENT switches), install to C:\\Games\\PREFIX "
                            "in the prefix, and read Inno's log afterwards. The installer still "
                            "does the unpacking. Default: off")
@@ -105,8 +111,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help=f"with --scan: stop the scan after this long (default {SCAN_TIMEOUT_S:g})")
     inst.add_argument("--yes", action="store_true", help="approve the run without prompting")
     ext = sub.add_parser(
-        "extract", help="extract FreeArc archives (storing, lzma, exe, delta and rep) into a "
-                        "prefix without running the installer")
+        "extract", help="files only: extract FreeArc archives (storing, lzma, exe, delta and "
+                        "rep) into an existing prefix without running the installer. 'install' "
+                        "picks this route itself when it can")
     ext.add_argument("installer", help="the installer; FreeArc archives beside it are read")
     ext.add_argument("--prefix", required=True, help="name of an existing dedicated prefix; "
                      "files go to C:\\Games\\PREFIX in it")
@@ -130,16 +137,25 @@ def main(argv: list[str] | None = None) -> int:
         return _prefix_command(args)
     if args.command == "extract":
         return _extract_command(args)
-    if not args.dry_run:
-        return _real_install(args)
     try:
         installer = validate_installer(args.installer)
+        det = detect(installer)  # once; passed on
+        choice = choose_route(installer, args.prefix or DEFAULT_PREFIX, det, args.route,
+                              setup_options=_native_unused(args))
+    except ValueError as exc:
+        print(f"error: {exc}. Nothing was run.", file=sys.stderr)
+        return 1
+    if choice.route == ROUTE_NATIVE:
+        return _native_install(args, installer, det, choice)
+    if not args.dry_run:
+        return _real_install(args, det, choice)
+    try:
         scan_plan = _scan_plan(args, installer)
         plan = build_plan(installer, args.prefix or DEFAULT_PREFIX, runtime=args.runtime,
                           proton_path=args.proton_path, portable=args.portable, scan=scan_plan,
                           memory_limit=not args.no_memory_limit,
                           unattended=_unattended_plan(args, args.prefix or DEFAULT_PREFIX,
-                                                      installer))
+                                                      det))
         portable_lines = _portable_lines(plan, installer, shutil.which("wine") or "wine",
                                          full=True) if args.portable else []
     except ValueError as exc:
@@ -166,7 +182,7 @@ def main(argv: list[str] | None = None) -> int:
         print("  database date: not checked in a dry run (see 'gitfurl cli doctor')")
     for line in _memory_lines(plan)[0]:
         print(line)
-    for line in describe_detection(detect(installer)).splitlines():
+    for line in describe_detection(det, choice).splitlines():
         print(line)
     print("preflight (read-only, advisory):")
     for line in measure(installer, plan.prefix).describe().splitlines():
@@ -175,14 +191,25 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _unattended_plan(args, prefix_name, installer):
-    """The unattended plan when --unattended is given, else None. Reads the installer's
-    headers only. Raises ValueError (UnattendedRefused) when it is not Inno Setup."""
+def _unattended_plan(args, prefix_name, det):
+    """The unattended plan when --unattended is given, else None. Uses the detection of the
+    installer's headers. Raises ValueError (UnattendedRefused) when it is not Inno Setup."""
     if not args.unattended:
         return None
     from gitfurl.unattended import plan_unattended
 
-    return plan_unattended(prefix_name, detect(installer))
+    return plan_unattended(prefix_name, det)
+
+
+def _confirm(prompt: str, nothing: str) -> int | None:
+    """None when approved (--yes is checked by the caller); otherwise the exit status 2."""
+    if not sys.stdin.isatty():
+        print("Not approved: no terminal to ask on. Re-run with --yes to approve.")
+        return 2
+    if input(prompt).strip() != "yes":
+        print(f"Not approved. {nothing}")
+        return 2
+    return None
 
 
 def _unattended_lines(plan) -> list[str]:
@@ -311,12 +338,9 @@ def _extract_command(args) -> int:
         return 1
     print("Ctrl-C stops the extraction; files already written are kept.")
     if not args.yes:
-        if not sys.stdin.isatty():
-            print("Not approved: no terminal to ask on. Re-run with --yes to approve.")
-            return 2
-        if input("Type 'yes' to extract the files: ").strip() != "yes":
-            print("Not approved. Nothing was written.")
-            return 2
+        refused = _confirm("Type 'yes' to extract the files: ", "Nothing was written.")
+        if refused is not None:
+            return refused
     try:
         result = extract(plan)
     except ExtractRefused as exc:
@@ -329,7 +353,7 @@ def _extract_command(args) -> int:
     return 0 if result.ok else 1
 
 
-def _real_install(args) -> int:
+def _real_install(args, det, choice) -> int:
     if running_as_root():
         print(f"error: {ROOT_MESSAGE}", file=sys.stderr)
         return 1
@@ -343,7 +367,7 @@ def _real_install(args) -> int:
         plan = build_plan(installer, args.prefix, runtime=args.runtime,
                           proton_path=args.proton_path, portable=args.portable, scan=scan_plan,
                           memory_limit=not args.no_memory_limit,
-                          unattended=_unattended_plan(args, args.prefix, installer))
+                          unattended=_unattended_plan(args, args.prefix, det))
         if args.portable and args.runtime != "wine":
             raise ValueError("portable install is only supported with the wine runtime")
     except ValueError as exc:
@@ -400,7 +424,7 @@ def _real_install(args) -> int:
     for line in memory_lines:
         print(line)
     print("Only run installers you are authorised to use and have chosen to trust.")
-    for line in describe_detection(detect(installer)).splitlines():
+    for line in describe_detection(det, choice).splitlines():
         print(line)
     print("preflight (read-only, advisory):")
     for line in measure(installer, plan.prefix).describe().splitlines():
@@ -420,12 +444,9 @@ def _real_install(args) -> int:
     if args.cleanup != "none":
         print("After the installer exits with status 0, " + clean.describe())
     if not args.yes:
-        if not sys.stdin.isatty():
-            print("Not approved: no terminal to ask on. Re-run with --yes to approve.")
-            return 2
-        if input("Type 'yes' to run the installer: ").strip() != "yes":
-            print("Not approved. Nothing was run.")
-            return 2
+        refused = _confirm("Type 'yes' to run the installer: ", "Nothing was run.")
+        if refused is not None:
+            return refused
     control = RunControl()
     try:
         options = RunOptions(
@@ -468,6 +489,7 @@ def _real_install(args) -> int:
         if args.detailed_log:
             print(f"event log: {Path(log_path).with_suffix('.events.jsonl')}")
         print(f"local log: {log_path} (may contain your username and local paths)")
+        sys.stdout.flush()
         return CANCELLED_STATUS
     print(f"installer exited with status {status}")
     if describe_result(result):
@@ -493,4 +515,214 @@ def _real_install(args) -> int:
     print(f"local log: {log_path} (may contain your username and local paths)")
     if status != 0:
         print("A non-zero status does not by itself say why it failed; read the log.")
+    sys.stdout.flush()
     return 0 if status == 0 else 1
+
+
+def _native_unused(args) -> list[str]:
+    """Options the user set that only a Setup run uses. With --route auto they choose the
+    Wine/Proton route; with --route native the plan lists them as not applying."""
+    out = []
+    for flag, on in (("--portable", args.portable), ("--unattended", args.unattended),
+                     ("--wine-debug", bool(args.wine_debug)),
+                     ("--show-changes", args.show_changes),
+                     ("--stall-after", args.stall_after is not None),
+                     ("--runtime proton", args.runtime == "proton")):
+        if on:
+            out.append(flag)
+    return out
+
+
+def _native_install(args, installer, det, choice) -> int:
+    """The native route: Setup is not run; gitfurl unpacks the archives itself after one
+    approval of the whole plan (scan, prefix creation, unpack, listings, cleanup)."""
+    from gitfurl.extract import ExtractRefused
+    from gitfurl.route import (
+        PREFIX_ALLOWANCE,
+        NativeInstallPlan,
+        memory_problem,
+        native_prefix_create,
+        run_native,
+    )
+
+    dry = args.dry_run
+    if not dry and running_as_root():
+        print(f"error: {ROOT_MESSAGE}", file=sys.stderr)
+        return 1
+    if not dry and not args.prefix:
+        print("error: a real run needs an explicit --prefix NAME (see 'gitfurl prefix list').",
+              file=sys.stderr)
+        return 1
+    xplan = choice.extract
+    prefix_name = xplan.prefix_name
+    try:
+        if args.progress_interval <= 0:
+            raise ValueError("--progress-interval must be above 0")
+        scan_plan = _scan_plan(args, installer)
+        clean = plan_cleanup(installer, args.cleanup, [xplan.prefix, prefixes_root(), logs_root()])
+    except ValueError as exc:
+        print(f"error: {exc}. Nothing was run.", file=sys.stderr)
+        return 1
+    missing = not xplan.prefix.is_dir()
+    create = missing and args.create_prefix
+    wine = shutil.which("wine") if create else None
+    if not dry and missing and not args.create_prefix:
+        print(f"error: prefix does not exist: {xplan.prefix}. Create it first with "
+              f"'gitfurl prefix create {prefix_name}', or add --create-prefix. Nothing was run.",
+              file=sys.stderr)
+        return 1
+    if not dry and create and wine is None:
+        print("error: wine not found on PATH; it is needed to create the prefix. Run 'gitfurl "
+              "cli doctor'. Nothing was run.", file=sys.stderr)
+        return 1
+    memory_lines: list[str] = []
+    scope_problem = None
+    if create:
+        from gitfurl.memlimit import availability
+        from gitfurl.memlimit import describe as describe_memory
+
+        enabled = not args.no_memory_limit
+        memory_lines, scope_problem = describe_memory(enabled,
+                                                      availability() if enabled else None)
+        memory_lines = [f"for the prefix creation: {ln}" if i == 0 else ln
+                        for i, ln in enumerate(memory_lines)]
+        if scope_problem and not dry:
+            for line in memory_lines:
+                print(line)
+            print(f"error: {scope_problem}. {MEMORY_OFF_HINT}", file=sys.stderr)
+            return 2
+    scan_lines: list[str] = []
+    if scan_plan is not None:
+        from gitfurl.scan import database_info, describe_scan_plan
+
+        scan_lines = describe_scan_plan(scan_plan) if dry else \
+            describe_scan_plan(scan_plan, database_info(scan_plan.clamscan))
+    plan = NativeInstallPlan(installer, prefix_name, xplan.prefix, choice, create, wine,
+                             scan_lines,
+                             clean.describe() if args.cleanup != "none" else None,
+                             _native_unused(args), memory_check=not args.no_memory_limit)
+    if dry:
+        print("DRY RUN: nothing was executed, created or changed.")
+    for line in plan.describe():
+        print(line)
+    for line in memory_lines:
+        print(line)
+    for line in describe_detection(det, choice).splitlines():
+        print(line)
+    print("preflight (read-only, advisory):")
+    for line in measure(installer, xplan.prefix).describe().splitlines():
+        print(f"  {line}")
+    print("Only unpack installers you are authorised to use.")
+    # For a prefix still to be created, the space is measured on the nearest existing folder
+    # above it, with room for the prefix itself, so nothing is created when it cannot fit.
+    problem = (xplan.space_problem_before_prefix(PREFIX_ALLOWANCE) if create
+               else None if missing else xplan.problem())
+    mem_problem = None if args.no_memory_limit else memory_problem(xplan.memory)
+    if dry:
+        stops = []
+        if missing and not args.create_prefix:
+            stops.append(f"the prefix does not exist: {xplan.prefix} (add --create-prefix, or "
+                         "create it first)")
+        if create and wine is None:
+            stops.append("wine not found on PATH; it is needed to create the prefix")
+        if scope_problem:
+            stops.append(f"{scope_problem} (for the prefix creation; add --no-memory-limit to "
+                         "create it without the memory limit)")
+        if problem:
+            stops.append(problem)
+        if mem_problem:
+            stops.append(f"{mem_problem} (add --no-memory-limit to unpack anyway)")
+        for item in stops:
+            print(f"a real run would stop now: {item}")
+        return 0
+    if problem:
+        print(f"error: {problem}. " + ("Nothing was run or created." if create else
+                                       "Nothing was written."), file=sys.stderr)
+        return 1
+    if mem_problem:
+        print(f"error: {mem_problem}. Nothing was run or written. To unpack without this "
+              "check, add --no-memory-limit (the unpack can then use all free memory).",
+              file=sys.stderr)
+        return 2
+    print("Ctrl-C stops the unpack; files already written are kept and nothing is deleted.")
+    if not args.yes:
+        refused = _confirm("Type 'yes' to unpack the files: ", "Nothing was run or written.")
+        if refused is not None:
+            return refused
+    scan_summary = None
+    if scan_plan is not None:
+        from gitfurl.scan import decide, run_scan
+
+        try:
+            proceed, scan_summary = decide(run_scan(scan_plan), args.allow_scan_hit)
+        except KeyboardInterrupt:
+            print("interrupted during the ClamAV scan. Nothing was run or created.",
+                  file=sys.stderr)
+            return 130
+        if not proceed:
+            print(f"error: {scan_summary}", file=sys.stderr)
+            return 1
+        print(f"[note] {scan_summary}", flush=True)
+    if create:
+        from gitfurl.memlimit import MemoryLimitError as _MemErr
+
+        try:
+            status = native_prefix_create(plan, not args.no_memory_limit)
+        except _MemErr as exc:
+            print(f"error: {exc}. {MEMORY_OFF_HINT}", file=sys.stderr)
+            return 2
+        except FileExistsError as exc:
+            print(f"error: {exc}. Nothing was unpacked.", file=sys.stderr)
+            return 1
+        except KeyboardInterrupt as exc:
+            print(_prefix_interrupt_message(exc), file=sys.stderr)
+            print("Nothing was unpacked.", file=sys.stderr)
+            return 130
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            print(f"error: {exc}" if isinstance(exc, RuntimeError) else
+                  "error: wine did not finish in time; the prefix directory may be incomplete.",
+                  file=sys.stderr)
+            print("Nothing was unpacked.", file=sys.stderr)
+            return 1
+        if status != 0:
+            print(f"error: creating the prefix failed (wine exited {status}). Nothing was "
+                  "unpacked.", file=sys.stderr)
+            return 1
+        problem = xplan.problem()
+        if problem:
+            print(f"error: {problem}. The prefix was created; nothing was written in it.",
+                  file=sys.stderr)
+            return 1
+    try:
+        res = run_native(
+            plan, on_line=(lambda text: print(f"[progress] {text}", flush=True))
+            if args.progress else None,
+            detailed_log=args.detailed_log, progress_interval=args.progress_interval,
+            scan_summary=scan_summary)
+    except ExtractRefused as exc:
+        print(f"error: {exc}. {exc.outcome()}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt as exc:
+        if getattr(exc, "unpack_started", False):
+            print(f"interrupted during the unpack; files already written in {xplan.dest} are "
+                  "kept and nothing was deleted. The unpack's result was not recorded.",
+                  file=sys.stderr)
+        else:
+            print("interrupted before any file was written; nothing was deleted.",
+                  file=sys.stderr)
+        return 130
+    for line in res.lines:
+        print(line)
+    if args.cleanup != "none":
+        if res.status == 0:
+            deleted, problems = perform_cleanup(clean, 0)
+            print(f"cleanup: deleted {deleted} file(s)")
+            for item in problems:
+                print(f"cleanup problem: {item}", file=sys.stderr)
+        else:
+            print("cleanup: skipped, the unpack did not complete")
+    if res.events_path is not None:
+        print(f"event log: {res.events_path}")
+    print(f"local log: {res.log_path} (may contain your username and local paths)")
+    sys.stdout.flush()
+    return res.status

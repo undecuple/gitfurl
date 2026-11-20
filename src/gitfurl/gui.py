@@ -179,6 +179,29 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
     return text.rstrip(), None
 
 
+WINDOW_NOT_NATIVE = ("this window does not run the native route yet; 'gitfurl cli install' "
+                     "does (Setup is then not run and gitfurl unpacks the archives itself)")
+
+
+def window_route_text(installer, prefix: str, env=None) -> str:
+    """The detection text with the window's honest route line. Reads headers and archive
+    indexes only. The window always runs Setup (the Wine/Proton route); when gitfurl would
+    have picked the native route, the line says so."""
+    from gitfurl.route import RouteChoice, choose_route
+
+    det = detect(installer)
+    try:
+        auto = choose_route(installer, prefix, det, "auto", env)
+    except ValueError as exc:
+        return describe_detection(det) + f"\nroute: not chosen ({exc})."
+    if auto.route == "native":
+        choice = RouteChoice("wine", "this window", ("Setup runs under Wine/Proton",
+                                                      WINDOW_NOT_NATIVE))
+    else:
+        choice = auto
+    return describe_detection(det, choice)
+
+
 def installer_problem(installer: str) -> str | None:
     """Why this installer text cannot be used, or None. Reads nothing but file metadata."""
     if not installer.strip():
@@ -1032,7 +1055,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             if missing else ""
         if cleanup_var.get() != "none":
             extra += "\n\nIf the installer exits with status 0, " + clean.describe()
-        extra += "\n\n" + describe_detection(detect(validate_installer(installer_var.get().strip())))
+        extra += "\n\n" + window_route_text(validate_installer(installer_var.get().strip()),
+                                             prefix_var.get().strip())
         extra += "\n\nChecks before the run (read-only, advisory):\n" + measure(
             validate_installer(installer_var.get().strip()), plan.prefix).describe()
         if proton:

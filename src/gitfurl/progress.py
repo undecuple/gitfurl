@@ -186,6 +186,9 @@ def _dur(s: float) -> str:
     return f"{h}h{m:02d}m" if h else f"{m}m{sec:02d}s"
 
 
+STOP_WAIT_S = 5.0  # longest ProgressMonitor.stop() waits for a running on_sample
+
+
 class ProgressMonitor:
     """Samples progress on a background thread and hands each Sample to on_sample."""
 
@@ -195,6 +198,9 @@ class ProgressMonitor:
         self.total = sum(f.stat().st_size for f in self.files)
         self.prefix, self.on_sample, self.interval, self.proc_root = prefix, on_sample, interval, proc_root
         self._stop = threading.Event()
+        # Held while sampling and while on_sample runs, so stop() never samples at the same
+        # time as the thread, and no on_sample call starts after stop() has returned.
+        self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._t0 = 0.0
         self._base = 0
@@ -229,16 +235,53 @@ class ProgressMonitor:
 
     def _loop(self) -> None:
         while not self._stop.wait(self.interval):
-            try:
-                self.on_sample(self.sample())
-            except Exception:  # noqa: BLE001, S110 - progress must never break the install
-                pass
+            with self._lock:
+                if self._stop.is_set():
+                    return
+                try:
+                    self.on_sample(self.sample())
+                except Exception:  # noqa: BLE001, S110 - progress must never break the install
+                    pass
 
-    def stop(self) -> Sample:
+    def stop(self, wait_s: float = STOP_WAIT_S) -> Sample:
+        """Stop sampling and return a final sample.
+
+        Once the lock is taken the thread is either waiting or about to see the stop flag, so
+        no on_sample call starts after this returns and sample() never runs twice at once.
+        A Ctrl-C while this waits for the lock, the final sample or the thread is held back
+        and raised only after the thread has ended (or `wait_s` seconds have passed), so the
+        thread is never left inside on_sample because of it. If on_sample does not return
+        within `wait_s` seconds (for example a write to a stalled terminal), this stops
+        waiting and the thread may still be inside it.
+        """
         self._stop.set()
+        held: list[KeyboardInterrupt] = []
+        deadline = time.monotonic() + wait_s
+
+        def left() -> float:
+            return max(0.0, deadline - time.monotonic())
+
+        got = _uninterrupted(lambda: self._lock.acquire(timeout=left()), held)
+        try:
+            final = _uninterrupted(self.sample, held)
+        finally:
+            if got:
+                self._lock.release()
         if self._thread:
-            self._thread.join(timeout=2)
-        return self.sample()
+            _uninterrupted(lambda: self._thread.join(timeout=left()), held)
+        if held:
+            raise held[0]
+        return final
+
+
+
+def _uninterrupted(fn, held: list):
+    """Call fn until it returns without a KeyboardInterrupt; keep each one in `held`."""
+    while True:
+        try:
+            return fn()
+        except KeyboardInterrupt as exc:
+            held.append(exc)
 
 
 # Heuristic thresholds for "observed activity" (see ActivityObserver). Not proof of anything.

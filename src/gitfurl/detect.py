@@ -9,7 +9,7 @@ It recognises two things, each with a confidence that says how sure it is:
   * Inno Setup: a Windows program (starts with "MZ") that holds an Inno Setup setup-header
     ID string such as "Inno Setup Setup Data (5.5.0)". The ID format is documented in
     innoextract's source. A string match alone is "likely": the offset table that would
-    make it "certain" is not checked, so this module never selects a native route.
+    make it "certain" is not checked; this module only reports it (gitfurl.route decides).
   * FreeArc: the four bytes "ArC" 0x01 at the start of a file (the installer itself, or a
     large file beside it, at most MAX_NEIGHBOURS of those opened). For each such file the
     archive's own index is read with gitfurl.farc (bounded reads, CRC-32 checked) from the
@@ -18,7 +18,9 @@ It recognises two things, each with a confidence that says how sure it is:
     size and, per data block, whether it uses storing, lzma or a method gitfurl does not
     handle. When it does not, the evidence stays "possible" and says why.
 
-The data inside an archive is never decoded, and the files in it are never extracted.
+The data inside an archive is never decoded, and the files in it are never extracted. The
+route itself (native or Wine/Proton) is chosen in gitfurl.route; describe() prints that
+choice when the caller passes it.
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ from pathlib import Path
 from gitfurl import farc
 
 ROUTE_WINE = "wine"
-ROUTE_NATIVE = "native"  # declared for later phases; decide() never returns it yet
+ROUTE_NATIVE = "native"  # chosen only by gitfurl.route.choose_route
 ROUTE_UNSUPPORTED = "unsupported"
 
 MAX_SCAN_BYTES = 32 * 1024 * 1024  # how far into the installer the Inno ID is looked for
@@ -70,6 +72,9 @@ class Evidence:
     where: str
     detail: str
     lines: list[str] = field(default_factory=list)  # extra plan lines (already cleaned)
+    # FreeArc only: True when the index read cleanly and every data block uses a method
+    # gitfurl can decode; False when some block does not; None when not known.
+    extractable: bool | None = None
 
 
 @dataclass
@@ -180,7 +185,7 @@ def _freearc_evidence(fd: int, path: Path, where: str,
     else:
         return Evidence("FreeArc", CONF_LIKELY, where,
                         "the archive's own index was read and its CRC-32 checks match "
-                        "(nothing was extracted)", lines)
+                        "(nothing was extracted)", lines, extractable=not arc.unsupported)
     return Evidence("FreeArc", CONF_POSSIBLE, where,
                     "the 4 bytes 'ArC' 0x01, but the archive's index could not be read: "
                     f"{reason}")
@@ -233,23 +238,23 @@ def _neighbours(det: Detection) -> None:
 
 
 def decide(det: Detection) -> Verdict:
-    """Pick a route: the Wine/Proton path, or unsupported when the file is unreadable.
+    """The verdict describe() prints when no route was chosen by the caller.
 
-    Native extraction does not exist yet, so ROUTE_NATIVE is never returned here, even when
-    a FreeArc index was read.
+    Only an unreadable file is decided here (unsupported). The route between native and
+    Wine/Proton is chosen by gitfurl.route.choose_route, which reads the archives fully.
     """
     if not det.readable:
         return Verdict(ROUTE_UNSUPPORTED, ["the file could not be read as a regular file"])
-    reasons = ["Wine/Proton is the default route"]
-    if det.evidence:
-        reasons.append("native extraction is not available in this version, so a detection "
-                       "changes nothing about the run unless you choose the unattended option "
-                       "(Inno Setup only)")
-    return Verdict(ROUTE_WINE, reasons)
+    return Verdict("not chosen here", [("this text only describes the file; the plan's route "
+                                        "is chosen by gitfurl.route")])
 
 
-def describe(det: Detection) -> str:
-    """Plain text for the plan preview and the approval dialog."""
+def describe(det: Detection, choice=None) -> str:
+    """Plain text for the plan preview and the approval dialog.
+
+    `choice` is a gitfurl.route.RouteChoice; with it the route line says which route was
+    chosen, by whom, and why. Without it the line says no route was chosen here.
+    """
     lines = [("detected from file headers and archive indexes (read-only; nothing was run or "
               "extracted):")]
     if not det.readable:
@@ -263,8 +268,11 @@ def describe(det: Detection) -> str:
     lines.append("  the data inside any payload is not decoded or guessed; for FreeArc only "
                  "the archive's own index (names, sizes, methods) is read")
     lines.extend(f"  note: {n}" for n in det.notes)
-    verdict = decide(det)
-    lines.append(f"route: {verdict.route}. " + "; ".join(verdict.reasons) + ".")
+    if choice is not None:
+        lines.append(choice.line())
+    else:
+        verdict = decide(det)
+        lines.append(f"route: {verdict.route}. " + "; ".join(verdict.reasons) + ".")
     lines.append("A detection is a guess from a few bytes, not a promise that anything can be "
                  "extracted or installed.")
     return "\n".join(lines)

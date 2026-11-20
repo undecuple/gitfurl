@@ -113,27 +113,48 @@ class ExtractPlan:
 
     def problem(self) -> str | None:
         """What stops a real extraction now (prefix missing, folder exists, space), or None."""
+        from gitfurl.prefixes import incomplete_marker
+
         drive_c = self.prefix / "drive_c"
         if not self.prefix.is_dir() or self.prefix.is_symlink():
             return (f"the prefix does not exist: {self.prefix}. Create it first with "
                     f"'gitfurl cli prefix create {self.prefix_name}'")
+        marker = incomplete_marker(self.prefix)
+        if marker is not None:
+            return (f"the prefix was not completely created ({marker} is still there: "
+                    "creating it stopped, timed out or failed). Use a new prefix name")
         if not drive_c.is_dir() or drive_c.is_symlink():
             return f"the prefix has no drive_c folder: {drive_c}"
         if os.path.lexists(self.dest):
             return (f"the destination already exists: {self.dest}. gitfurl only extracts "
                     "into a new folder")
-        st = os.statvfs(drive_c)
+        return self.space_problem(drive_c)
+
+    def space_problem(self, at: Path, extra: int = 0) -> str | None:
+        """Free space and inodes on the file system of `at` against what the files need, plus
+        `extra` bytes (for example a prefix that is still to be created). Reads statvfs only."""
+        st = os.statvfs(at)
         block = st.f_frsize or st.f_bsize or 4096
-        need = self.disk_size(block)
+        need = self.disk_size(block) + extra
         free = st.f_bavail * block
         if free < need:
+            plus = f", plus about {farc._size(extra)} for the new prefix" if extra else ""
             return (f"not enough free space: about {farc._size(need)} needed on disk "
-                    f"({farc._size(self.total_size)} of file data), {farc._size(free)} free")
+                    f"({farc._size(self.total_size)} of file data{plus}), "
+                    f"{farc._size(free)} free")
         inodes = self.file_count + len(self.folders)
         if st.f_files and st.f_favail < inodes:
             return (f"not enough free inodes: {inodes:,} files and folders to create, "
                     f"{st.f_favail:,} free")
         return None
+
+    def space_problem_before_prefix(self, extra: int) -> str | None:
+        """space_problem() for a prefix that does not exist yet: measured on the nearest folder
+        above it that exists. Creates nothing."""
+        at = self.prefix
+        while not at.is_dir() and at != at.parent:
+            at = at.parent
+        return self.space_problem(at, extra)
 
     def disk_size(self, block: int) -> int:
         """Bytes on disk: each file rounded up to whole blocks, one block per folder."""

@@ -30,6 +30,17 @@ def prefix_path(name: str, env: dict[str, str] | None = None) -> Path:
 
 WINEBOOT_TIMEOUT_S = 300
 
+# Written into a prefix gitfurl creates before wineboot starts, and removed only when
+# wineboot exits with status 0. While it is there the prefix is incomplete (creating it
+# stopped, timed out or failed), and the native route does not unpack into it.
+INCOMPLETE_MARKER = "gitfurl-incomplete"
+
+
+def incomplete_marker(prefix: Path) -> Path | None:
+    """The prefix's incomplete marker if it is there, else None. Reads one name only."""
+    marker = Path(prefix) / INCOMPLETE_MARKER
+    return marker if os.path.lexists(marker) else None
+
 
 def child_env(base: dict[str, str], overrides: dict[str, str]) -> dict[str, str]:
     """The environment for a Wine child: yours, minus inherited WINE* settings, plus overrides.
@@ -162,6 +173,9 @@ def create_prefix(name: str, wine: str, env: dict[str, str] | None = None, run=N
                   extra_env: dict[str, str] | None = None, wrap=None) -> int:
     """Create a dedicated prefix. Refuses to touch an existing path. Returns wine's exit status.
 
+    An empty marker file (INCOMPLETE_MARKER) is written in the new folder before wineboot
+    starts and removed when wineboot exits with status 0.
+
     Without an injected `run` (tests), wineboot runs in its own process group so a timeout
     or Ctrl-C can end it and its helpers (see run_in_group). `wrap`, if given, turns the
     wineboot argv into the argv to start (the memory limit's systemd-run scope).
@@ -172,9 +186,11 @@ def create_prefix(name: str, wine: str, env: dict[str, str] | None = None, run=N
     path: Path = plan["path"]
     if path.exists():
         raise FileExistsError(f"prefix path already exists, not touching it: {path}")
+    marker = path / INCOMPLETE_MARKER
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         path.mkdir(mode=0o700)
+        os.close(os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600))
     except KeyboardInterrupt as exc:
         exc.notes = ["wineboot had not been started yet; nothing was run"]
         raise
@@ -190,4 +206,9 @@ def create_prefix(name: str, wine: str, env: dict[str, str] | None = None, run=N
         raise RuntimeError(
             f"creating the prefix timed out after {WINEBOOT_TIMEOUT_S} s ({path}). What "
             f"gitfurl did: {done}. The prefix folder was kept; it may be incomplete.") from exc
+    if proc.returncode == 0:
+        try:  # only the marker this call wrote; the prefix is complete now
+            marker.unlink()
+        except FileNotFoundError:
+            pass
     return proc.returncode

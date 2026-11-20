@@ -100,15 +100,21 @@ def plan_unattended(prefix_name: str, detection: Detection,
 class UnattendedReport:
     exit_status: int | None
     log_found: bool = False
-    succeeded: bool = False  # Inno's log says "Installation process succeeded."
+    succeeded: bool = False  # Inno's log has "Installation process succeeded."
     files: int = 0  # "Dest filename:" lines in the log
     errors: list[str] = field(default_factory=list)
     log_path: Path | None = None
     folder: Path | None = None
     folder_exists: bool = False
+    cancelled: bool = False  # the run was stopped (Stop or Ctrl-C) before Setup ended
 
     def lines(self) -> list[str]:
+        """The report. Inno Setup writes its success line after its own file list; steps the
+        setup script runs after that line (on some installers the whole payload) are not
+        covered by it, so the text never calls the installation as a whole a success."""
         out = []
+        if self.cancelled:
+            out.append("The run was cancelled, so Setup did not finish.")
         if self.exit_status is not None:
             meaning = EXIT_MEANINGS.get(self.exit_status)
             if meaning:
@@ -117,10 +123,18 @@ class UnattendedReport:
             out.append(f"Inno Setup's log was not found ({self.log_path}); Setup may not have "
                        "started, or the script did not honour /LOG.")
             return out
-        state = "says the installation succeeded" if self.succeeded else \
-            "does not say the installation succeeded"
-        out.append(f"Inno Setup's log {state}; it lists {self.files} file(s) written. "
-                   f"Log: {self.log_path}")
+        if self.succeeded and self.cancelled:
+            out.append("Inno Setup's log reached its own 'Installation process succeeded.' line "
+                       f"(written after Setup's own file list, {self.files} file(s)) before the "
+                       "cancel; steps the setup script runs after that line did not finish. "
+                       f"Log: {self.log_path}")
+        elif self.succeeded:
+            out.append("Inno Setup's log has its 'Installation process succeeded.' line; it "
+                       f"covers Setup's own file list ({self.files} file(s)), not steps the "
+                       f"setup script runs after it. Log: {self.log_path}")
+        else:
+            out.append("Inno Setup's log has no 'Installation process succeeded.' line; it "
+                       f"lists {self.files} file(s) written. Log: {self.log_path}")
         out.extend(f"  from the log: {e}" for e in self.errors)
         if self.folder is not None:
             where = "exists" if self.folder_exists else "does not exist"
@@ -128,12 +142,13 @@ class UnattendedReport:
         return out
 
 
-def read_report(plan: UnattendedPlan, prefix: Path, exit_status: int | None) -> UnattendedReport:
+def read_report(plan: UnattendedPlan, prefix: Path, exit_status: int | None,
+                cancelled: bool = False) -> UnattendedReport:
     """Read Inno Setup's log after the run. Reads one file, bounded; never raises on its text."""
     path = plan.log_path(prefix)
     folder = plan.folder(prefix)
     rep = UnattendedReport(exit_status, log_path=path, folder=folder,
-                           folder_exists=folder.is_dir())
+                           folder_exists=folder.is_dir(), cancelled=cancelled)
     try:
         with open(path, "rb") as fh:
             fh.seek(0, 2)

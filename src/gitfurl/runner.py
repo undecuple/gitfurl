@@ -598,7 +598,8 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
                 from gitfurl.unattended import read_report
 
                 unattended_report = read_report(plan.unattended, plan.prefix,
-                                                None if control.cancelled else proc.returncode)
+                                                None if control.cancelled else proc.returncode,
+                                                cancelled=control.cancelled)
                 for line in unattended_report.lines():
                     log.write(f"--- {line}\n")
             if memory_report is not None:
@@ -608,7 +609,8 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
             event("progress_final", line=final.line())
         if unattended_report is not None:
             event("unattended_result", log_found=unattended_report.log_found,
-                  succeeded=unattended_report.succeeded, files=unattended_report.files)
+                  succeeded=unattended_report.succeeded, files=unattended_report.files,
+                  cancelled=unattended_report.cancelled)
         if memory_report is not None:
             event("memory_limit_result", unit=scope.unit, oom_kill=memory_report.oom_kill,
                   oom_result=memory_report.oom_result, high_events=memory_report.high,

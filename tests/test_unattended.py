@@ -111,8 +111,26 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(rep.files, 2)
         text = "\n".join(rep.lines())
         self.assertIn("exit status 0: Setup finished", text)
-        self.assertIn("says the installation succeeded", text)
+        self.assertIn("has its 'Installation process succeeded.' line", text)
+        self.assertIn("not steps the setup script runs after it", text)
+        self.assertNotIn("says the installation succeeded", text)
         self.assertIn("2 file(s)", text)
+
+    def test_cancelled_run_with_the_success_line_is_not_a_success(self):
+        self.write_log("Dest filename: C:\\Games\\p1\\a.bin\n"
+                       "Installation process succeeded.\n")
+        rep = read_report(self.up, self.prefix, None, cancelled=True)
+        self.assertTrue(rep.succeeded and rep.cancelled)
+        text = "\n".join(rep.lines())
+        self.assertTrue(text.startswith("The run was cancelled, so Setup did not finish."))
+        self.assertIn("did not finish", text)
+        self.assertIn("before the cancel", text)
+        self.assertNotIn("says the installation succeeded", text)
+
+    def test_cancelled_run_without_a_log(self):
+        text = "\n".join(read_report(self.up, self.prefix, None, cancelled=True).lines())
+        self.assertIn("Setup did not finish", text)
+        self.assertIn("was not found", text)
 
     def test_missing_log(self):
         rep = read_report(self.up, self.prefix, 1)
@@ -130,7 +148,7 @@ class ReportTests(unittest.TestCase):
         self.assertNotIn("\x1b", "".join(rep.errors))
         text = "\n".join(rep.lines())
         self.assertIn("fatal error happened during the installation", text)
-        self.assertIn("does not say the installation succeeded", text)
+        self.assertIn("has no 'Installation process succeeded.' line", text)
         self.assertIn("folder", text)
 
     def test_only_the_end_of_a_huge_log_is_read(self):
@@ -174,7 +192,8 @@ class CliTests(unittest.TestCase):
         run.assert_not_called()
         self.assertIn("/VERYSILENT", out)
         self.assertIn("unattended install (Inno Setup): on", out)
-        self.assertIn("unless you choose the unattended option", out)
+        self.assertIn("route: wine (chosen by gitfurl)", out)
+        self.assertNotIn("not available in this version", out)
 
     def test_off_by_default(self):
         code, out, _ = run_cli("install", str(self.setup), "--prefix", "p1", "--dry-run",
@@ -214,11 +233,12 @@ class CliTests(unittest.TestCase):
         self.assertEqual(seen["argv"][:2], ["/x/wine", str(self.setup)])
         self.assertIn("/VERYSILENT", seen["argv"])
         self.assertIn(r"/DIR=C:\Games\p1", seen["argv"])
-        self.assertIn("says the installation succeeded", out)
+        self.assertIn("has its 'Installation process succeeded.' line", out)
+        self.assertNotIn("says the installation succeeded", out)
         self.assertIn("1 file(s)", out)
         logs = list((self.state / "gitfurl" / "logs").glob("p1-*.log"))
         self.assertEqual(len(logs), 1)
-        self.assertIn("Inno Setup's log says the installation succeeded", logs[0].read_text())
+        self.assertIn("covers Setup's own file list", logs[0].read_text())
 
     def test_failed_run_reports_inno_exit_meaning(self):
         prefix = self.data / "gitfurl" / "prefixes" / "p1"
@@ -230,6 +250,48 @@ class CliTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
         self.assertIn("fatal error happened during the installation", out)
         self.assertIn("was not found", out)
+
+
+class CancelledRunTests(unittest.TestCase):
+    """A run stopped after Inno's success line is reported as cancelled everywhere."""
+
+    def test_runner_reports_the_cancel_in_text_log_and_events(self):
+        import json
+
+        from gitfurl.runner import RunControl, RunOptions, execute
+
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            setup = base / "setup.exe"
+            setup.write_bytes(INNO)
+            env = {"XDG_DATA_HOME": str(base / "data"), "XDG_STATE_HOME": str(base / "state"),
+                   "HOME": d, "PATH": "/nonexistent"}
+            up = plan_unattended("p1", detect(setup), NOW)
+            with mock.patch.dict("os.environ", env):
+                plan = build_plan(setup, "p1", unattended=up)
+            (plan.prefix / "drive_c").mkdir(parents=True)
+            control = RunControl()
+
+            def fake_run(argv, **kw):
+                up.log_path(plan.prefix).write_text(
+                    "Dest filename: C:\\Games\\p1\\a.bin\nInstallation process succeeded.\n")
+                control.cancelled = True  # as a stop after the success line would
+                return subprocess.CompletedProcess(argv, -2)
+
+            res = execute(plan, "wine", env, run=fake_run,
+                          options=RunOptions(control=control, detailed_log=True))
+            self.assertEqual(res.status, 130)
+            self.assertTrue(res.unattended.cancelled)
+            text = describe_result(res)
+            self.assertIn("Setup did not finish", text)
+            self.assertNotIn("says the installation succeeded", text)
+            log_text = Path(res.log_path).read_text()
+            self.assertIn("The run was cancelled, so Setup did not finish.", log_text)
+            events_path = Path(str(res.log_path)[:-4] + ".events.jsonl")
+            events = [json.loads(ln) for ln in events_path.read_text().splitlines()]
+            result = next(e for e in events if e["event"] == "unattended_result")
+            self.assertTrue(result["cancelled"])
+            self.assertTrue(result["succeeded"])
 
 
 class ResultTextTests(unittest.TestCase):
