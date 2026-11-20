@@ -1,15 +1,20 @@
 """A small FreeArc writer for the tests: archives are built in memory, as bytes.
 
-Storing, raw LZMA1 from Python's own lzma module, and test-only encoders for exe, delta and
-rep (ENCODERS), written from the same clean-room specifications as gitfurl/farc_codecs.py,
-so agreement between the two does not show agreement with FreeArc itself. Chains are encoded
+Storing, raw LZMA1 from Python's own lzma module, and test-only encoders for exe, delta, rep,
+4x4 and srep (ENCODERS), written from the same clean-room specifications as
+gitfurl/farc_codecs.py, so agreement between the two does not show agreement with FreeArc or
+srep themselves. The srep encoder borrows gitfurl's own VHASH and SipHash for those two
+checksum kinds; those are checked against published values in the tests. Chains are encoded
 left to right. The bytes are written to a temporary folder only for a test; no archive file
 is kept in the repository.
 """
 
+import hashlib
 import lzma
 import random
 import zlib
+
+from gitfurl.farc_codecs import Vhash, siphash24
 
 SIG = b"ArC\x01"
 
@@ -220,12 +225,152 @@ def rep_encode(data: bytes, method: str = "rep", window: int | None = None,
     return rep_stream(window, blocks)
 
 
+# --- 4x4 (pieces compressed on their own), encode direction --------------------------------
+def x4_piece(data: bytes, opts: dict, store: bool = False) -> bytes:
+    """One piece: kept as it is when asked, or when lzma does not make it smaller."""
+    if not store:
+        comp = lzma.compress(data, format=lzma.FORMAT_RAW,
+                             filters=[{"id": lzma.FILTER_LZMA1, **opts}])
+        if len(comp) < len(data):
+            return u32(len(data)) + u32(len(comp)) + comp
+    return u32(0xFFFFFFFF) + u32(len(data)) + data
+
+
+def x4_encode(data: bytes, method: str = "4x4:lzma", sizes=None) -> bytes:
+    """A version word, then pieces. sizes: the pieces' sizes in turn (repeated; default one
+    size of 64 KiB). The inner method is the fields from "lzma" on."""
+    fields = method.split(":")
+    inner = ":".join(fields[fields.index("lzma"):]) if "lzma" in fields else "lzma"
+    opts = lzma_opts(inner)
+    sizes = list(sizes or [1 << 16])
+    out, at, k = bytearray(u32(0)), 0, 0
+    while at < len(data):
+        n = sizes[k % len(sizes)]
+        k += 1
+        out += x4_piece(data[at:at + n], opts)
+        at += n
+    return bytes(out)
+
+
+# --- srep (long-range matches), encode direction -------------------------------------------
+SREP_KINDS = {"md5": (0, 0, 16), "none": (1, 0, 16), "sha1": (2, 0, 20), "sha512": (3, 0, 64),
+              "vmac": (4, 32, 16), "siphash": (5, 16, 8)}
+
+
+def srep_header(version: int, kind: str = "none", base: int = 0, seed: bytes | None = None):
+    """The 16-byte header and the seed. Returns (bytes, checksum function or None, H)."""
+    num, slen, hlen = SREP_KINDS[kind]
+    seed = bytes(range(slen)) if seed is None else seed
+    head = (bytes.fromhex("1718352653524550") + bytes([version, num, slen, (hlen - 16) % 256])
+            + u32(base) + seed)
+    funcs = {"md5": lambda d: hashlib.md5(d).digest(),
+             "sha1": lambda d: hashlib.sha1(d).digest(),
+             "sha512": lambda d: hashlib.sha512(d).digest(),
+             "vmac": lambda d: Vhash(seed).digest(d),
+             "siphash": lambda d: siphash24(seed, d).to_bytes(8, "little")}
+    return head, funcs.get(kind), hlen
+
+
+def find_matches(data: bytes, min_len: int = 16) -> list[tuple[int, int, int]]:
+    """Greedy backward matches (dest, source, length) through 4-byte keys; a match may
+    overlap its own destination."""
+    last: dict[bytes, int] = {}
+    out, i = [], 0
+    while i + 4 <= len(data):
+        key = data[i:i + 4]
+        j = last.get(key)
+        last[key] = i
+        n = 0
+        if j is not None:
+            while i + n < len(data) and data[j + n] == data[i + n]:
+                n += 1
+        if n >= min_len:
+            out.append((i, j, n))
+            i += n
+        else:
+            i += 1
+    return out
+
+
+def _split(matches, block: int):
+    """Split matches so that each piece's destination, and source, lie in one block."""
+    out = []
+    for d, s, n in matches:
+        while n:
+            k = min(n, block - d % block, block - s % block)
+            out.append((d, s, k))
+            d, s, n = d + k, s + k, n - k
+    return out
+
+
+def srep_encode(data: bytes, version: int = 3, kind: str = "none", block: int = 1 << 16,
+                base: int = 0, min_len: int = 16, flag: bytes = b"") -> bytes:
+    """An srep stream of format 2 (I/O-LZ), 3 (Future-LZ) or 4 (Index-LZ) with blocks of
+    `block` bytes. `base` is the header's base length (every match must be at least that
+    long, so it is raised to min_len). flag: an optional flag byte put first."""
+    min_len = max(min_len, base)
+    head, check, hlen = srep_header(version, kind, base)
+    matches = _split(find_matches(data, min_len), block)
+    matches = [m for m in matches if m[2] >= max(base, 1)]
+    covered = bytearray(len(data))
+    for d, _, n in matches:
+        covered[d:d + n] = b"\1" * n
+    nblocks = -(-len(data) // block)
+    by_dest: list[list] = [[] for _ in range(nblocks)]
+    by_src: list[list] = [[] for _ in range(nblocks)]
+    for m in matches:
+        by_dest[m[0] // block].append(m)
+        by_src[m[1] // block].append(m)
+    out, index, sizes = bytearray(flag + head), bytearray(), []
+    for b in range(nblocks):
+        start, chunk = b * block, data[b * block:(b + 1) * block]
+        lits = bytes(c for c, used in zip(chunk, covered[start:start + len(chunk)]) if not used)
+        recs = bytearray()
+        if version == 2:
+            q = start
+            for d, s, n in sorted(by_dest[b]):
+                recs += u32(d - q) + (d - s).to_bytes(8, "little") + u32(n - base)
+                q = d + n
+        else:
+            anchor = start
+            for d, s, n in sorted(by_src[b], key=lambda m: m[1]):
+                recs += u32(s - anchor) + (d - s).to_bytes(8, "little") + u32(n - base)
+                anchor = s
+        csum = check(chunk)[:hlen] if check else bytes(hlen)
+        if version == 4:
+            index += recs
+            sizes.append(len(recs))
+            recs = bytearray()
+        out += u32(len(lits)) + u32(len(chunk)) + u32(len(recs)) + csum + recs + lits
+    if version == 4:
+        out += index + b"".join(u32(n) for n in sizes)
+        out += u32(len(index)) + u32(len(index) >> 32) + u32(24 + 4 * len(sizes)) + u32(1)
+        out += u32(0xAFBAADAC) + u32(0xD9CAE7E8)
+    return bytes(out)
+
+
+def srep_method(data: bytes, method: str = "srep") -> bytes:
+    """For chains: srep (format 3 unless the options say m...o / a bare m..., then format 2 or
+    4), checksum by `hash=`."""
+    version, kind = 3, "vmac"
+    for p in method.split(":")[1:]:
+        if p.startswith("m") and p[1:2].isdigit():
+            version = 2 if p.endswith("o") else 3 if p.endswith("f") else 4
+        elif p.startswith("hash="):
+            kind = p[5:]
+        elif p == "hash-":
+            kind = "none"
+    return srep_encode(data, version, kind, block=1 << 16)
+
+
 ENCODERS = {
     "storing": lambda data, method: data,
     "lzma": _lzma,
     "exe": exe_encode,
     "delta": delta_encode,
     "rep": rep_encode,
+    "4x4": x4_encode,
+    "srep": srep_method,
 }
 
 

@@ -1,13 +1,15 @@
-"""FreeArc method chains: the exe, delta and rep decoders, lzma inside a chain, the pipeline and
-extraction of chained archives. Every stream is built in memory by the test-only encoders in
-tests/farc_writer.py, which follow the same clean-room specifications as the decoders, plus
-the specifications' own worked examples and test vectors."""
+"""FreeArc method chains: the exe, delta, rep, 4x4 and srep decoders, lzma inside a chain, the
+pipeline and extraction of chained archives. Every stream is built in memory by the test-only
+encoders in tests/farc_writer.py, which follow the same clean-room specifications as the
+decoders, plus the specifications' own worked examples and test vectors."""
 
+import hashlib
 import os
 import random
 import tempfile
 import tracemalloc
 import unittest
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -22,7 +24,10 @@ try:
         pack,
         rep_encode,
         rep_stream,
+        srep_encode,
+        srep_header,
         u32,
+        x4_encode,
     )
 except ImportError:  # python -m unittest tests.test_codecs
     from tests.farc_writer import (
@@ -35,7 +40,10 @@ except ImportError:  # python -m unittest tests.test_codecs
         pack,
         rep_encode,
         rep_stream,
+        srep_encode,
+        srep_header,
         u32,
+        x4_encode,
     )
 
 from gitfurl import extract, farc
@@ -479,6 +487,43 @@ class LzmaAndPlan(unittest.TestCase):
                 self.assertEqual(m.kind, farc.KIND_OTHER)
                 self.assertNotIn(text or "\0", m.reason + repr(m))
 
+    def test_parse_4x4_and_srep(self):
+        ok = {
+            "4x4:lzma": "4x4", "4x4:b8mb:lzma:96mb:normal": "4x4", "4x4:t3:b1mb:lzma": "4x4",
+            "4x4:t4:i0:r99:lzma:1mb": "4x4", "4x4:r99.5:lzma": "4x4", "4x4:8mb:lzma": "4x4",
+            "4x4:4:lzma": "4x4", "4x4:i0:lzma:8mb:max": "4x4",
+            "4x4:b16mb:lzma:max:d32m": "4x4",
+            "rep:96mb+exe+delta+4x4:lzma:96m:normal:16:mc8": "rep+exe+delta+4x4",
+            "4x4:lzma:96mb:fast:32:mc4": "4x4", "srep": "srep", "srep:m3f": "srep",
+            "srep64:m3f:a2": "srep", "srep_new:m3f:a16:d1g:1": "srep", "srep_old": "srep",
+            "srep:m3f:b64mb": "srep", "srep:m3f:a0/0+lzma:8mb:normal:32": "srep+lzma",
+            "srep:m3f:hash=siphash+exe+delta+4x4:lzma:45mb:normal:32": "srep+exe+delta+4x4",
+            "rep:64mb+srep:m3f+lzma:8mb": "rep+srep+lzma", "srep:m3f:hash-+lzma": "srep+lzma",
+        }
+        for text, kind in ok.items():
+            with self.subTest(text=text):
+                self.assertEqual(farc.parse_method(text).kind, kind)
+        sizes = {"4x4:b8:lzma": 256, "4x4:8mb:lzma": 8 << 20, "4x4:lzma": 0,
+                 "srep": farc.SREP_BLOCK_DEFAULT, "srep:m3f:b1mb": farc.SREP_BLOCK_DEFAULT,
+                 "srep:b32mb": 32 << 20}
+        for text, size in sizes.items():
+            self.assertEqual(farc.parse_method(text).stages[0].size, size, text)
+        self.assertEqual(farc.parse_method("4x4:lzma:96m:lc4:lp0").stages[0].lzma,
+                         {"dict_size": 96 << 20, "lc": 4, "lp": 0, "pb": 2})
+        self.assertIsNone(farc.parse_method("4x4:lzma").lzma)  # not a single lzma
+        bad = ["4x4", "4x4:4:b8mb", "4x4:zzz:c3", "4x4:abc", "4x4:b7mb:qqq", "4x4::lzma",
+               "4x4:x9:lzma", "4x4:b8q:lzma", "4x4:r9x:lzma", "4x4:t3x:lzma", "4x4:b2gb:lzma",
+               "4x4:lzma:lc8", "4x4:exe", "4x4:b=8mb:lzma", "4x4:lzma+zzz", "4x4:r.5:lzma",
+               "4X4:lzma",
+               "srep:index=x.idx", "srep:m3f:index", "srep:b65mb", "srep:b1zz", "srep::m3f",
+               "srepx", "SREP", "srep:"]
+        for text in bad:
+            with self.subTest(text=text):
+                m = farc.parse_method(text)
+                self.assertFalse(m.supported)
+                self.assertEqual(m.kind, farc.KIND_OTHER)
+                self.assertNotIn(text, m.reason + repr(m))
+
     def test_summary_names_supported_chains_only(self):
         arc = farc.Archive(Path("x"), 0, 0, False)
         for text in ("rep:15mb+exe+delta+lzma:8mb", "storing", "zzzmethod:7+lzma",
@@ -512,6 +557,19 @@ class LzmaAndPlan(unittest.TestCase):
         lz = fc.stage_plan(farc.parse_method("delta+lzma:1gb"), 5000)
         self.assertEqual(lz[1].budget, 1 << 30)
         self.assertEqual(lz[1].limit, None)
+        x = fc.stage_plan(farc.parse_method("exe+4x4:lzma:1gb+lzma:1gb"), 5000)
+        self.assertEqual([p.budget for p in x[1:]], [5000 + fc.EXE_SLACK, 1 << 30])
+        self.assertEqual([p.limit for p in x], [5000, 5000 + fc.EXE_SLACK, None])
+        s = fc.stage_plan(farc.parse_method("srep+lzma:8mb"), 1000)[0]
+        self.assertEqual(s.budget, fc.SREP_MIN_BUDGET)
+        self.assertEqual(s.memory, s.budget + fc.srep_block_memory(8 << 20))
+        s = fc.stage_plan(farc.parse_method("srep:b32mb"), 100 << 20)[0]
+        self.assertEqual(s.budget, 200 << 20)
+        self.assertEqual(s.memory, (200 << 20) + fc.srep_block_memory(32 << 20))
+        s = fc.stage_plan(farc.parse_method("rep+srep+lzma"), 100)[1]  # feeds rep: no limit
+        self.assertEqual((s.budget, s.limit), (fc.SREP_MEMORY_CAP, None))
+        self.assertEqual(fc.stage_plan(farc.parse_method("srep"), 1 << 40)[0].budget,
+                         fc.SREP_MEMORY_CAP)
 
     def test_lzma_decodes_only_what_is_needed(self):
         """Spec A.6/A.7: bytes past what the files need are not looked at, so damage there,
@@ -537,11 +595,419 @@ class LzmaAndPlan(unittest.TestCase):
             fc.open_chain(m, -1, 0, 0, 10, 1 << 20, lambda: None)
 
 
+# --- 4x4 ------------------------------------------------------------------------------------
+
+LZ = {"lc": 3, "lp": 0, "pb": 2}
+X4_V1 = bytes.fromhex("000000002c0100001100000000309888ad4b36ed2f807bfffff6b04000")
+X4_V2 = bytes.fromhex("00000000ffffffff10000000000102030405060708090a0b0c0d0e0f")
+X4_V3 = bytes.fromhex("00000000f00000000f000000003c1e4bc06ce3a1bdfffffdbe2000ffffffff1000"
+                      "0000000102030405060708090a0b0c0d0e0f")
+
+
+def x4(data, step=1 << 20, chunk=1 << 20, limit=None, stop=None, dict_size=1 << 20):
+    return drain(fc.X4Stage(Mem(data, step), LZ, dict_size, chunk, limit, stop))
+
+
+class X4(unittest.TestCase):
+    def test_spec_vectors(self):
+        """4x4 spec section 8, V1-V4: bytes, CRC-32 and SHA-256."""
+        cases = [(X4_V1, 300, 0xD0C4B884,
+                  "d9f5aeb06abebb3be3f38adec9a2e3b94228d52193be923eb4e24c9b56ee0930"),
+                 (X4_V2, 16, 0xCECEE288,
+                  "be45cb2605bf36bebde684841a28f0fd43c69850a3dce5fedba69928ee3a8991"),
+                 (X4_V3, 256, 0x5FE1DA41,
+                  "6eb8bccbc1c4a784c0c4ce8529f856c2f35329680dfc79cc84b93aa1b3d71fcc")]
+        for enc, size, crc, sha in cases:
+            for step, chunk in ((1 << 20, 1 << 20), (1, 3), (5, 7)):
+                with self.subTest(size=size, step=step):
+                    out = x4(enc, step, chunk)
+                    self.assertEqual((len(out), zlib.crc32(out), hashlib.sha256(out).hexdigest()),
+                                     (size, crc, sha))
+        self.assertEqual(x4(X4_V1), b"abc" * 100)
+        self.assertEqual(x4(b"\0\0\0\0"), b"")
+        self.assertEqual(x4(b""), b"")
+
+    def test_spec_damage_vectors(self):
+        v1, v2 = bytearray(X4_V1), bytearray(X4_V2)
+        d11 = bytearray(v1)
+        d11[12 + 6] ^= 0xFF
+        d13 = bytearray(v1)
+        d13[8:12] = u32(18)
+        bad = {
+            "D1": b"\1\0\0\0" + X4_V1[4:], "D2": b"\0\0\0\0\x2c\x01\x00",
+            "D3": X4_V1[:4] + u32(301) + X4_V1[8:], "D4": X4_V1[:4] + u32(299) + X4_V1[8:],
+            "D5": X4_V1[:-1], "D6": X4_V2[:8] + u32(17) + X4_V2[12:],
+            "D7": bytes(12), "D8": b"\0\0\0\0\xff\xff\xff\xff\0\0\0\0",
+            "D9": b"\0\0\0\0" + u32(1 << 31) + u32(1) + b"\0",
+            "D10": b"\0\0\0\0" + u32(10) + u32(81920), "D11": d11, "D12": X4_V1 + b"\0",
+            "D13": bytes(d13) + b"\0", "short version": b"\0\0", "stored too big": X4_V2[:8]
+            + u32(1 << 31),
+        }
+        for name, enc in bad.items():
+            for step in (1, 1 << 20):
+                with self.subTest(name=name, step=step), self.assertRaises(CodecError):
+                    x4(bytes(enc), step)
+        for i in range(12, len(v1)):  # every single-byte flip of V1's payload
+            flip = bytearray(v1)
+            flip[i] ^= 0xFF
+            for step in (1, 1 << 20):
+                with self.subTest(flip=i, step=step), self.assertRaises(CodecError):
+                    x4(bytes(flip), step)
+        self.assertEqual(x4(bytes(v2) + bytes(v2[4:])), bytes(range(16)) * 2)
+
+    def test_limit_stops_before_the_stored_piece(self):
+        src = Mem(X4_V3 + b"\xff" * 5, step=1)  # damaged tail, never read
+        out = drain(fc.X4Stage(src, LZ, 1 << 20, 1, limit=100))
+        self.assertEqual(out, (b"xyz" * 80)[:100])
+        self.assertLessEqual(src.at, 4 + 8 + 15)
+
+    def test_round_trips_with_unequal_and_stored_pieces(self):
+        r = random.Random(4)
+        data = (b"hello 4x4 " * 3000 + bytes(r.getrandbits(8) for _ in range(40_000))
+                + bytes(5000) + b"tail")
+        for sizes in ([1 << 16], [1, 7, 4096, 33_000], [len(data)], [40_001, 3]):
+            enc = x4_encode(data, sizes=sizes)
+            for step, chunk in ((1 << 20, 1 << 20), (999, 4093)):
+                with self.subTest(sizes=sizes, step=step):
+                    self.assertEqual(x4(enc, step, chunk), data)
+        self.assertIn(b"\xff\xff\xff\xff", x4_encode(os.urandom(5000)))  # stored
+
+    def test_each_piece_gets_a_fresh_small_decoder(self):
+        made = []
+        real = fc.lzma.LZMADecompressor
+
+        def spy(*a, **k):
+            made.append(k["filters"][0]["dict_size"])
+            return real(*a, **k)
+        enc = x4_encode(b"q" * 70_000, sizes=[100, 69_900])
+        with mock.patch.object(fc.lzma, "LZMADecompressor", side_effect=spy):
+            self.assertEqual(x4(enc, dict_size=1 << 20), b"q" * 70_000)
+        self.assertEqual(made, [1 << 20, 4096, 69_900])
+
+    def test_start_failure_and_stop(self):
+        with mock.patch.object(fc.lzma, "LZMADecompressor", side_effect=MemoryError), \
+                self.assertRaises(fc.StartError):
+            fc.X4Stage(Mem(b""), LZ, 1 << 20, 1 << 20)
+        calls = []
+
+        def stop():
+            calls.append(1)
+            if len(calls) > 5:
+                raise Stopped
+        enc = x4_encode(bytes(range(256)) * 40, sizes=[1])
+        with self.assertRaises(Stopped):
+            x4(enc, stop=stop)
+
+
+# --- srep -----------------------------------------------------------------------------------
+
+def hx(text: str) -> bytes:
+    return bytes.fromhex("".join(line.split(":", 1)[1] for line in text.strip().splitlines()))
+
+
+SREP = {  # srep spec section 10 (hand-built), decoded output
+    "A": (hx("""
+0000: 17 18 35 26 53 52 45 50 02 01 00 00 04 00 00 00
+0010: 0a 00 00 00 12 00 00 00 10 00 00 00 00 00 00 00
+0020: 00 00 00 00 00 00 00 00 00 00 00 00 08 00 00 00
+0030: 08 00 00 00 00 00 00 00 04 00 00 00 61 62 63 64
+0040: 65 66 67 68 58 59"""), b"abcdefghabcdefghXY"),
+    "B": (hx("""
+0000: 17 18 35 26 53 52 45 50 02 00 00 00 04 00 00 00
+0010: 0a 00 00 00 12 00 00 00 10 00 00 00 c7 d0 34 c7
+0020: 8c 81 5e 14 64 72 c6 f0 a9 0e 63 55 08 00 00 00
+0030: 08 00 00 00 00 00 00 00 04 00 00 00 61 62 63 64
+0040: 65 66 67 68 58 59"""), b"abcdefghabcdefghXY"),
+    "C": (hx("""
+0000: 17 18 35 26 53 52 45 50 01 01 00 00 04 00 00 00
+0010: 04 00 00 00 0c 00 00 00 0c 00 00 00 00 00 00 00
+0020: 00 00 00 00 00 00 00 00 00 00 00 00 04 00 00 00
+0030: 01 00 00 00 01 00 00 00 77 78 79 7a"""), b"wxyzwxyzwxyz"),
+    "D": (hx("""
+0000: 17 18 35 26 53 52 45 50 01 01 00 00 04 00 00 00
+0010: 05 00 00 00 09 00 00 00 0c 00 00 00 00 00 00 00
+0020: 00 00 00 00 00 00 00 00 00 00 00 00 05 00 00 00
+0030: 01 00 00 00 00 00 00 00 51 61 62 63 64"""), b"QabcdQabc"),
+    "D2": (hx("""
+0000: 17 18 35 26 53 52 45 50 01 01 00 00 04 00 00 00
+0010: 05 00 00 00 09 00 00 00 0c 00 00 00 00 00 00 00
+0020: 00 00 00 00 00 00 00 00 00 00 00 00 05 00 00 00
+0030: 00 00 00 00 00 00 00 00 51 61 62 63 64"""), b"Qabcddddd"),
+    "E": (hx("""
+0000: 17 18 35 26 53 52 45 50 03 01 00 00 00 00 00 00
+0010: 08 00 00 00 08 00 00 00 20 00 00 00 00 00 00 00
+0020: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+0030: 0c 00 00 00 00 00 00 00 04 00 00 00 04 00 00 00
+0040: 04 00 00 00 00 00 00 00 04 00 00 00 41 42 43 44
+0050: 45 46 47 48 01 00 00 00 09 00 00 00 00 00 00 00
+0060: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+0070: 21"""), b"ABCDEFGHEFGHABCD!"),
+    "E2": (hx("""
+0000: 17 18 35 26 53 52 45 50 03 00 00 00 00 00 00 00
+0010: 08 00 00 00 08 00 00 00 20 00 00 00 47 83 e7 84
+0020: b4 fa 2f ba 9e 4d 65 02 db c6 4f 8f 00 00 00 00
+0030: 0c 00 00 00 00 00 00 00 04 00 00 00 04 00 00 00
+0040: 04 00 00 00 00 00 00 00 04 00 00 00 41 42 43 44
+0050: 45 46 47 48 01 00 00 00 09 00 00 00 00 00 00 00
+0060: 3b 82 2a 2d 2f 73 c0 95 57 fb 54 99 66 77 39 05
+0070: 21"""), b"ABCDEFGHEFGHABCD!"),
+    "F": (hx("""
+0000: 17 18 35 26 53 52 45 50 04 01 00 00 00 00 00 00
+0010: 08 00 00 00 08 00 00 00 00 00 00 00 00 00 00 00
+0020: 00 00 00 00 00 00 00 00 00 00 00 00 41 42 43 44
+0030: 45 46 47 48 01 00 00 00 09 00 00 00 00 00 00 00
+0040: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+0050: 21 00 00 00 00 0c 00 00 00 00 00 00 00 04 00 00
+0060: 00 04 00 00 00 04 00 00 00 00 00 00 00 04 00 00
+0070: 00 20 00 00 00 00 00 00 00 20 00 00 00 00 00 00
+0080: 00 20 00 00 00 01 00 00 00 ac ad ba af e8 e7 ca
+0090: d9"""), b"ABCDEFGHEFGHABCD!"),
+    "F0": (hx("""
+0000: 17 18 35 26 53 52 45 50 04 01 00 00 00 00 00 00
+0010: 00 00 00 00 00 00 00 00 18 00 00 00 01 00 00 00
+0020: ac ad ba af e8 e7 ca d9"""), b""),
+    "G": (hx("""
+0000: 17 18 35 26 53 52 45 50 03 01 00 00 00 00 00 00
+0010: 02 00 00 00 08 00 00 00 10 00 00 00 00 00 00 00
+0020: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+0030: 02 00 00 00 00 00 00 00 06 00 00 00 61 62"""), b"abababab"),
+    "J": (hx("""
+0000: 17 18 35 26 53 52 45 50 02 04 20 00 04 00 00 00
+0010: 00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f
+0020: 10 11 12 13 14 15 16 17 18 19 1a 1b 1c 1d 1e 1f
+0030: 0a 00 00 00 12 00 00 00 10 00 00 00 ea ef 26 89
+0040: 48 c4 fd db a2 30 f1 8d aa ab 74 0d 08 00 00 00
+0050: 08 00 00 00 00 00 00 00 04 00 00 00 61 62 63 64
+0060: 65 66 67 68 58 59"""), b"abcdefghabcdefghXY"),
+}
+
+
+def srep(data, step=1 << 20, chunk=1 << 20, block=1 << 20, budget=16 << 20, limit=None,
+         stop=None):
+    return drain(fc.SrepStage(Mem(data, step), block, budget, chunk, limit, stop))
+
+
+def patch(data: bytes, at: int, new: bytes) -> bytes:
+    return data[:at] + new + data[at + len(new):]
+
+
+def srep_full_block(version: int, size: int, kind: str = "none") -> tuple[bytes, bytes]:
+    """(stream, output): one srep block of `size` bytes, format 2 or 3, base 0: 8 literal
+    bytes, then size // 8 - 1 matches of 8 bytes each, the most records such a block holds."""
+    n = size // 8 - 1
+    eight = (8).to_bytes(8, "little")
+    if version == 2:  # literal run before the match, distance back, length
+        recs = u32(8) + eight + u32(8) + (u32(0) + eight + u32(8)) * (n - 1)
+    else:  # source from the last source, distance forward, length
+        recs = u32(0) + eight + u32(8) + (u32(8) + eight + u32(8)) * (n - 1)
+    out = b"ABCDEFGH" * (size // 8)
+    head, check, hlen = srep_header(version, kind)
+    csum = check(out)[:hlen] if check else bytes(hlen)
+    return head + u32(8) + u32(size) + u32(len(recs)) + csum + recs + out[:8], out
+
+
+class Srep(unittest.TestCase):
+    def test_spec_vectors(self):
+        for name, (enc, out) in SREP.items():
+            for step in (1, 7, 1 << 20):
+                with self.subTest(name=name, step=step):
+                    self.assertEqual(srep(enc, step), out)
+        for version in (1, 2, 3):  # a header alone decodes to nothing
+            self.assertEqual(srep(srep_header(version, base=4)[0]), b"")
+
+    def test_checksums(self):
+        """FIPS-197 AES examples, the SipHash paper's example, and the srep spec's VHASH
+        values (audit-derived; agreeing with streams made by srep 3.93a, see docs/testing.md)."""
+        p = bytes.fromhex("00112233445566778899aabbccddeeff")
+        self.assertEqual(fc.aes_encrypt_block(bytes(range(16)), p).hex(),
+                         "69c4e0d86a7b0430d8cdb78070b4c55a")
+        self.assertEqual(fc.aes_encrypt_block(bytes(range(32)), p).hex(),
+                         "8ea2b7ca516745bfeafc49904b496089")
+        self.assertEqual(fc.siphash24(bytes(range(16)), bytes(range(15))), 0xA129CA6149BE45E5)
+        v = fc.Vhash(bytes(range(32)))
+        for msg, want in ((b"", "2eca48aefe4117ae20f2769dbdfe8de3"),
+                          (b"abcdefghabcdefghXY", "eaef268948c4fddba230f18daaab740d"),
+                          ((b"abc" * 1700), "76cee655fcebc10443dc1d633fc06f5d"),
+                          (bytes(4096), "951705578dce7014fe78af3271430d4d"),
+                          (bytes(8192), "0bc07b6f898437300c3702b1f23a6bec")):
+            self.assertEqual(v.digest(msg).hex(), want, len(msg))
+
+    def test_spec_negative_cases(self):
+        a, e, f = SREP["A"][0], SREP["E"][0], SREP["F"][0]
+        bad = {
+            "unknown version": patch(a, 8, b"\5"), "offset 0": patch(a, 0x30, u32(0)),
+            "offset 9": patch(a, 0x30, u32(9)), "N 19": patch(a, 0x14, u32(19)),
+            "trailing byte": a + b"\0", "short match list": a[:0x2c] + a[0x30:],
+            "E offset 13": patch(e, 0x40, u32(13)), "E duplicate dest": patch(e, 0x40, u32(8)),
+            "E cut after block 1": e[:0x54], "F footer signature": f[:-1] + b"\0",
+            "F sizes 16/16": patch(f, 0x71, u32(16) + u32(16)), "flag 02": b"\2" + a,
+            "bad signature": patch(a, 4, b"SREQ"), "kind 9": patch(a, 9, b"\x09"),
+            "md5 with sha1 length": patch(a, 9, b"\0\0\4"), "v1 base 0": patch(SREP["C"][0], 12,
+                                                                        u32(0)),
+            "B literal flipped": patch(SREP["B"][0], 0x40, b"E"),
+            "J literal flipped": patch(SREP["J"][0], 0x60, b"E"),
+            "E2 literal flipped": patch(SREP["E2"][0], 0x70, b"?"),
+            "truncated header": a[:10], "truncated seed": SREP["J"][0][:30],
+            "truncated block header": a[:20], "truncated literals": a[:-1],
+            "empty": b"", "flag only": b"\1",
+            "F footer version 2": patch(f, 0x85, b"\2"), "F0 truncated": SREP["F0"][0][:-1],
+            "zero length match": patch(SREP["G"][0], 0x38, u32(0)),
+            "source past block": patch(SREP["G"][0], 0x2c, u32(2)),
+            "zero end mark then data": a + bytes(12 + 16) + b"x",
+            "block 0 bytes": a + u32(0) + u32(0) + u32(16) + bytes(16) + bytes(16),
+        }
+        for name, enc in bad.items():
+            for step in (1, 1 << 20):
+                with self.subTest(name=name, step=step), self.assertRaises(CodecError):
+                    srep(enc, step)
+        self.assertEqual(srep(a + bytes(12 + 16)), b"abcdefghabcdefghXY")  # srep's end mark
+
+    def test_flag_byte(self):
+        a, out = SREP["A"]
+        self.assertEqual(srep(b"\1" + a), out)
+        self.assertEqual(srep(b"\0anything at all"), b"anything at all")
+        self.assertEqual(srep(b"\0"), b"")
+        self.assertEqual(srep(b"\1" + SREP["F"][0]), SREP["F"][1])
+
+    def test_round_trips(self):
+        r = random.Random(9)
+        part = bytes(r.getrandbits(8) for _ in range(3000))
+        data = (part + b"srep " * 400 + part[500:2500] + bytes(2000) + part) * 4
+        for version in (2, 3, 4):
+            for kind in ("none", "md5", "sha1", "sha512", "vmac", "siphash"):
+                for block, base in ((1000, 0), (4096, 16), (1 << 16, 0)):
+                    enc = srep_encode(data, version, kind, block=block, base=base)
+                    self.assertLess(len(enc), len(data) // 2)
+                    with self.subTest(version=version, kind=kind, block=block):
+                        self.assertEqual(srep(enc, step=997, chunk=4093), data)
+                        bad = bytearray(enc)
+                        bad[-40 if version == 4 else -1] ^= 1
+                        if kind != "none":
+                            with self.assertRaises(CodecError):
+                                srep(bytes(bad))
+        self.assertEqual(srep(srep_encode(b"", 4)), b"")
+        self.assertEqual(srep(srep_encode(b"x", 3, "vmac", flag=b"\1")), b"x")
+
+    def test_caps(self):
+        data = bytes(range(256)) * 400
+        enc = srep_encode(data, 3, block=4096)
+        self.assertEqual(srep(enc, block=4096), data)
+        with self.assertRaisesRegex(CodecError, "larger than gitfurl handles"):
+            srep(enc, block=4095)
+        with self.assertRaisesRegex(CodecError, "more than the block's files hold"):
+            srep(enc, limit=len(data) - 1)
+        self.assertEqual(srep(enc, limit=len(data)), data)
+        # pending matches: each counts its data and SREP_PENDING_COST against the budget
+        far = os.urandom(3000) + bytes(50_000) + os.urandom(3000)
+        far = far[:3000] + far[53_000:] + far[:3000]
+        enc = srep_encode(far, 3, block=1000)
+        self.assertEqual(srep(enc, budget=4000), far)
+        with self.assertRaisesRegex(CodecError, "more memory"):
+            srep(enc, budget=3000)
+        # format 4 read from another stage: its input is held, within the budget
+        enc4 = srep_encode(data, 4, block=4096)
+        self.assertEqual(srep(enc4, budget=len(enc4) + 2000), data)
+        with self.assertRaisesRegex(CodecError, "more memory"):
+            srep(enc4, budget=len(enc4) - 1)
+        # formats 1 and 2: matches may reach back as far as the budget keeps
+        back = os.urandom(5000) + os.urandom(20_000) + b"x"
+        back += back[:5000]
+        enc2 = srep_encode(back, 2, block=1000, base=16)
+        self.assertEqual(srep(enc2, budget=len(back)), back)
+        with self.assertRaisesRegex(CodecError, "further back than gitfurl keeps"):
+            srep(enc2, budget=len(back) - 10_000)
+
+    def test_stop_is_checked_between_blocks_and_records(self):
+        calls = []
+
+        def stop():
+            calls.append(1)
+            if len(calls) > 5:
+                raise Stopped
+        enc = srep_encode(bytes(range(256)) * 100, 3, block=100)
+        with self.assertRaises(Stopped):
+            srep(enc, stop=stop)
+        calls.clear()
+        records = b"".join(u32(0) + u32(1) + u32(0) + u32(1) for _ in range(6 * fc.STOP_EVERY))
+        head = srep_header(3, base=0)[0]
+        many = head + u32(1) + u32(1 << 20) + u32(len(records)) + bytes(16) + records + b"z"
+        with self.assertRaises(Stopped):
+            drain(fc.SrepStage(Mem(many), 1 << 20, 16 << 20, 1 << 20, stop=stop))
+        self.assertGreater(len(calls), 3)
+
+    def test_block_records_stay_within_the_block_memory(self):
+        """A 1 MiB block with the most match records it can hold: the traced peak stays under
+        srep_block_memory (plus the one chunk its input holds), and is not trivially small."""
+        cap = 1 << 20
+        enc, want = srep_full_block(3, cap)
+        stage = fc.SrepStage(Mem(enc), cap, 16 << 20, 1 << 20)
+        tracemalloc.start()
+        try:
+            out = stage.read(cap)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(out, want)
+        plan = fc.srep_block_memory(cap) + (1 << 20)
+        self.assertLessEqual(peak, plan)
+        self.assertGreater(peak, plan * 0.4)
+
+    def test_checksums_check_stop_between_slices(self):
+        """A block's checksum is computed a slice at a time, with a Stop check in between
+        (1 MiB for md5, sha1, sha512 and SipHash, 256 NH blocks of 4096 bytes for VHASH)."""
+        # three full slices and 13 bytes: three Stop checks, also for SipHash, whose last
+        # 13 % 8 bytes are added after its slices
+        data = bytes(range(256)) * (3 * fc.CHECK_SLICE // 256) + b"tail of block"
+        for kind, num in (("md5", 0), ("sha1", 2), ("sha512", 3), ("vmac", 4), ("siphash", 5)):
+            head, check, hlen = srep_header(3, kind)
+            calls = []
+            got = fc._srep_checker(num, head[16:])(data, lambda calls=calls: calls.append(1))
+            with self.subTest(kind=kind):
+                self.assertEqual(got[:hlen], check(data)[:hlen])
+                self.assertEqual(len(calls), 3)
+        # a Stop asked while a block's checksum is computed ends the stage there: one block
+        # of literals only, with a wrong SipHash checksum (so without that check the stage
+        # would end with "failed its checksum"); the first call is the stage's own refill
+        size = 4 << 20
+        head = srep_header(3, "siphash")[0]
+        enc = head + u32(size) + u32(size) + u32(0) + bytes(8) + bytes(size)
+        calls.clear()
+
+        def stop():
+            calls.append(1)
+            if len(calls) > 1:
+                raise Stopped
+        with self.assertRaises(Stopped):
+            srep(enc, block=size, stop=stop)
+        self.assertEqual(len(calls), 2)
+        with self.assertRaisesRegex(CodecError, "failed its checksum"):
+            srep(enc, block=size, stop=lambda: None)
+
+    def test_format_4_reads_the_archive_directly(self):
+        data = bytes(range(256)) * 300 + os.urandom(1000)
+        for flag in (b"", b"\1"):
+            enc = srep_encode(data, 4, "md5", block=4096, flag=flag)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "blk"
+                path.write_bytes(b"pad" + enc + b"after")
+                fd = os.open(path, os.O_RDONLY)
+                try:
+                    m = farc.parse_method("srep:m3")
+                    top = fc.open_chain(m, fd, 3, len(enc), len(data), 1 << 20, lambda: None)
+                    self.assertIsNone(top.spool)
+                    self.assertEqual(drain(top), data)
+                    self.assertIsNone(top.spool.data)  # never copied into memory
+                finally:
+                    os.close(fd)
+
+
 # --- whole chains, through a file -----------------------------------------------------------
 
 CHAINS = ["exe+storing", "storing+exe", "exe+lzma:1mb", "delta+lzma:1mb", "exe+delta+lzma:1mb",
           "rep:1mb+lzma:1mb", "rep:1mb+exe+delta+lzma:1mb", "rep:64kb+exe+delta",
-          "lzma:1mb+storing", "exe+exe+lzma:1mb"]
+          "lzma:1mb+storing", "exe+exe+lzma:1mb", "4x4:lzma:1mb", "rep:1mb+exe+delta+4x4:lzma:1mb",
+          "srep+lzma:1mb", "srep:m3f+exe+delta+4x4:lzma:1mb", "rep:1mb+srep:m3+lzma:1mb",
+          "srep:m3", "srep:m2o:hash=md5+4x4:lzma:1mb", "exe+srep:m1f:hash=siphash+lzma:1mb"]
 
 
 def sample(n=EXE_ROUND + 70_000):
@@ -662,12 +1128,80 @@ class ChainedExtraction(unittest.TestCase):
         plan = extract.plan_extract(self.setup, "p1")
         text = "\n".join(plan.describe())
         self.assertIn("memory: up to", text)
+        self.assertIn("srep keeps up to 1.0 GiB", text)  # rep+srep: no size known
         self.assertGreater(plan.memory, fc.EXE_ROUND)
         res = extract.extract(plan)
         self.assertTrue(res.ok, res.lines())
         for i in range(len(CHAINS)):
             for f in files:
                 self.assertEqual((self.dest / f"{i}-{f[1]}").read_bytes(), f[2], (i, f[1]))
+
+    def test_srep_and_4x4_memory_stays_within_the_plan(self):
+        data = sample()
+        for method in ("srep:m3f+4x4:lzma:1mb", "srep:m3+lzma:1mb", "srep:m2o"):
+            m = farc.parse_method(method)
+            enc = pack(method, data)
+            self.put(make_archive([(method, [F("a", data)])]))
+            blk = farc.read_archive(self.src / "a.arc").blocks[0]
+            fd = os.open(self.src / "a.arc", os.O_RDONLY)
+            try:
+                top = fc.open_chain(m, fd, blk.offset, len(enc), len(data), 1 << 16,
+                                    lambda: None)
+                tracemalloc.start()
+                try:
+                    got = 0
+                    while got < len(data):
+                        piece = top.read(1 << 16)
+                        self.assertTrue(piece)
+                        got += len(piece)
+                        del piece
+                    peak = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
+            finally:
+                os.close(fd)
+            self.assertLessEqual(peak, fc.chain_memory(m, len(data), 1 << 16), method)
+
+    def test_srep_full_blocks_stay_within_the_plan(self):
+        """8 MiB blocks (srep's default cap) with the most match records they can hold, read
+        through open_chain from a file: the traced peak stays under the plan's figure, and the
+        format 3 block (whose records the plan counts) uses a good part of it."""
+        size = 8 << 20
+        m = farc.parse_method("srep")
+        plan = fc.chain_memory(m, size, 1 << 20)
+        for version in (3, 2):
+            enc, want = srep_full_block(version, size)
+            path = self.src / "blk"
+            path.write_bytes(enc)
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                top = fc.open_chain(m, fd, 0, len(enc), size, 1 << 20, lambda: None)
+                h = hashlib.sha256()
+                tracemalloc.start()
+                try:
+                    while piece := top.read(1 << 20):
+                        h.update(piece)
+                        del piece
+                    peak = tracemalloc.get_traced_memory()[1]
+                finally:
+                    tracemalloc.stop()
+            finally:
+                os.close(fd)
+            with self.subTest(version=version):
+                self.assertEqual(h.digest(), hashlib.sha256(want).digest())
+                self.assertLessEqual(peak, plan)
+                if version == 3:
+                    self.assertGreater(peak, plan * 0.4)
+
+    def test_damaged_srep_block_is_an_error_in_the_result(self):
+        data = sample()
+        self.put(make_archive([("srep:m3f:hash=md5", [F("a", data)])]))
+        blk = extract.plan_extract(self.setup, "p1").archives[0].archive.blocks[0]
+        raw = bytearray((self.src / "a.arc").read_bytes())
+        raw[blk.offset + blk.compsize - 10] ^= 1  # a literal of the last block
+        self.put(bytes(raw))
+        res = extract.extract(extract.plan_extract(self.setup, "p1"))
+        self.assertIn("failed its checksum", res.error or "")
 
     def test_summary_names_the_chain(self):
         self.put(make_archive([("rep:1mb+exe+delta+lzma:8mb:normal:32", [F("a", b"a" * 99)])]))

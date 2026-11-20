@@ -1,6 +1,7 @@
 """Native extraction of FreeArc archives, without running the installer.
 
-Methods decoded: storing, lzma, exe, delta and rep, alone or chained (farc_codecs.py).
+Methods decoded: storing, lzma, exe, delta, rep, 4x4 (with lzma inside) and srep, alone or
+chained (farc_codecs.py).
 
 Off unless asked for, per run, after an approval that shows the plan. gitfurl reads each
 FreeArc archive beside the installer itself (gitfurl.farc) and writes the files into a new
@@ -166,8 +167,8 @@ class ExtractPlan:
 
     def describe(self) -> list[str]:
         lines = [
-            ("NATIVE EXTRACTION (FreeArc: storing, lzma, exe, delta and rep): gitfurl reads "
-            "the archives itself."),
+            ("NATIVE EXTRACTION (FreeArc: storing, lzma, exe, delta, rep, 4x4 and srep): "
+            "gitfurl reads the archives itself."),
             f"  {EXTRACTS_ONLY}",
             (f"  destination: {self.target} (in the prefix: {self.dest}); it must not exist "
             "yet, and no existing file is overwritten"),
@@ -240,7 +241,7 @@ def plan_extract(installer: Path, prefix_name: str,
     # the work and memory are linear in the names' length, however deep the paths are.
     names: dict[tuple[int, str], int] = {}
     merged: str | None = None
-    total = count = memory = 0
+    total = count = memory = srep = 0
     for path in paths:
         name = clean(path.name, 80)
         try:
@@ -250,8 +251,8 @@ def plan_extract(installer: Path, prefix_name: str,
         if arc.unsupported:
             raise ExtractRefused(f"{name} uses {farc.KIND_OTHER} "
                                  f"({len(arc.unsupported)} of {len(arc.blocks)} data blocks); "
-                                 "only storing, lzma, exe, delta and rep, alone or chained, "
-                                 "can be extracted")
+                                 "only storing, lzma, exe, delta, rep, 4x4 (with lzma "
+                                 "inside) and srep, alone or chained, can be extracted")
         ap = ArchivePlan(path, arc, [], [])
         for entry in arc.entries:
             parts = farc.relative_parts(entry.path)
@@ -301,9 +302,16 @@ def plan_extract(installer: Path, prefix_name: str,
                 count += 1
         for blk in arc.blocks:
             memory = max(memory, farc_codecs.chain_memory(blk.method, blk.origsize, CHUNK))
+            srep = max([srep] + [p.budget for p in farc_codecs.stage_plan(blk.method,
+                                                                          blk.origsize)
+                                 if p.stage.name == "srep"])
         archives.append(ap)
     if merged:
         notes.append(merged)
+    if srep:
+        notes.append(f"srep keeps up to {farc._size(srep)} of earlier output, pending matches "
+                     "or its input between its blocks (counted in the memory line); data that "
+                     "needs more is refused and the extraction stops with an error")
     dest = prefix / "drive_c" / "Games" / prefix_name
     return ExtractPlan(installer, prefix_name, prefix, dest, archives, total, count, memory,
                        notes, folders)
