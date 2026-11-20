@@ -29,4 +29,4 @@ This wrapper is a manual script, **tested on NixOS only**: it binds `/nix` and `
 Use only installers you are authorised to use. Do not copy logs, screenshots or output from such a run off the machine.
 
 ## Assets
-`tools/make_assets.py` generates `assets/*.svg` from `src/gitfurl/pixelfont.py`, which the app's wordmark also uses. PNG sizes and the favicon are made from the SVGs with ImageMagick.
+`tools/make_assets.py` generates `assets/*.svg` from `src/gitfurl/pixelfont.py`, which the app's wordmark also uses. It also makes the README's dividers (`docs/assets/divider-*.svg`) and recolours `docs/project-facts.svg` (made as a black-on-white label) to the same palette; running it again changes nothing. PNG sizes and the favicon are made from the SVGs with ImageMagick.
