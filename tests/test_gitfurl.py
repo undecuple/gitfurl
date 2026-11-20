@@ -1811,16 +1811,18 @@ class DetectTests(unittest.TestCase):
 
     INNO = b"Inno Setup Setup Data (5.5.0)"
 
-    def test_inno_id_in_a_windows_program_is_likely_and_never_native(self):
-        from gitfurl.detect import ROUTE_NATIVE, ROUTE_WINE, decide
+    def test_inno_id_in_a_windows_program_is_likely_and_without_archives_is_wine(self):
+        from gitfurl.detect import ROUTE_WINE
+        from gitfurl.route import choose_route
 
         det = self.det("setup.exe", b"MZ" + b"\0" * 1000 + self.INNO + b"\0" * 40)
         self.assertEqual([(e.format, e.confidence) for e in det.evidence], [("Inno Setup", "likely")])
         self.assertIn("byte offset 1002", det.evidence[0].where)
         self.assertIn("5.5.0", det.evidence[0].detail)
-        verdict = decide(det)
-        self.assertEqual(verdict.route, ROUTE_WINE)
-        self.assertNotEqual(verdict.route, ROUTE_NATIVE)
+        with tempfile.TemporaryDirectory() as data:
+            choice = choose_route(det.path, "p1", det, env={"XDG_DATA_HOME": data})
+        self.assertEqual(choice.route, ROUTE_WINE)
+        self.assertIn("no FreeArc archives", choice.line())
 
     def test_inno_variants_and_legacy_id(self):
         for ident in (b"Inno Setup Setup Data (6.4.0.1)", b"Inno Setup Setup Data (5.5.7) (U)",
@@ -2019,9 +2021,13 @@ class FreeArcIndexInPlanTests(unittest.TestCase):
         self.assertIn("    locked: no", text)
         self.assertIn("nothing was run or extracted", text)
         self.assertIn("only the archive's own index", text)
-        verdict = d.decide(det)
-        self.assertEqual(verdict.route, d.ROUTE_WINE)
-        self.assertTrue(any("native extraction is not available" in r for r in verdict.reasons))
+        self.assertNotIn("native extraction is not available", text)
+        self.assertIn("route: not chosen here", text)
+        from gitfurl.route import choose_route
+
+        choice = choose_route(det.path, "p1", det, env={"XDG_DATA_HOME": str(self.dir)})
+        self.assertEqual(choice.route, d.ROUTE_NATIVE)
+        self.assertIn("route: native (chosen by gitfurl)", d.describe(det, choice))
 
     def test_unhandled_method_is_named_generically_and_its_text_never_shown(self):
         from gitfurl import detect as d
@@ -2053,7 +2059,11 @@ class FreeArcIndexInPlanTests(unittest.TestCase):
             text = d.describe(det)
             self.assertNotIn("qqkey", text)
             self.assertNotIn("aes", text)
-            self.assertEqual(d.decide(det).route, d.ROUTE_WINE)
+            from gitfurl.route import choose_route
+
+            choice = choose_route(det.path, "p1", det, env={"XDG_DATA_HOME": str(self.dir)})
+            self.assertEqual(choice.route, d.ROUTE_WINE, name)
+            self.assertIn("cannot be unpacked by gitfurl", choice.line(), name)
 
     def test_names_from_the_archive_are_cleaned(self):
         from gitfurl import detect as d
@@ -2094,7 +2104,11 @@ class FreeArcIndexInPlanTests(unittest.TestCase):
         self.assertEqual(free["large file beside the installer: data-2.bin"].confidence,
                          "possible")
         self.assertIn("locked: yes", free["large file beside the installer: ?odd.bin"].lines)
-        self.assertEqual(d.decide(det).route, d.ROUTE_WINE)
+        from gitfurl.route import choose_route
+
+        choice = choose_route(inst, "p1", det, env={"XDG_DATA_HOME": str(self.dir)})
+        self.assertEqual(choice.route, d.ROUTE_WINE)
+        self.assertIn("Setup unpacks its own archives", choice.line())
 
     def test_each_freearc_file_is_opened_once_and_read_from_that_open_file(self):
         # Review finding: the index was read from a second open by path, so the file could
@@ -2173,7 +2187,8 @@ class FreeArcIndexInPlanTests(unittest.TestCase):
             self.assertIn("FreeArc: likely", out)
             self.assertIn("2 files and 1 folder, 3.6 KiB in total", out)
             self.assertIn("1 data block: 1 storing, 0 lzma", out)
-            self.assertIn("route: wine", out)
+            self.assertIn("route: native (chosen by gitfurl)", out)
+            self.assertNotIn("not available in this version", out)
             self.assertFalse((Path(data) / "gitfurl").exists())
 
     def test_the_window_uses_the_same_plan_text(self):

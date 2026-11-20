@@ -432,6 +432,8 @@ class MemoryScope:
         self._events: dict[str, int] = {}
         self._cgroup: str | None = None
         self._stop = threading.Event()
+        # Held while a tick runs, so no tick (and no on_note) starts after finish() took it.
+        self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._failed_set = False
 
@@ -543,10 +545,13 @@ class MemoryScope:
 
     def _loop(self) -> None:
         while not self._stop.wait(self.interval):
-            try:
-                self.tick()
-            except Exception:  # noqa: BLE001, S110 - the limit itself stays; the run must go on
-                pass
+            with self._lock:
+                if self._stop.is_set():
+                    return
+                try:
+                    self.tick()
+                except Exception:  # noqa: BLE001, S110 - the limit itself stays; the run must go on
+                    pass
 
     def start(self, adjust: bool = True) -> None:
         if adjust:
@@ -556,6 +561,8 @@ class MemoryScope:
     def finish(self) -> MemoryReport:
         """After the run: read the result of this unit only, then clear it if it failed."""
         self._stop.set()
+        with self._lock:  # wait for a running tick; none starts after this
+            pass
         if self._thread:
             self._thread.join(timeout=15)
         state: dict[str, str] | None = None
