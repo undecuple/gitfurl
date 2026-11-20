@@ -184,7 +184,8 @@ def choose_route(installer: Path, prefix_name: str, det: Detection, requested: s
         return wine(str(exc))
     if not paths:
         return wine("no FreeArc archives beside the installer; Setup holds or fetches its "
-                    "files itself, and gitfurl cannot read Inno Setup's own file data")
+                    "files itself, and the native route does not unpack Inno Setup's own "
+                    "file data")
     try:
         plan = plan_extract(installer, prefix_name, env)
     except ExtractRefused as exc:

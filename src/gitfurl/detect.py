@@ -6,10 +6,14 @@ the file as hostile and only ever reports a guess. A guess is not a promise that
 can be extracted or installed.
 
 It recognises two things, each with a confidence that says how sure it is:
-  * Inno Setup: a Windows program (starts with "MZ") that holds an Inno Setup setup-header
-    ID string such as "Inno Setup Setup Data (5.5.0)". The ID format is documented in
-    innoextract's source. A string match alone is "likely": the offset table that would
-    make it "certain" is not checked; this module only reports it (gitfurl.route decides).
+  * Inno Setup: a Windows program (starts with "MZ"). gitfurl.inno reads the setup's own
+    offset table, format ID and header blocks (bounded reads, CRC-32 checked) from the same
+    open file; when that works the evidence lists what Inno itself would write, the [Run]
+    entries a silent install would run (redistributables marked), and the files the setup
+    names beside itself, checked against the folder (the archive-name preflight). When it
+    does not, a setup-header ID string such as "Inno Setup Setup Data (5.5.0)" found in the
+    first MAX_SCAN_BYTES still gives "likely", with the reason the data was not read. Either
+    way this module only reports it (gitfurl.route decides).
   * FreeArc: the four bytes "ArC" 0x01 at the start of a file (the installer itself, or a
     large file beside it, at most MAX_NEIGHBOURS of those opened). For each such file the
     archive's own index is read with gitfurl.farc (bounded reads, CRC-32 checked) from the
@@ -31,7 +35,7 @@ import stat
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from gitfurl import farc
+from gitfurl import farc, inno
 
 ROUTE_WINE = "wine"
 ROUTE_NATIVE = "native"  # chosen only by gitfurl.route.choose_route
@@ -144,12 +148,20 @@ def detect(path: Path) -> Detection:
         try:
             head = fh.read(4)
             if head[:2] == MZ:
-                found = _find_inno(fh, size)
-                if found:
+                setup, why = _read_inno(fh.fileno(), Path(path), size)
+                found = None if setup else _find_inno(fh, size)
+                if setup:
+                    det.evidence.append(Evidence(
+                        "Inno Setup", CONF_LIKELY, f"byte offset {setup.offset0}",
+                        f"setup data format {setup.format} ({clean(setup.format_id)!r}); its "
+                        "offset table and header blocks were read and their CRC-32 checks "
+                        "match (nothing was extracted or run)", _summarise_inno(setup)))
+                elif found:
                     offset, ident = found
                     det.evidence.append(Evidence(
                         "Inno Setup", CONF_LIKELY, f"byte offset {offset}",
-                        f"setup header ID {clean(ident)!r}"))
+                        f"setup header ID {clean(ident)!r}",
+                        [f"the setup's own data was not read: {why}"] if why else []))
                     if size > MAX_SCAN_BYTES:
                         det.notes.append(f"only the first {MAX_SCAN_BYTES >> 20} MiB were "
                                          "searched")
@@ -164,6 +176,28 @@ def detect(path: Path) -> Detection:
         det.evidence.append(freearc)
     _neighbours(det)
     return det
+
+
+def _read_inno(fd: int, path: Path, size: int):
+    """(Setup, None) when gitfurl.inno reads the setup data, else (None, reason or None when
+    there is no Inno offset table at all). Never raises."""
+    try:
+        return inno.read_fd(fd, path, size), None
+    except inno.InnoError as exc:
+        text = str(exc)
+        if text.startswith(("no Inno Setup offset table", "not a Windows program")):
+            return None, None
+        return None, clean(text, 200)
+    except Exception:  # noqa: BLE001 - a hostile file must never stop the plan
+        return None, "the setup data could not be read"
+
+
+def _summarise_inno(setup) -> list[str]:
+    """inno.summarise(), never raising: a hostile setup must not stop the plan."""
+    try:
+        return inno.summarise(setup)
+    except Exception:  # noqa: BLE001 - a hostile file must never stop the plan
+        return ["the setup data was read, but its summary could not be made"]
 
 
 def _freearc_evidence(fd: int, path: Path, where: str,
@@ -266,7 +300,8 @@ def describe(det: Detection, choice=None) -> str:
     else:
         lines.append("  no known format recognised (this says nothing about whether it runs)")
     lines.append("  the data inside any payload is not decoded or guessed; for FreeArc only "
-                 "the archive's own index (names, sizes, methods) is read")
+                 "the archive's own index (names, sizes, methods) is read, for Inno Setup only "
+                 "the setup's own header blocks")
     lines.extend(f"  note: {n}" for n in det.notes)
     if choice is not None:
         lines.append(choice.line())

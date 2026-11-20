@@ -119,6 +119,14 @@ def build_parser() -> argparse.ArgumentParser:
                      "files go to C:\\Games\\PREFIX in it")
     ext.add_argument("--dry-run", action="store_true", help="show the plan and change nothing")
     ext.add_argument("--yes", action="store_true", help="approve without prompting")
+    ixt = sub.add_parser(
+        "extract-inno", help="extract the files an Inno Setup installer holds for its program "
+                             "folder into a prefix, without running the installer")
+    ixt.add_argument("installer", help="the Inno Setup installer (setup.exe)")
+    ixt.add_argument("--prefix", required=True, help="name of an existing dedicated prefix; "
+                     "files go to C:\\Games\\PREFIX in it")
+    ixt.add_argument("--dry-run", action="store_true", help="show the plan and change nothing")
+    ixt.add_argument("--yes", action="store_true", help="approve without prompting")
     pre = sub.add_parser("prefix", help="manage dedicated prefixes")
     pre_sub = pre.add_subparsers(dest="prefix_command", required=True)
     create = pre_sub.add_parser("create", help="create a dedicated prefix")
@@ -137,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
         return _prefix_command(args)
     if args.command == "extract":
         return _extract_command(args)
+    if args.command == "extract-inno":
+        return _extract_inno_command(args)
     try:
         installer = validate_installer(args.installer)
         det = detect(installer)  # once; passed on
@@ -343,6 +353,53 @@ def _extract_command(args) -> int:
             return refused
     try:
         result = extract(plan)
+    except ExtractRefused as exc:
+        print(f"error: {exc}. {exc.outcome()}", file=sys.stderr)
+        return 1
+    for line in result.lines():
+        print(line)
+    if result.stopped:
+        return 130
+    return 0 if result.ok else 1
+
+
+def _extract_inno_command(args) -> int:
+    """Inno Setup's own files: plan, approval, then gitfurl's own reader writes them."""
+    from gitfurl.extract import ExtractRefused
+    from gitfurl.inno import extract_inno_files, plan_inno_extract
+
+    if not args.dry_run and running_as_root():
+        print(f"error: {ROOT_MESSAGE}", file=sys.stderr)
+        return 1
+    try:
+        installer = validate_installer(args.installer)
+        plan = plan_inno_extract(installer, args.prefix)
+    except ValueError as exc:  # ExtractRefused is a ValueError
+        print(f"error: {exc}. Nothing was written.", file=sys.stderr)
+        return 1
+    problem = plan.problem()
+    if args.dry_run:
+        print("DRY RUN: nothing was extracted, created or changed.")
+    for line in plan.describe():
+        print(line)
+    print("Only extract installers you are authorised to use.")
+    if args.dry_run:
+        if problem:
+            print(f"a real extraction would stop now: {problem}")
+        return 0
+    if problem:
+        print(f"error: {problem}. Nothing was written.", file=sys.stderr)
+        return 1
+    print("Ctrl-C stops the extraction; files already written and checked are kept.")
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print("Not approved: no terminal to ask on. Re-run with --yes to approve.")
+            return 2
+        if input("Type 'yes' to extract the files: ").strip() != "yes":
+            print("Not approved. Nothing was written.")
+            return 2
+    try:
+        result = extract_inno_files(plan)
     except ExtractRefused as exc:
         print(f"error: {exc}. {exc.outcome()}", file=sys.stderr)
         return 1
