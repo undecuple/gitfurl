@@ -1233,8 +1233,8 @@ class ChainedExtraction(unittest.TestCase):
     def test_block_longer_than_its_files_writes_the_declared_size(self):
         self.put(make_archive([("rep:1mb+lzma:1mb", [F("a", b"abc" * 1000, size=1000)])]))
         res = extract.extract(extract.plan_extract(self.setup, "p1"))
-        self.assertEqual((self.dest / "a").read_bytes(), (b"abc" * 1000)[:1000])
-        self.assertEqual(res.crc_errors, ["a"])  # the CRC was of all 3000 bytes
+        self.assertFalse((self.dest / "a").exists())  # its CRC was of all 3000 bytes: removed
+        self.assertEqual(res.crc_errors, ["a"])
         self.assertIsNone(res.error)
 
     def test_stop_in_a_chained_block(self):

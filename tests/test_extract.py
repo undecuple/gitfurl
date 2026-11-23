@@ -138,7 +138,7 @@ class Extracts(Base):
         plan = self.plan()
         self.assertEqual([a.path for a in plan.archives], [self.setup])
 
-    def test_crc_mismatch_is_reported_and_the_file_kept(self):
+    def test_crc_mismatch_is_reported_and_the_file_removed(self):
         data = bytearray(make_archive([("storing", [F("a.txt", b"AAAA"), F("b.txt", b"BBBB")])]))
         at = bytes(data).index(b"BBBB")
         data[at] = ord("X")
@@ -146,8 +146,28 @@ class Extracts(Base):
         res = extract.extract(self.plan())
         self.assertFalse(res.ok)
         self.assertEqual(res.crc_errors, ["b.txt"])
+        self.assertFalse((self.dest / "b.txt").exists())
+        self.assertEqual((self.dest / "a.txt").read_bytes(), b"AAAA")
+        self.assertEqual((res.files, res.bytes_written), (1, 4))
+        text = "\n".join(res.lines())
+        self.assertIn("1 file failed the CRC-32 check (removed again): b.txt", text)
+        self.assertNotIn("could not be removed", text)
+
+    def test_crc_mismatch_that_cannot_be_removed_is_named(self):
+        data = bytearray(make_archive([("storing", [F("b.txt", b"BBBB")])]))
+        data[bytes(data).index(b"BBBB")] = ord("X")
+        self.arc("a.arc", bytes(data))
+        real = os.unlink
+
+        def refuse(*a, **kw):
+            raise PermissionError(13, "denied")
+        with mock.patch.object(extract.os, "unlink", refuse):
+            res = extract.extract(self.plan())
+        self.assertIs(extract.os.unlink, real)
+        self.assertEqual((res.crc_errors, res.not_removed), (["b.txt"], ["b.txt"]))
         self.assertEqual((self.dest / "b.txt").read_bytes(), b"XBBB")
-        self.assertIn("failed the CRC-32 check (kept): b.txt", "\n".join(res.lines()))
+        self.assertIn("could not be removed after failing the CRC-32 check (damaged, still "
+                      "there): b.txt", "\n".join(res.lines()))
 
     def test_lzma_block_shorter_than_its_files_is_an_error_not_a_crash(self):
         self.arc("a.arc", make_archive([("lzma:1mb", [F("a", b"a" * 100),

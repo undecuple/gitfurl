@@ -22,7 +22,8 @@ While writing: every file is created new (O_CREAT|O_EXCL|O_NOFOLLOW) inside fold
 run created, opened relative to the destination's own file descriptor, so nothing outside it
 is written and nothing is overwritten. Output per data block stops at the sum of its files'
 declared sizes; every decoder's buffers are capped before the block is read, and damaged data
-is reported in the result. Each file's CRC-32 is checked; a mismatch is reported and the file is kept.
+is reported in the result. Each file's CRC-32 is checked; a file that does not match is removed
+again and named in the result (as extract-inno does with its checksums).
 File times are set through the open file. Nothing from an archive is run or passed to a
 program. Stop (a cancel flag, or Ctrl-C) ends the extraction between chunks; files already
 written stay, and nothing is deleted. At most _Tree.CACHE folders are held open at a time.
@@ -183,8 +184,8 @@ class ExtractPlan:
                          "(the decoders of its methods added together)")
         lines.append("  each archive's own folder layout is used; the installer's script may "
                      "have placed files differently")
-        lines.append("  each file's CRC-32 is checked; a file that does not match is kept and "
-                     "listed")
+        lines.append("  each file's CRC-32 is checked; a file that does not match is removed "
+                     "again and listed")
         lines.extend(f"  note: {n}" for n in self.notes)
         return lines
 
@@ -346,7 +347,8 @@ class ExtractResult:
     files: int = 0
     folders: int = 0
     bytes_written: int = 0
-    crc_errors: list[str] = field(default_factory=list)
+    crc_errors: list[str] = field(default_factory=list)  # removed again
+    not_removed: list[str] = field(default_factory=list)  # failed the CRC, removal failed
     incomplete: str | None = None  # a file that was being written when it ended early
     stopped: bool = False
     error: str | None = None
@@ -366,8 +368,12 @@ class ExtractResult:
             out.append(f"incomplete file (kept): {self.incomplete}")
         if self.crc_errors:
             out.append(f"{farc._n(len(self.crc_errors), 'file', 'files')} failed the CRC-32 "
-                       "check (kept): " + ", ".join(self.crc_errors[:5])
+                       "check (removed again): " + ", ".join(self.crc_errors[:5])
                        + (", ..." if len(self.crc_errors) > 5 else ""))
+        if self.not_removed:
+            out.append("could not be removed after failing the CRC-32 check (damaged, still "
+                       "there): " + ", ".join(self.not_removed[:5])
+                       + (", ..." if len(self.not_removed) > 5 else ""))
         if self.stopped or self.error:
             out.append("Files already written were kept; nothing was deleted.")
         return out
@@ -545,6 +551,7 @@ def _write_all(plan, opened, root, cancel, on_progress) -> ExtractResult:
             raise _Stopped
 
     current: list[str] = []
+    done = 0  # bytes decoded into files, for progress (removed files included)
     try:
         for fd, ap in opened:
             for folder in ap.dirs:
@@ -582,13 +589,19 @@ def _write_all(plan, opened, root, cancel, on_progress) -> ExtractResult:
                             pass
                     finally:
                         os.close(out)
-                    res.bytes_written += entry.size
                     current.clear()
-                    res.files += 1
+                    done += entry.size
                     if crc != entry.crc:
                         res.crc_errors.append(shown)
+                        try:  # by name in the folder this run created; never follows a link
+                            os.unlink(name, dir_fd=tree.fd(folder))
+                        except OSError:
+                            res.not_removed.append(shown)
+                    else:
+                        res.bytes_written += entry.size
+                        res.files += 1
                     if on_progress is not None:
-                        on_progress(res.bytes_written, plan.total_size)
+                        on_progress(done, plan.total_size)
     except _Stopped:
         res.stopped = True
     except KeyboardInterrupt:
