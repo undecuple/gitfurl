@@ -26,7 +26,7 @@ is reported in the result. Each file's CRC-32 is checked; a file that does not m
 again and named in the result (as extract-inno does with its checksums).
 File times are set through the open file. Nothing from an archive is run or passed to a
 program. Stop (a cancel flag, or Ctrl-C) ends the extraction between chunks; files already
-written stay, and nothing is deleted. At most _Tree.CACHE folders are held open at a time.
+written stay, and nothing else is deleted (only files removed for a CRC-32 mismatch). At most _Tree.CACHE folders are held open at a time.
 """
 
 from __future__ import annotations
@@ -375,7 +375,9 @@ class ExtractResult:
                        "there): " + ", ".join(self.not_removed[:5])
                        + (", ..." if len(self.not_removed) > 5 else ""))
         if self.stopped or self.error:
-            out.append("Files already written were kept; nothing was deleted.")
+            out.append("Files already written were kept, except those removed for a CRC-32 "
+                       "mismatch (listed above)." if self.crc_errors else
+                       "Files already written were kept; nothing was deleted.")
         return out
 
 

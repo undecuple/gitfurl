@@ -169,6 +169,19 @@ class Extracts(Base):
         self.assertIn("could not be removed after failing the CRC-32 check (damaged, still "
                       "there): b.txt", "\n".join(res.lines()))
 
+    def test_stop_after_a_crc_removal_does_not_say_nothing_was_deleted(self):
+        data = bytearray(make_archive([("storing", [F("a.txt", b"AAAA"), F("b.txt", b"BBBB")])]))
+        data[bytes(data).index(b"AAAA")] = ord("X")
+        self.arc("a.arc", bytes(data))
+        cancel = threading.Event()
+        res = extract.extract(self.plan(), cancel=cancel,
+                              on_progress=lambda done, total: cancel.set())
+        self.assertTrue(res.stopped)
+        self.assertEqual(res.crc_errors, ["a.txt"])
+        text = "\n".join(res.lines())
+        self.assertIn("except those removed for a CRC-32 mismatch", text)
+        self.assertNotIn("nothing was deleted", text)
+
     def test_lzma_block_shorter_than_its_files_is_an_error_not_a_crash(self):
         self.arc("a.arc", make_archive([("lzma:1mb", [F("a", b"a" * 100),
                                                       F("b", b"b" * 100, size=5000)])]))
