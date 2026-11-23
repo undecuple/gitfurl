@@ -12,10 +12,11 @@ Tests use temporary directories and mocked subprocess calls. They need no Wine, 
 CI also fails if a tracked file is an installer, archive or key, or is over 1 MiB. A pre-commit hook in `.githooks/` blocks installers, archives, keys and files over 1 MiB. Enable it with `git config core.hooksPath .githooks`.
 
 ## Repository layout
+The [code map](code-map.md) shows how the modules, entry points, tests and CI jobs fit together.
 ```
 src/gitfurl/   the app, command line and core
 tests/         mock-based tests (no Wine, no network, no installers)
-docs/          user guide, scope, architecture, development
+docs/          user guide, scope, status, testing, architecture, code map, development
 tools/         sandbox wrapper and the asset generator
 assets/        banner, icon, favicon, social preview
 .github/       CI and issue forms

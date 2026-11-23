@@ -60,7 +60,7 @@ Terminal instead: `python -m gitfurl cli --help` (same code, same approvals).
 | What it is for, every option, screenshots, the command line | [docs/user-guide.md](docs/user-guide.md) |
 | What it does and does not do; who it is for | [docs/scope.md](docs/scope.md) |
 | Tested setups, known issues | [docs/status.md](docs/status.md) |
-| How the core, app and progress reading fit together | [docs/architecture.md](docs/architecture.md) |
+| How the core, app and progress reading fit together | [docs/architecture.md](docs/architecture.md), [docs/code-map.md](docs/code-map.md) (diagrams) |
 | Building, tests, the sandbox wrapper, repository layout | [docs/development.md](docs/development.md), [docs/testing.md](docs/testing.md) |
 | Docker image and compose file (experimental) | [docs/docker.md](docs/docker.md) |
 | What is read from `/proc` and what is not | [SECURITY.md](SECURITY.md) |
