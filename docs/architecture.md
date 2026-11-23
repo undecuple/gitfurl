@@ -1,5 +1,7 @@
 # Architecture
 
+A diagram overview (layers, module imports, the install flows, entry points, tests and CI) is in [code-map.md](code-map.md).
+
 One shared core, thin interfaces. The graphical app (`gui.py`, tkinter) is the default and is started by `app.py`. The command line (`cli.py`) is opt-in through `gitfurl cli`. Both use the same core and safety checks. A TUI may follow.
 
 - `doctor.py`: read-only probes with a timeout.
@@ -9,7 +11,7 @@ One shared core, thin interfaces. The graphical app (`gui.py`, tkinter) is the d
 
 A dry run never falls through to real execution.
 
-- `app.py`: entry point. No arguments opens the GUI; `cli ...` runs the CLI.
+- `app.py`: entry point. No arguments opens the GUI; `cli ...` runs the CLI; anything else exits with status 2. `__main__.py` makes `python -m gitfurl` call it.
 - `gui.py`: window and confirmation dialogs. Logic that can be tested without a display (`describe_plan`) is kept in plain functions.
 - `cleanup.py`: optional removal of the installer after a good run, with the guards in the user guide.
 - `changes.py`: optional before and after snapshots of the prefix and a few host places.
@@ -25,5 +27,8 @@ A dry run never falls through to real execution.
 - `preflight.py`: advisory checks shown before a run (measured values apart from estimates, never blocking).
 - `runner.py` `RunControl`: stops the run gitfurl started, through its own process group, under a lock; nothing is signalled after the run has ended.
 - `progress.py`: progress from `/proc` (how far processes have read into the payload files) and the prefix size; the advisory stall detector and the "observed activity" heuristic (neither acts on the run).
+- `unattended.py`: the unattended Inno Setup option: Inno Setup's documented switches (`/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR= /LOG=`), the folder inside the prefix, and reading the log Setup writes there afterwards. It runs nothing itself.
+- `procgroup.py`: helpers shared by everything that starts Wine in its own process group (`SigintGuard` holds Ctrl-C back on the main thread until it is safe; `group_alive`; finding the prefix's `wineserver`).
+- `safety.py`: the root check shared by the app and the command line.
 - `widgets.py`, `pixelfont.py`: the app's rounded widgets and block letters.
 - `theme.py`: colours, spacing, type sizes, the corner radius and the contrast calculation (no tkinter, so it is tested without a display).
