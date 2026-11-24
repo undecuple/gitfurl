@@ -728,20 +728,27 @@ class NativeCliTests(Base):
 
 
 class GuiRouteLineTests(Base):
-    def test_window_says_it_does_not_run_the_native_route(self):
+    def test_window_takes_the_automatic_route_or_setup_when_asked(self):
         try:
-            from gitfurl.gui import window_route_text
+            from gitfurl.gui import SETUP_INSTEAD_TITLE, window_route_text
         except ImportError as exc:  # no tkinter
             self.skipTest(str(exc))
         self.arc("NAME-01.bin", lzma_blocks())
         text = window_route_text(self.setup, "p1", self.env)
-        self.assertIn("route: wine (chosen by this window)", text)
-        self.assertIn("does not run the native route yet", text)
+        self.assertIn("route: native (chosen by gitfurl)", text)
+        text = window_route_text(self.setup, "p1", self.env, setup_instead=True)
+        self.assertIn("route: wine (chosen by you)", text)
+        text = window_route_text(self.setup, "p1", self.env,
+                                 setup_options=["portable install"])
+        self.assertIn("route: wine (chosen by gitfurl)", text)
+        self.assertIn("(portable install)", text)
+        self.assertIn("turn those options off", text)
+        self.assertNotIn("--route", text)
+        self.assertTrue(SETUP_INSTEAD_TITLE)
         for p in self.src.glob("*.bin"):
             p.unlink()
         text = window_route_text(self.setup, "p1", self.env)
         self.assertIn("route: wine (chosen by gitfurl)", text)
-        self.assertNotIn("does not run the native route yet", text)
 
 
 if __name__ == "__main__":
