@@ -444,6 +444,50 @@ class VersionTests(unittest.TestCase):
         self.assertIsNone(info.db_date)
         self.assertIn("date", info.problem)
 
+    def fake_clam(self, d, clamconf_text=None):
+        """A fake ClamAV 1.5 clamscan: plain --version names only the engine; with
+        --database=DIR it reports the database. A clamconf beside it if text is given."""
+        fake = Path(d) / "clamscan"
+        fake.write_text('#!/bin/sh\ncase "$1" in --database=/db/clamav) '
+                        'echo "ClamAV 1.5.4/28193/Tue Nov 24 00:27:44 2026";; '
+                        '*) echo "ClamAV 1.5.4";; esac\n')
+        fake.chmod(0o700)
+        if clamconf_text is not None:
+            conf = Path(d) / "clamconf"
+            conf.write_text("#!/bin/sh\ncat <<'X'\n" + clamconf_text + "\nX\n")
+            conf.chmod(0o700)
+        return fake
+
+    def test_database_folder_from_clamconf_when_version_reads_none(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake = self.fake_clam(d, "Database information\n--------------------\n"
+                                     "Database directory: /db/clamav\n")
+            info = scan.database_info(str(fake), which=lambda name: None)
+        self.assertIsNone(info.problem)
+        self.assertEqual((info.db_version, info.directory), ("28193", "/db/clamav"))
+        self.assertIn("in /db/clamav (from clamconf)", "\n".join(scan.describe_database(info)))
+
+    def test_no_clamconf_or_no_folder_keeps_the_note(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake = self.fake_clam(d)  # no clamconf at all
+            info = scan.database_info(str(fake), which=lambda name: None)
+            self.assertEqual(info.problem, scan.NO_DATABASE)
+        with tempfile.TemporaryDirectory() as d:
+            fake = self.fake_clam(d, "Database directory: /elsewhere\n")  # nothing there
+            info = scan.database_info(str(fake), which=lambda name: None)
+            self.assertEqual(info.problem, scan.NO_DATABASE)
+            self.assertIsNone(info.directory)
+
+    def test_doctor_asks_clamconf_too(self):
+        from gitfurl import doctor
+
+        with tempfile.TemporaryDirectory() as d:
+            fake = self.fake_clam(d, "Database directory: /db/clamav\n")
+            rep = doctor.ToolReport("clamscan", str(fake), "ClamAV 1.5.4", None)
+            text = "\n".join(doctor._clamscan_lines(rep))
+        self.assertIn("signature database 28193", text)
+        self.assertNotIn("no signature database", text)
+
     def test_invalid_utf8_version_output_does_not_raise(self):
         with tempfile.TemporaryDirectory() as d:
             fake = Path(d) / "clamscan"
