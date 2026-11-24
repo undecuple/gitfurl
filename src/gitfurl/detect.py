@@ -8,7 +8,9 @@ can be extracted or installed.
 It recognises two things, each with a confidence that says how sure it is:
   * Inno Setup: a Windows program (starts with "MZ"). gitfurl.inno reads the setup's own
     offset table, format ID and header blocks (bounded reads, CRC-32 checked) from the same
-    open file; when that works the evidence lists what Inno itself would write, the [Run]
+    open file (or, when setup.exe has no loader, from <stem>-0.bin beside it); when that
+    works the evidence lists what Inno itself would write, where its data is (slice files
+    beside the installer are listed and checked by name), the [Run]
     entries a silent install would run (redistributables marked), and the files the setup
     names beside itself, checked against the folder (the archive-name preflight). When it
     does not, a setup-header ID string such as "Inno Setup Setup Data (5.5.0)" found in the
@@ -151,11 +153,13 @@ def detect(path: Path) -> Detection:
                 setup, why = _read_inno(fh.fileno(), Path(path), size)
                 found = None if setup else _find_inno(fh, size)
                 if setup:
+                    read = ("offset table and header blocks were read" if setup.loader else
+                            "header blocks were read (setup.exe has no loader)")
                     det.evidence.append(Evidence(
-                        "Inno Setup", CONF_LIKELY, f"byte offset {setup.offset0}",
+                        "Inno Setup", CONF_LIKELY, setup.where,
                         f"setup data format {setup.format} ({clean(setup.format_id)!r}); its "
-                        "offset table and header blocks were read and their CRC-32 checks "
-                        "match (nothing was extracted or run)", _summarise_inno(setup)))
+                        f"{read} and their CRC-32 checks match (nothing was extracted or run)",
+                        _summarise_inno(setup)))
                 elif found:
                     offset, ident = found
                     det.evidence.append(Evidence(
