@@ -144,6 +144,15 @@ def build_parser() -> argparse.ArgumentParser:
                            "dialogs (answering Install makes Wine download them); default: off, "
                            "wineboot runs with WINEDLLOVERRIDES=mscoree,mshtml=")
     pre_sub.add_parser("list", help="list dedicated prefixes")
+    desk = sub.add_parser(
+        "desktop-entry",
+        help="add (or with --remove, remove) an application-menu entry for the window, in "
+             "your own data folder; optional, shows the plan first")
+    desk.add_argument("--remove", action="store_true",
+                      help="remove the entry and icon gitfurl wrote (files it did not write "
+                           "are left)")
+    desk.add_argument("--dry-run", action="store_true", help="show the plan; change nothing")
+    desk.add_argument("--yes", action="store_true", help="approve without prompting")
     return p
 
 
@@ -158,6 +167,8 @@ def main(argv: list[str] | None = None) -> int:
         return _extract_command(args)
     if args.command == "extract-inno":
         return _extract_inno_command(args)
+    if args.command == "desktop-entry":
+        return _desktop_command(args)
     try:
         installer = validate_installer(args.installer)
         det = detect(installer)  # once; passed on
@@ -225,6 +236,46 @@ def _unattended_plan(args, prefix_name, det):
     from gitfurl.unattended import plan_unattended
 
     return plan_unattended(prefix_name, det)
+
+
+def _desktop_command(args) -> int:
+    from gitfurl.desktop import DesktopRefused, apply, check, plan_desktop
+
+    if running_as_root():
+        print(f"error: {ROOT_MESSAGE}", file=sys.stderr)
+        return 1
+    try:
+        plan = plan_desktop(remove=args.remove)
+        lines = plan.describe()
+        check(plan)
+    except DesktopRefused as exc:
+        print(f"error: {exc}. Nothing was changed.", file=sys.stderr)
+        return 1
+    print("Plan (dry run, nothing changed):" if args.dry_run else "Plan:")
+    for line in lines:
+        print(f"  {line}")
+    if args.dry_run:
+        return 0
+    if not args.yes:
+        refused = _confirm("Type 'yes' to " + ("remove them: " if args.remove
+                                               else "write them: "), "Nothing was changed.")
+        if refused is not None:
+            return refused
+    done: list[str] = []
+    try:
+        apply(plan, done)
+    except (DesktopRefused, OSError) as exc:
+        what = exc if isinstance(exc, DesktopRefused) else f"{exc.strerror or exc}: " \
+            f"{getattr(exc, 'filename', '') or ''}"
+        for line in done:
+            print(f"already done: {line}")
+        print(f"error: {what}" + (". 'gitfurl cli desktop-entry --remove' takes away what "
+                                  "was written." if done and not args.remove else
+                                  "" if done else ". Nothing was changed."), file=sys.stderr)
+        return 1
+    for line in done:
+        print(line)
+    return 0
 
 
 def _confirm(prompt: str, nothing: str) -> int | None:
