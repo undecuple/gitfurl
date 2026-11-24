@@ -159,10 +159,24 @@ Not tested: data formats 5.5.0 (stock), 5.5.6, 6.0.0, 6.1.0, 6.4.0.1, 6.4.2, 6.4
 
 Cross-check on 2026-11-23 inside `tools/sandbox.sh` (no network, Python 3.11, `python3 -I`, a copy of `src/`; not under Wine). 18 setups were built in the sandbox with the official Inno Setup 6.3.3, 6.7.4 and 7.1.1 compilers (downloaded from jrsoftware's GitHub releases) from 39 generated files (9.2 MB): per version, spanning with solid and non-solid LZMA2, three slices per disk with zip, no loader without and with spanning, and a single-file control. Nine of them (spanning and no loader) were also installed silently under Wine to confirm the builds; every installed file matched. gitfurl read every setup (the layout and the slice file names in the plan matched the files the compiler wrote), and `plan_inno_extract()` and `extract_inno_files()` wrote all 39 files of each, every one matching its source's sha256, with nothing extra. With one 7.1.1 spanning setup changed: a deleted slice and a slice cut by 100 bytes were refused before anything was written, naming the file; two slices swapped ended in "a data chunk could not be decompressed" with the partial file removed. Not checked: Inno Setup 5.5.x (no official 5.5.9 download was available), searching `..\DISK<n>` folders (gitfurl looks only beside the installer), files extracted under Wine.
 
+## Optional menu entry (2026-11-24, UTC)
+
+- `tests/test_desktop.py` (temporary data folder):
+  - the dry run writes nothing, and lists the folders it would create and the exact `Exec` line; after a run it says "replace" instead;
+  - writing gives the entry (with `Exec` quoted for a path with a space, the marker line, mode 0644) and gitfurl's icon; a second run replaces them, and `--remove` takes both away;
+  - an entry or icon gitfurl did not write is left as it is (writing is refused; removing leaves the icon), and an older icon beside gitfurl's own entry is replaced and removed;
+  - a link in place of the entry is refused and its target is unchanged;
+  - a failed write reports what was already done, and `--remove` then cleans up; leftover temporary files of gitfurl's are removed, others are not;
+  - without a terminal and without `--yes` nothing is approved; root is refused;
+  - `Exec` escaping on both levels (`"`, `` ` ``, `$`, `\`, `%`; a line break refused), the `python -m gitfurl` fallback with `Path=` pointing at a source checkout, a virtual environment's python kept as a link, and `XDG_DATA_HOME` (a relative value is ignored).
+- `desktop-file-validate` (desktop-file-utils from nixpkgs) passed two generated entries: a path with `$` and a space, and the `python -m gitfurl` fallback with `Path=`.
+- Not checked: that a desktop's menu shows the entry and starts the window from it, and the built (PyInstaller) program writing its own path.
+
 ## Free space against what the archives unpack to (2026-11-24, UTC)
 
 - `tests/test_route.py`: `extract.unpacked_size` with no archive and with only an unreadable one (None), two readable archives built by the tests beside the unreadable one (the sum of their files' sizes; three found, two read), a folder listing that fails (None) or stops early ("at least"); `route.setup_unpacked` counts archives linked to the installer and leaves out an archive beside an installer that is neither Inno Setup nor FreeArc, or one whose name does not link it; the preflight's lines and its warning when free space is smaller; a Setup-route dry run shows the size.
 - Not tested: the approval text with the size, on the command line and in the window (both call the same `measure`), and an installer whose archives are readable but which goes to the Setup route in a real run.
+
 ## Sandbox reruns on both routes (2026-11-24, UTC)
 
 Run inside `tools/sandbox.sh` (no network, installer folder read-only, `xvfb-run -a`, wine-wow64 11.0, Python 3.11.17, `python3 -I` with a copy of `src/`) between 16:46 and 16:56 UTC, with gitfurl `main` at fdec4918 for the first two runs and with this change for the third, against the two maintainer-approved synthetic installers used before.
@@ -170,6 +184,7 @@ Run inside `tools/sandbox.sh` (no network, installer folder read-only, `xvfb-run
 - The installer of 2026-11-19 (an Inno Setup program and two FreeArc archives whose index fails its CRC check): the route was **Wine**, with that reason, and the plan warned that three files the script names are missing beside the installer. gitfurl created the prefix in about 5 s and Setup started. With `--stall-after 60`, the stall note fired after 60 s and listed "Select Setup Language", "Setup" and "InnoSetupLdrWindow", naming none of them. A probe (`xwininfo -id`, `xprop`) showed that only the language dialog is a real window: "Setup" is 1x1 pixels and the loader window is 113x2 and unmapped, and that `xwininfo -root -tree` lists the topmost window first. A Ctrl-C (`timeout -s INT`) ended the run as cancelled and `wineserver -k` was run for the prefix.
 - Rerun with this change (`--stall-after 40`, 16:53 UTC): the note listed only "Select Setup Language" and named it as the window on top. After review the map-state check was added and a single listed window is no longer named a second time; rerun at 17:17 UTC with that code, the note read: Window open in the run: "Select Setup Language"; it may be waiting for an answer. No `wineserver` was left. The sentence naming the window on top among several was not seen in a run (unit-tested only). Not run: the window's stall note, and an installer that shows a later error window.
 - `tests/test_crash.py`: the windows of that run (the dialog, the 1x1 and 113x2 windows) give only the dialog, with no `xprop` call for the hidden ones; an unmapped window of normal size listed on top is left out, and listed once it is shown; the empty-title and "Default IME" checks are tested with windows of normal size, so the size filter does not hide a broken check; a stall note with two windows open from the start names the one on top; a line without a size is kept; the caps keep the topmost windows; the tracker names the window on top when none opened after the first look; the stall note and its `top_window` event field for one window open from the start, and `top_window` is null when a newest window is named.
+
 ## ClamAV database folder from clamconf (2026-11-24, UTC)
 
 - `tests/test_scan.py`: a fake ClamAV 1.5 `clamscan` (plain `--version` names only the engine) with a fake `clamconf` beside it: the database version, date and folder are read; with no `clamconf`, or a folder with no database, the "no signature database" note stays; `doctor` uses the same fallback, and keeps its first answer when the fallback finds nothing.
@@ -227,6 +242,7 @@ Run inside `tools/sandbox.sh` (no network, installer folder read-only, `xvfb-run
 - a stopped `create_prefix` keeps the folder with its incomplete marker.
 
 `tests/test_gitfurl.py`: `run_in_group(should_stop=...)` ends a real two-process group from another thread and asks the fake wineserver to exit. The command line's native tests in `tests/test_route.py` pass unchanged with the shared stop checks. Not run: anything under Wine or in the sandbox.
+
 ## Crashes and stuck windows (2026-11-24, UTC)
 
 `tests/test_crash.py` (fake `/proc`, fake `xwininfo` and `xprop`) and `tests/test_gitfurl.py` (stall detector):

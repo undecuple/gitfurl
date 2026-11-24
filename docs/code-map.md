@@ -2,7 +2,7 @@
 
 A map of the source for people changing it: layers, which module uses which, the main control and data flows, the entry points, and which tests and CI jobs cover what. The per-module details are in [architecture.md](architecture.md); this page is the overview. The diagrams are Mermaid (GitHub draws them).
 
-Checked against `main` at 562a8e5b (2026-11-24). The import graph below was read from the source with Python's `ast` module, so it lists every `from gitfurl… import` in each file, including imports inside functions.
+Checked against `main` at df6c6c10 (2026-11-24). The import graph below was read from the source with Python's `ast` module, so it lists every `from gitfurl… import` in each file, including imports inside functions.
 
 ## Layers
 
@@ -52,12 +52,12 @@ flowchart TB
 
 ## Module dependencies
 
-Arrows point from a module to the modules it imports. Modules with no gitfurl imports: `changes`, `cleanup`, `farc`, `memlimit`, `pixelfont`, `preflight`, `procgroup`, `safety`, `theme`.
+Arrows point from a module to the modules it imports. Modules with no gitfurl imports: `changes`, `cleanup`, `desktop`, `farc`, `memlimit`, `pixelfont`, `preflight`, `procgroup`, `safety`, `theme`.
 
 ```mermaid
 flowchart LR
   app --> cli & gui
-  cli --> cleanup & detect & doctor & extract & inno & memlimit & portable & prefixes & preflight & route & runner & safety & scan & unattended
+  cli --> cleanup & desktop & detect & doctor & extract & inno & memlimit & portable & prefixes & preflight & route & runner & safety & scan & unattended
   gui --> cleanup & detect & doctor & memlimit & portable & prefixes & preflight & route & runner & safety & scan & theme & unattended & widgets
   widgets --> pixelfont & theme
   route --> changes & detect & extract & farc & inno & memlimit & prefixes & runner & scan
@@ -92,6 +92,7 @@ Notes:
 | `gitfurl cli extract` | `cli._extract_command()` → `extract.plan_extract()`, `extract.extract()` | FreeArc archives beside the installer, into an existing prefix |
 | `gitfurl cli extract-inno` | `cli._extract_inno_command()` → `inno.plan_inno_extract()`, `inno.extract_inno_files()` | files Inno Setup stores for `{app}` |
 | `gitfurl cli prefix create` / `list` | `cli._prefix_command()` → `prefixes.create_prefix()`, `list_prefixes()` | |
+| `gitfurl cli desktop-entry` | `cli._desktop_command()` → `desktop.plan_desktop()`, `check()`, `apply()` | optional menu entry and icon in the user's data folder |
 | Sandbox wrapper (manual) | `tools/sandbox.sh` | bubblewrap, network off, NixOS only; not part of the app |
 | Asset generator | `tools/make_assets.py` | `assets/*.svg`, dividers, the facts label colours |
 | Release build | `.github/workflows/release.yml` | PyInstaller single file on a `v*` tag, draft release |
@@ -212,6 +213,7 @@ flowchart LR
 | `tests/test_gui_native_xvfb.py` | the native route in the real window: Run and the unpack, Stop, the "Run Setup instead" switch, declining the approval | `tests/gui_native_driver.py` (`xvfb-run -a`) |
 | `tests/test_wineboot.py` | `prefixes.wineboot_env`, `with_wineboot_env`, `wineboot_line`; `--wine-addons` on `install` and `prefix create`; the window's plan line | - |
 | `tests/test_gui_stall.py` | which crash and stall notes the window keeps on screen; the 120 s stall advice | - |
+| `tests/test_desktop.py` | `desktop`, `cli desktop-entry` | - |
 
 Local check with the pinned versions: `ruff==0.11.13 check src tests` and `PYTHONPATH=src pytest==8.3.5 -q tests` on Python 3.11 (see [development.md](development.md)). Manual runs with real or synthetic installers go through `tools/sandbox.sh` only; they are recorded in [testing.md](testing.md).
 

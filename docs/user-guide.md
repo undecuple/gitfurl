@@ -50,6 +50,13 @@ With Nix, `nix develop` gives you Python with tkinter, and `nix develop .#wine` 
 
 (Once installed with `pip install .`, the command is `gitfurl`.) The window has a sidebar with **Library** and **Settings**.
 
+**Menu entry (optional).** `gitfurl cli desktop-entry` adds gitfurl to your desktop's application menu. It shows the plan first and asks before it changes anything (`--dry-run` only shows it):
+- `~/.local/share/applications/gitfurl.desktop` (or under `$XDG_DATA_HOME`). It starts the window with the built program itself, else the `gitfurl` found on PATH, else `python -m gitfurl` run from the folder that holds gitfurl (so a source checkout works too), by absolute path. The plan shows the exact `Exec` line;
+- a copy of the window's icon in `~/.local/share/icons/hicolor/64x64/apps/gitfurl.png`;
+- the folders for them that do not exist yet (the plan lists each one).
+
+Nothing else is changed and no program is started; the menu may take a moment, or a new login, to show it. `gitfurl cli desktop-entry --remove` removes both files, and gitfurl's own temporary files if an interrupted run left any; it leaves the folders. gitfurl replaces or removes only files it wrote itself: the entry carries the line `X-Gitfurl-Generated=true`, and the icon must be gitfurl's icon or sit beside gitfurl's entry. A link in place of the entry or the icon is refused; folders on the way (for example a linked `~/.local/share/applications`) are used as they are. If a step fails, gitfurl says what it had already done. If you move or reinstall gitfurl, run it again so the entry points at the new place. It refuses to run as root.
+
 ### Library
 The Library lists your prefixes. A prefix is a folder where Wine keeps its own fake Windows drive and registry. gitfurl keeps its prefixes in `~/.local/share/gitfurl/prefixes/` (or under `$XDG_DATA_HOME`) and **never uses `~/.wine`**.
 - **+ New prefix** adds a name to the list. The folder is created only when you create it or run an installer.
@@ -147,6 +154,7 @@ The graphical app is the default. The command line is opt-in and uses the same c
     gitfurl cli install /path/to/setup.exe --prefix NAME [options]
     gitfurl cli extract /path/to/setup.exe --prefix NAME [--dry-run] [--yes]
     gitfurl cli extract-inno /path/to/setup.exe --prefix NAME [--dry-run] [--yes]
+    gitfurl cli desktop-entry [--remove] [--dry-run] [--yes]
 
 Options for `install`:
 
