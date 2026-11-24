@@ -144,6 +144,17 @@ class WindowTitleTests(unittest.TestCase):
 
 
 class CrashNoteTests(RunEventHelpers, unittest.TestCase):
+    def run_it(self, run, **opts):
+        # With stall advice on, the run reads windows through window_list (one look per
+        # sample); a titles-only fake given as window_titles is adapted to it here.
+        titles = opts.get("window_titles")
+        if titles is not None and "window_list" not in opts and "stall_after_s" in opts:
+            def lister(pids, programs, env, pid_of=None):
+                got = titles(pids, programs, env)
+                return None if got is None else [(t, t) for t in got]
+            opts["window_list"] = lister
+        return super().run_it(run, **opts)
+
     def crash_process(self):
         d = self.proc / "101"
         d.mkdir()
@@ -194,6 +205,30 @@ class CrashNoteTests(RunEventHelpers, unittest.TestCase):
         self.assertIn('Windows open in the run: "Error"', stall[0])
         self.assertIsNone(res.crash_seen_s)
         self.assertNotIn("Crash:", describe_result(res))
+
+    def test_stall_note_names_the_newest_window(self):
+        self.fake_prefix_process(0)
+        notes, calls = [], []
+
+        def lister(pids, programs, env, pid_of=None):
+            calls.append(1)
+            main = [("0x1", "Setup - Game")]
+            return main if len(calls) == 1 else main + [("0x2", "Error")]
+
+        asked = []
+        res = self.run_it(self.sleeper(1.0), stall_after_s=250, clock=FakeClock(100),
+                          on_note=notes.append, window_list=lister, detailed_log=True,
+                          window_titles=lambda *a: asked.append(a) or [])
+        stall = [n for n in notes if n.startswith("possibly stalled")]
+        self.assertTrue(stall)
+        self.assertIn('Windows open in the run: "Setup - Game", "Error"', stall[0])
+        self.assertIn('The newest of them, "Error"', stall[0])
+        self.assertGreaterEqual(len(calls), 2)  # one look per progress sample
+        self.assertEqual(asked, [])  # and no second look for the note
+        evs, _text = self.events(res)
+        ev = [e for e in evs if e["event"] == "possibly_stalled"][0]
+        self.assertEqual(ev["newest_window"], "Error")
+        self.assertIsInstance(ev["newest_window_s"], int)
 
     def test_no_crash_no_line_and_a_failing_window_reader_is_ignored(self):
         self.fake_prefix_process(0)
@@ -252,6 +287,91 @@ class CrashNoteTests(RunEventHelpers, unittest.TestCase):
     def test_describe_result_without_a_crash(self):
         r = ExecResult(0, Path("/x.log"), exit_status=0, observation_measured=True)
         self.assertNotIn("Crash", describe_result(r))
+
+
+
+class WindowTrackerTests(unittest.TestCase):
+    def test_newest_window_after_the_first_look(self):
+        looks = [[("0x1", "Setup")], [("0x1", "Setup"), ("0x2", "Error")],
+                 [("0x1", "Setup"), ("0x2", "Error")]]
+        t = windows.WindowTracker({}, lambda *a, **k: looks.pop(0))
+        t.observe([1], ["setup.tmp"], 3.0)
+        self.assertIsNone(t.newest())  # one look: the main window is not "new"
+        t.observe([1], ["setup.tmp"], 6.0)
+        t.observe([1], ["setup.tmp"], 9.0)
+        self.assertEqual(t.newest(), ("Error", 6.0))
+        text = windows.newest_text(t.newest(), 70.0)
+        self.assertIn('"Error", opened 6 s into the run (64 s ago)', text)
+        self.assertEqual(windows.newest_text(None, 1.0), "")
+
+    def test_windows_present_from_the_start_are_not_named(self):
+        t = windows.WindowTracker({}, lambda *a, **k: [("0x1", "Setup"), ("0x2", "Other")])
+        for s in (3.0, 6.0):
+            t.observe([1], ["setup.tmp"], s)
+        self.assertIsNone(t.newest())
+
+    def test_unknown_looks_and_a_failing_lister_change_nothing(self):
+        def broken(*a, **k):
+            raise RuntimeError("x")
+
+        t = windows.WindowTracker({}, broken)
+        t.observe([1], ["a"], 1.0)
+        self.assertIsNone(t.newest())
+        t.lister = lambda *a, **k: None
+        t.observe([1], ["a"], 2.0)
+        self.assertEqual(t.observations, 0)
+
+
+class WindowListCacheTests(WindowTitleTests):
+    def test_xprop_only_for_new_windows(self):
+        run = self.fake({"0x1e00007": 11, "0x1e00009": 11, "0x3c00001": 11})
+        cache = {}
+        first = windows.window_list([11], ["setup.tmp", "averyveryverylo"], self.env, run,
+                                    pid_of=cache)
+        asked = [c for c in self.calls if c[0].endswith("xprop")]
+        self.assertTrue(first)
+        self.calls.clear()
+        again = windows.window_list([11], ["setup.tmp", "averyveryverylo"], self.env, run,
+                                    pid_of=cache)
+        self.assertEqual(first, again)
+        self.assertEqual([c for c in self.calls if c[0].endswith("xprop")], [])
+        self.assertEqual(len(cache), len(asked))
+
+
+class WindowListOrderTests(WindowTitleTests):
+    def tree(self, n):
+        return "".join(f'     0x{i:x} "W{i}": ("setup.tmp" "setup.tmp")  1x1+0+0  +0+0\n'
+                       for i in range(1, n + 1))
+
+    def test_the_caps_keep_the_topmost_windows(self):
+        run = self.fake({f"0x{i:x}": 11 for i in range(1, 21)}, tree=self.tree(20))
+        got = windows.window_list([11], ["setup.tmp"], self.env, run)
+        # xwininfo lists bottom to top: the last lines are the newest windows.
+        self.assertEqual([t for _w, t in got], [f"W{i}" for i in range(15, 21)])
+
+    def test_closed_windows_leave_the_cache(self):
+        cache = {"0x99": 11, "0x1": 11}
+        run = self.fake({"0x2": 11}, tree=self.tree(2))
+        windows.window_list([11], ["setup.tmp"], self.env, run, pid_of=cache)
+        self.assertEqual(cache, {"0x1": 11, "0x2": 11})  # 0x99 is gone from the tree
+
+
+class TrackerBaselineTests(unittest.TestCase):
+    def test_baseline_stays_when_the_main_window_closes(self):
+        looks = [[("a", "Setup")], [("b", "Unpacking")], [("b", "Unpacking")]]
+        t = windows.WindowTracker({}, lambda *a, **k: looks.pop(0))
+        for s in (3.0, 6.0, 9.0):
+            t.observe([1], ["x"], s)
+        self.assertEqual(t.newest(), ("Unpacking", 6.0))
+
+    def test_a_failed_look_forgets_the_open_windows(self):
+        looks = [[("a", "Setup")], [("a", "Setup"), ("b", "Error")], None]
+        t = windows.WindowTracker({}, lambda *a, **k: looks.pop(0))
+        for s in (3.0, 6.0):
+            t.observe([1], ["x"], s)
+        self.assertIsNotNone(t.newest())
+        self.assertIsNone(t.observe([1], ["x"], 9.0))
+        self.assertIsNone(t.newest())
 
 
 if __name__ == "__main__":

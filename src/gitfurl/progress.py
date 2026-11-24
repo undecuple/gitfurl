@@ -356,7 +356,8 @@ class ActivityObserver:
 
 
 class StallDetector:
-    """Advisory only: says once that nothing moved for `after_s` seconds. It never acts.
+    """Advisory only: says that nothing moved for `after_s` seconds, once per quiet period
+    (after the run moves again, a new quiet period is reported again). It never acts.
 
     Activity is any of: the payload read position grew, the prefix's processes used at least
     QUIET_CPU_PCT of one core since the last sample, or the run's log file grew. The clock is injected for tests.
@@ -379,12 +380,14 @@ class StallDetector:
             return self._log_size
 
     def check(self, sample: Sample) -> float | None:
-        """Feed one sample. Returns the idle seconds the first time the limit is passed."""
+        """Feed one sample. Returns the idle seconds when a quiet period first passes the
+        limit, else None."""
         now = self.clock()
         size = self._size()
         if sample.read_bytes > self._read or size > self._log_size \
                 or (sample.cpu_pct is not None and sample.cpu_pct >= QUIET_CPU_PCT):
             self._last_move = now
+            self.fired = False  # moving again: the next quiet period is reported too
         self._read = max(self._read, sample.read_bytes)
         self._log_size = max(self._log_size, size)
         idle = now - self._last_move

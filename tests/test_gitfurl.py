@@ -2480,7 +2480,11 @@ class RunEventTests(RunEventHelpers, unittest.TestCase):
         self.assertIsNone(d.check(smp(read=5, cpu=0.0)))  # idle 10
         self.assertIsNone(d.check(smp(read=5, cpu=0.0)))  # idle 20
         self.assertIsNotNone(d.check(smp(read=5, cpu=0.0)))  # idle 30: fires
-        self.assertIsNone(d.check(smp(read=5, cpu=0.0)))  # only once
+        self.assertIsNone(d.check(smp(read=5, cpu=0.0)))  # once per quiet period
+        self.assertIsNone(d.check(smp(read=9, cpu=0.0)))  # moving again
+        for _ in range(2):
+            self.assertIsNone(d.check(smp(read=9, cpu=0.0)))
+        self.assertIsNotNone(d.check(smp(read=9, cpu=0.0)))  # a new quiet period: again
         # Wine's own background processes use about 1-2% while nothing happens (Wine 11.0,
         # 2026-11-24): that is quiet, not movement.
         d = StallDetector(25, None, FakeClock(10))

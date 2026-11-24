@@ -91,9 +91,10 @@ def build_parser() -> argparse.ArgumentParser:
     inst.add_argument("--progress", action="store_true",
                       help="print progress while the installer runs (payload read, rate, ETA)")
     inst.add_argument("--stall-after", type=float, default=None, metavar="SECONDS",
-                      help="print one advisory note if nothing moves (no payload read, no CPU "
-                           "use, no log growth) for this long. Off by default. It never stops "
-                           "anything")
+                      help="print an advisory note each time nothing moves (no payload read, "
+                           "no CPU use, no log growth) for this long; after the run moves again, "
+                           "a later quiet period gets a note too. Off by default. It never "
+                           "stops anything")
     inst.add_argument("--progress-interval", type=float, default=10.0, metavar="SECONDS")
     inst.add_argument("--detailed-log", action="store_true",
                       help="also write a JSON-lines event log next to the log")
@@ -603,7 +604,6 @@ def _native_unused(args) -> list[str]:
     for flag, on in (("--portable", args.portable), ("--unattended", args.unattended),
                      ("--wine-debug", bool(args.wine_debug)),
                      ("--show-changes", args.show_changes),
-                     ("--stall-after", args.stall_after is not None),
                      ("--runtime proton", args.runtime == "proton")):
         if on:
             out.append(flag)
@@ -687,6 +687,9 @@ def _native_install(args, installer, det, choice) -> int:
     if args.wine_addons:
         print("--wine-addons does not apply to the native route: its wineboot always runs "
               "without Wine's Mono and Gecko dialogs (the unpack needs neither)")
+    if args.stall_after is not None:
+        print("--stall-after does not apply to the native route: Setup is not run, and the "
+              "unpack prints its own progress (Ctrl-C stops it)")
     for line in memory_lines:
         print(line)
     for line in describe_detection(det, choice).splitlines():
