@@ -2040,6 +2040,23 @@ def beside_files(s: Setup, folder: Path | None = None) -> list[BesideFile]:
     return list(out.values())
 
 
+def named_beside(s: Setup, folder: Path | None = None) -> set[str]:
+    """Casefolded names of files directly in the folder (not in a subfolder) that the setup
+    names and that are there, with the numbered files after a named one ("data-01.bin" also
+    gives "data-02.bin" when both are present). From beside_files(); nothing is opened."""
+    out: set[str] = set()
+    for bf in beside_files(s, folder):
+        if not bf.present or not bf.checked or "\\" in bf.name:
+            continue
+        out.add(bf.name.casefold())
+        m = _NUMBERED.match(bf.name)
+        if bf.siblings and m:
+            stem, num, ext = m.groups()
+            for k in range(int(num) + 1, int(num) + 1 + bf.siblings):
+                out.add(f"{stem}{k:0{len(num)}d}{ext}".casefold())
+    return out
+
+
 def summarise(s: Setup, folder: Path | None = None) -> list[str]:
     """Plain-text lines for the install plan. Every string from the setup is cleaned."""
     lines = []

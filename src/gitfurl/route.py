@@ -6,9 +6,10 @@ and writes nothing. The route is:
 
   native  when the installer is Inno Setup (or is itself a FreeArc archive), every FreeArc
           archive beside it reads cleanly, uses only storing, lzma, exe, delta, rep, 4x4
-          (lzma inside) and srep, and holds only names gitfurl can write safely, and (for the automatic choice) the
-          archives are linked to the installer by name and no option that only a Setup run
-          uses was given. Setup is then NOT run at all: gitfurl
+          (lzma inside) and srep, and holds only names gitfurl can write safely, and (for the
+          automatic choice) the archives are linked to the installer (its setup script names
+          them all, or they share its name) and no option that only a Setup run uses was
+          given. Setup is then NOT run at all: gitfurl
           unpacks the archives itself into C:\\Games\\<prefix>, after creating the prefix with
           Wine when asked. Setup's own files, shortcuts, registry entries, redistributables and
           script steps are skipped, and the plan says so word for word.
@@ -47,6 +48,8 @@ from gitfurl.detect import (
 )
 
 ROUTE_CHOICES = ("auto", "native", "wine")
+
+METHODS_TEXT = "storing, lzma, exe, delta, rep, 4x4 (with lzma inside) or srep"
 
 SKIPPED_TEXT = (
     "Setup is not run. Skipped: Setup's own files (for example its uninstaller and small extra "
@@ -109,30 +112,68 @@ def _base_name(name: str) -> str:
     return _SET_NUMBER.sub("", stem).strip(" -_.")
 
 
-def archives_not_linked(installer: Path, paths: list[Path]) -> str | None:
-    """Why the archives beside the installer are not linked to it by name, or None.
+def script_names(installer: Path) -> set[str] | None:
+    """Casefolded names of the files beside an Inno Setup installer that its setup script
+    names ([Files] external entries and [Code] string constants, see
+    gitfurl.inno.named_beside), or None when the setup data cannot be read. Never raises:
+    a hostile file must not stop the plan. Reads the installer's headers and the folder's
+    names only."""
+    from gitfurl import inno
 
-    gitfurl cannot yet read which archives the setup script uses, so the automatic choice
-    asks for a link by name: every archive has the same base name (the name without its
-    extension and set number such as "-01"), and that base name is the installer's own, or
-    is part of the name of the installer's folder. An installer that is itself a FreeArc
-    archive is linked to itself. Reads names only.
+    try:
+        return inno.named_beside(inno.read_setup(installer), Path(installer).parent)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _shown(paths: list[Path]) -> str:
+    return ", ".join(clean(p.name, 60) for p in paths[:4]) + (", ..." if len(paths) > 4 else "")
+
+
+def link_check(installer: Path, paths: list[Path], named: set[str] | None = None,
+               has_script: bool = True) -> tuple[str | None, str | None]:
+    """(why the archives are not linked to the installer, how they are linked); one is None.
+
+    Linked when the setup script names every archive (`named`, from script_names()), or by
+    name: every archive has the same base name (the name without its extension and set
+    number such as "-01"), and that base name is the installer's own, or is part of the name
+    of the installer's folder. An installer that is itself a FreeArc archive is linked to
+    itself. `has_script` is False for an installer that is not Inno Setup (it has no setup
+    script to read). Reads names only.
     """
     installer = Path(installer)
+    others = [p for p in paths if p.name != installer.name]
+    if not others:
+        return None, "the installer is the archive"
+    unnamed = others if named is None else [p for p in others if p.name.casefold() not in named]
+    if not unnamed:
+        return None, "the setup script names every archive"
+    if not has_script:
+        script = "the installer has no setup script gitfurl can read for the names it uses"
+    elif named is None:
+        script = "the setup script could not be read for the names it uses"
+    else:
+        script = (f"the setup script names {len(others) - len(unnamed)} of the "
+                  f"{len(others)} (not named: {_shown(unnamed)}; names it builds while it "
+                  "runs are not seen)")
     own = _base_name(installer.name)
-    bases = {_base_name(p.name) for p in paths if p.name != installer.name}
-    if not bases:
-        return None
-    shown = ", ".join(clean(p.name, 60) for p in paths[:4]) + (", ..." if len(paths) > 4 else "")
+    bases = {_base_name(p.name) for p in others}
     if len(bases) != 1 or "" in bases:
-        return (f"the FreeArc archives beside the installer ({shown}) do not share one base "
-                "name, so gitfurl cannot tell which of them Setup uses")
+        return (f"the FreeArc archives beside the installer ({_shown(paths)}) do not share one "
+                f"base name, and {script}, so gitfurl cannot tell which of them Setup uses",
+                None)
     (base,) = bases
     if base == own or (len(base) >= 3 and base in installer.parent.name.casefold()):
-        return None
-    return (f"the FreeArc archives beside the installer ({shown}) are not linked to it by name "
-            f"(their base name {clean(base, 60)!r} is neither the installer's name nor part of "
-            "its folder's name), and gitfurl cannot yet read which archives Setup's script uses")
+        return None, "the archives share the installer's name or its folder's"
+    return (f"the FreeArc archives beside the installer ({_shown(paths)}) are not linked to it "
+            f"by name (their base name {clean(base, 60)!r} is neither the installer's name nor "
+            f"part of its folder's name), and {script}", None)
+
+
+def archives_not_linked(installer: Path, paths: list[Path],
+                        named: set[str] | None = None) -> str | None:
+    """Why the archives beside the installer are not linked to it, or None (see link_check)."""
+    return link_check(installer, paths, named)[0]
 
 
 def choose_route(installer: Path, prefix_name: str, det: Detection, requested: str = "auto",
@@ -193,15 +234,16 @@ def choose_route(installer: Path, prefix_name: str, det: Detection, requested: s
         if inno:
             reasons.append(SETUP_UNPACKS_ITSELF)
         return wine(*reasons)
-    if requested == "auto":
-        unlinked = archives_not_linked(installer, paths)
-        if unlinked:
-            return wine(unlinked, "to unpack them anyway, use --route native")
+    unlinked, linked = link_check(installer, paths, script_names(installer) if inno else None,
+                                  has_script=inno)
+    if unlinked and requested == "auto":
+        return wine(unlinked, "to unpack them anyway, use --route native")
     what = "a FreeArc archive" if is_arc and not inno else "an Inno Setup installer"
     n = len(plan.archives)
     reason = (f"{what}; its payload is {n} FreeArc archive{'s' if n != 1 else ''} whose every "
-              "data block uses storing, lzma, exe, delta or rep; gitfurl can unpack them itself")
-    return RouteChoice(ROUTE_NATIVE, by, (reason, "Setup is not run"), plan)
+              f"data block uses {METHODS_TEXT}; gitfurl can unpack them itself")
+    reasons = [reason, linked or "you chose this route although " + unlinked, "Setup is not run"]
+    return RouteChoice(ROUTE_NATIVE, by, tuple(reasons), plan)
 
 
 # --- the native plan ------------------------------------------------------------------------
