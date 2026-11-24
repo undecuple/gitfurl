@@ -31,7 +31,7 @@ flowchart TB
     innox["inno.extract_inno_files()"]
     codecs["farc_codecs.py"]
     prefixes["prefixes.py"]
-    progress["progress.py"]
+    progress["progress.py · windows.py"]
     changes["changes.py · cleanup.py"]
   end
   subgraph shared["Shared helpers"]
@@ -48,7 +48,7 @@ flowchart TB
 - **Entry**: `app.main()` opens the window with no arguments, hands `cli …` to `cli.main()`, and refuses anything else with status 2.
 - **Interfaces**: the window and the command line call the same core. Logic in `gui.py` that can be tested without a display is kept in plain functions (`describe_plan`, `plan_checklist`, `window_route_text`, …).
 - **Read-only layer**: reads file headers, archive indexes and `/proc`, and builds plans. It starts no process except the read-only probes in `doctor.py` and `memlimit.availability()`.
-- **Run layer**: anything that starts Wine, `wineboot`, `clamscan`, `bwrap` or `systemd-run`, or writes into a prefix. It is reached only after the approval that shows the plan.
+- **Run layer**: anything that starts Wine, `wineboot`, `clamscan`, `bwrap` or `systemd-run`, or writes into a prefix; also the read-only `xwininfo` and `xprop` probes in `windows.py`, used only for the stall and crash notes. It is reached only after the approval that shows the plan.
 
 ## Module dependencies
 
@@ -61,7 +61,8 @@ flowchart LR
   gui --> cleanup & detect & doctor & memlimit & portable & prefixes & preflight & route & runner & scan & theme & unattended & widgets
   widgets --> pixelfont & theme
   route --> changes & detect & extract & farc & inno & memlimit & prefixes & runner
-  runner --> changes & memlimit & portable & prefixes & preflight & procgroup & progress & scan & unattended
+  runner --> changes & memlimit & portable & prefixes & preflight & procgroup & progress & scan & unattended & windows
+  windows --> detect
   detect --> farc & inno
   inno --> detect & extract & farc & prefixes
   extract --> detect & farc & farc_codecs & prefixes
@@ -203,6 +204,7 @@ flowchart LR
 | `tests/test_scan.py` | `scan`, the scan gate, `doctor` lines | - |
 | `tests/test_memlimit.py` | `memlimit`, `runner` scope, `doctor`, window option | - |
 | `tests/test_progress.py` | `progress` (fake `/proc`), stall detector | - |
+| `tests/test_crash.py` | `progress.prefix_processes` (crash handler), `windows` (fake `xwininfo`/`xprop`), the crash and stall notes in `runner` | `tests/test_gitfurl.py` (`RunEventHelpers`) |
 | `tests/test_gui_polish.py` | `theme`, `widgets`, window polish (window parts skipped without `xvfb-run` or tkinter) | - |
 | `tests/test_gui_stop.py` | Stop in the real window | `tests/gui_stop_driver.py` (`xvfb-run -a`) |
 

@@ -16,7 +16,15 @@ from gitfurl.prefixes import prefix_path
 from gitfurl.preflight import memory_available
 from gitfurl.procgroup import SigintGuard as _SigintGuard
 from gitfurl.procgroup import wineserver_for
-from gitfurl.progress import ActivityObserver, ProgressMonitor, StallDetector, _dur
+from gitfurl.progress import (
+    CRASH_HANDLER_NAMES,
+    QUIET_CPU_PCT,
+    ActivityObserver,
+    ProgressMonitor,
+    StallDetector,
+    _dur,
+    prefix_processes,
+)
 
 
 @dataclass(frozen=True)
@@ -350,7 +358,8 @@ class RunOptions:
     wine_debug: str | None = None  # WINEDEBUG channels, e.g. "err+all"
     control: RunControl | None = None  # lets the caller stop the run (see RunControl)
     stall_after_s: float | None = None  # advisory "possibly stalled" after this much idle time
-    on_note: object = None  # callable(str): one-line advisory notes (the stall advisory)
+    on_note: object = None  # callable(str): one-line advisory notes (stall, crash handler)
+    window_titles: object = None  # callable(pids, programs, env) -> list|None; tests inject
     clock: object = time.monotonic  # injected in tests
     proc_root: str = "/proc"  # injected in tests
     meminfo: str = "/proc/meminfo"  # injected in tests
@@ -400,6 +409,7 @@ class ExecResult:
     observation_measured: bool = False
     exit_status: int | None = None
     memory: object = None  # gitfurl.memlimit.MemoryReport when the memory limit was on
+    crash_seen_s: float | None = None  # seconds into the run when Wine's crash handler was seen
     unattended: object = None  # gitfurl.unattended.UnattendedReport for an unattended run
 
     def as_tuple(self):
@@ -440,6 +450,10 @@ def describe_result(result) -> str | None:
         seen = "no (not seen; a short burst between samples would be missed)"
     text = (f"Started: yes.\nObserved activity (heuristic): {seen}.\n"
             f"Exit status: {result.exit_status}.")
+    if result.crash_seen_s is not None:
+        text += (f"\nCrash: Wine's crash handler (winedbg) was seen {_dur(result.crash_seen_s)} "
+                 "into the run (checked at each progress sample), so a Windows program in the "
+                 "prefix crashed. See the log.")
     if result.unattended is not None:
         text += "\n" + "\n".join(result.unattended.lines())
     if result.memory is not None:
@@ -505,7 +519,28 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
     stall = None
     if options.stall_after_s is not None:
         stall = StallDetector(options.stall_after_s, log_path, options.clock)  # raises if <= 0
-    if options.on_progress is not None or stall is not None:
+    # A crash handler already running in the prefix before this run is not this run's crash.
+    crash = {"seen_s": None, "before": frozenset()}
+    titles_of = options.window_titles
+    if titles_of is None:
+        from gitfurl.windows import window_titles as titles_of
+
+    def new_crash(sample) -> bool:
+        return bool(set(sample.crash_pids) - crash["before"])
+
+    def windows_now(sample) -> list[str] | None:
+        if plan.portable:  # _NET_WM_PID is a pid inside bwrap's namespace: cannot be matched
+            return None
+        programs = list(sample.helpers)
+        if sample.crash_pids:  # its "Program Error" window belongs to winedbg.exe
+            programs.extend(CRASH_HANDLER_NAMES)
+        try:
+            return titles_of(sample.pids, programs, child_env)
+        except Exception:  # noqa: BLE001 - a note must never break the run
+            return None
+
+    # The monitor also runs for notes alone: it is how a crash is seen.
+    if options.on_progress is not None or stall is not None or options.on_note is not None:
         def handle(sample):
             event("progress", elapsed_s=round(sample.elapsed_s), read_bytes=sample.read_bytes,
                   total_bytes=sample.total_bytes, written_bytes=sample.written_bytes,
@@ -514,15 +549,32 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
             if events:  # detailed log only
                 event("processes", count=sample.procs, programs=list(sample.helpers))
                 event("memory", mem_available_bytes=memory_available(options.meminfo))
+            if crash["seen_s"] is None and new_crash(sample):
+                crash["seen_s"] = sample.elapsed_s
+                titles = windows_now(sample)
+                event("crash_handler", elapsed_s=round(sample.elapsed_s),
+                      programs=list(sample.helpers), windows=titles, advisory=True)
+                if options.on_note is not None:
+                    from gitfurl.windows import titles_text
+
+                    options.on_note(
+                        "crash: Wine's crash handler (winedbg) started in the prefix, so a "
+                        "Windows program there crashed. Its \"Program Error\" window may be "
+                        "waiting; the run goes on until the installer exits or you stop it."
+                        + titles_text(titles))
             idle = stall.check(sample) if stall else None
             if idle is not None:
+                titles = windows_now(sample)
                 event("possibly_stalled", idle_s=round(idle), after_s=options.stall_after_s,
-                      advisory=True)
+                      windows=titles, advisory=True)
                 if options.on_note is not None:
+                    from gitfurl.windows import titles_text
+
                     options.on_note(
-                        f"possibly stalled: no payload read, no CPU use and no log growth for "
+                        f"possibly stalled: no payload read, CPU use under {QUIET_CPU_PCT:g}% and no log "
+                        f"growth for "
                         f"{_dur(idle)}. This is advice only; nothing was stopped, and slow "
-                        f"phases can be normal.")
+                        f"phases can be normal." + titles_text(titles))
             if options.on_progress is not None:
                 options.on_progress(sample)
 
@@ -557,6 +609,12 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
             log.flush()
             output_start = log.tell()  # the run's own output starts here
             if monitor:
+                crash["before"] = frozenset(
+                    prefix_processes(plan.prefix, options.proc_root).crash_pids)
+                if crash["before"]:
+                    log.write("--- Wine's crash handler (winedbg) was already running in this "
+                              "prefix before the run; it is not counted as this run's crash\n")
+                    log.flush()
                 monitor.start()
             if scope is not None:
                 scope.start()
@@ -578,6 +636,8 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
                     final = monitor.stop() if monitor else None
                     if final is not None:
                         observer.update(final)
+                        if crash["seen_s"] is None and new_crash(final):
+                            crash["seen_s"] = final.elapsed_s
                 finally:  # the scope's result is read and a failed unit cleared in every case
                     if scope is not None:
                         memory_report = scope.finish()
@@ -594,6 +654,9 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
                     log.write(f"--- {note}\n")
             else:
                 log.write(f"\n--- exit status {proc.returncode}\n")
+            if crash["seen_s"] is not None:
+                log.write(f"--- Wine's crash handler (winedbg) was seen {_dur(crash['seen_s'])} "
+                          "into the run: a Windows program in the prefix crashed\n")
             if plan.unattended is not None and started:
                 from gitfurl.unattended import read_report
 
@@ -618,7 +681,8 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
         facts = {"started": started,
                  "extraction_observed": bool(observer and observer.observed),
                  "observation_measured": bool(observer and observer.measured),
-                 "exit_status": proc.returncode if started else None}
+                 "exit_status": proc.returncode if started else None,
+                 "crash_seen_s": crash["seen_s"]}
         if control.cancelled:
             event("cancelled", notes=control.notes, seconds=round(time.monotonic() - t0, 1),
                   **facts)

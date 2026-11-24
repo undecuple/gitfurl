@@ -23,22 +23,52 @@ from gitfurl.detect import clean
 MIN_PAYLOAD_BYTES = 1 << 20
 # Wine's own background processes: not interesting to show as "what the installer is doing".
 WINE_INFRA = {"wineserver", "services.exe", "winedevice.exe", "explorer.exe", "plugplay.exe",
-              "rpcss.exe", "svchost.exe", "conhost.exe", "wineboot.exe", "winedbg.exe", "start.exe"}
+              "rpcss.exe", "svchost.exe", "conhost.exe", "wineboot.exe", "winedbg.exe", "winedbg",
+              "start.exe"}
+
+
+# Wine starts its debugger when a Windows program crashes (the "Program Error" dialog). Its
+# /proc name is "winedbg" with Wine 11.0 (seen 2026-11-24) and "winedbg.exe" elsewhere.
+CRASH_HANDLER = "winedbg.exe"
+CRASH_HANDLER_NAMES = frozenset([CRASH_HANDLER, "winedbg"])
+# CPU use below this (percent of one core) counts as quiet: Wine's own background processes
+# use about 1-2% while nothing else happens (seen with Wine 11.0 on 2026-11-24).
+QUIET_CPU_PCT = 3.0
+
+
+@dataclass(frozen=True)
+class Activity:
+    count: int = 0  # processes running in the prefix
+    names: tuple = ()  # program names other than Wine's own background processes
+    ticks: int = 0  # CPU ticks (user plus system), summed
+    pids: tuple = ()  # every process counted
+    crash_pids: tuple = ()  # processes named winedbg.exe (Wine's crash handler)
+
+    @property
+    def crash_handler(self) -> bool:
+        return bool(self.crash_pids)
 
 
 def prefix_activity(prefix: Path, proc_root: str = "/proc") -> tuple[int, list[str], int]:
     """Processes of this user that run in the prefix: (count, program names, CPU ticks).
+    See prefix_processes()."""
+    a = prefix_processes(prefix, proc_root)
+    return a.count, list(a.names), a.ticks
+
+
+def prefix_processes(prefix: Path, proc_root: str = "/proc") -> Activity:
+    """Processes of this user that run in the prefix.
 
     A process counts when its environment says WINEPREFIX=<prefix>. Only that one variable
     is looked at; nothing else from the environment is kept. CPU ticks are user plus system
     time since the process started, summed.
     """
     want = f"WINEPREFIX={prefix}".encode()
-    count, ticks, names = 0, 0, []
+    count, ticks, names, found, crash = 0, 0, [], [], []
     try:
         pids = [p for p in os.listdir(proc_root) if p.isdigit()]
     except OSError:
-        return 0, [], 0
+        return Activity()
     for pid in pids:
         try:
             with open(os.path.join(proc_root, pid, "environ"), "rb") as fh:
@@ -57,9 +87,13 @@ def prefix_activity(prefix: Path, proc_root: str = "/proc") -> tuple[int, list[s
             continue
         name = head.partition("(")[2]
         count += 1
+        found.append(int(pid))
+        if name in CRASH_HANDLER_NAMES:
+            crash.append(int(pid))
         if name not in WINE_INFRA and name not in names:
             names.append(name)
-    return count, sorted(names), ticks
+    return Activity(count, tuple(sorted(names)), ticks, tuple(sorted(found)),
+                    tuple(sorted(crash)))
 
 
 def payload_files(installer: Path) -> list[Path]:
@@ -139,6 +173,8 @@ class Sample:
     procs: int = 0  # processes running in the prefix
     cpu_pct: float | None = None  # their CPU use since the last sample (100 = one core)
     helpers: tuple = ()  # program names other than Wine's own background processes
+    pids: tuple = ()  # the processes running in the prefix
+    crash_pids: tuple = ()  # Wine's crash handler (winedbg.exe) processes in the prefix
 
     @property
     def percent(self) -> float | None:
@@ -174,7 +210,7 @@ class Sample:
                 # names come from /proc and are chosen by the installer: printable only
                 busy += " (" + ", ".join(clean(str(h), 40) for h in self.helpers[:4]) + ")"
             parts.append(busy)
-            if self.cpu_pct is not None and self.cpu_pct < 3 and self.rate_bps <= 0:
+            if self.cpu_pct is not None and self.cpu_pct < QUIET_CPU_PCT and self.rate_bps <= 0:
                 parts.append("quiet: it may be waiting, or finishing; slow phases are normal")
         return ", ".join(parts)
 
@@ -216,14 +252,15 @@ class ProgressMonitor:
             inst = max(0.0, (read - self._last[1]) / (now - self._last[0]))
             self._rate = inst if self._rate == 0 else 0.7 * self._rate + 0.3 * inst
         self._last = (now, read)
-        procs, names, ticks = prefix_activity(self.prefix, self.proc_root)
+        act = prefix_processes(self.prefix, self.proc_root)
         cpu = None
         if self._cpu_last is not None and now > self._cpu_last[0]:
             hz = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
-            cpu = max(0.0, 100.0 * (ticks - self._cpu_last[1]) / hz / (now - self._cpu_last[0]))
-        self._cpu_last = (now, ticks)
+            cpu = max(0.0, 100.0 * (act.ticks - self._cpu_last[1]) / hz
+                      / (now - self._cpu_last[0]))
+        self._cpu_last = (now, act.ticks)
         s = Sample(now - self._t0, read, self.total, max(0, tree_size(self.prefix) - self._base),
-                   self._rate, procs, cpu, tuple(names))
+                   self._rate, act.count, cpu, act.names, act.pids, act.crash_pids)
         self.last = s
         return s
 
@@ -321,8 +358,8 @@ class ActivityObserver:
 class StallDetector:
     """Advisory only: says once that nothing moved for `after_s` seconds. It never acts.
 
-    Activity is any of: the payload read position grew, the prefix's processes used CPU
-    since the last sample, or the run's log file grew. The clock is injected for tests.
+    Activity is any of: the payload read position grew, the prefix's processes used at least
+    QUIET_CPU_PCT of one core since the last sample, or the run's log file grew. The clock is injected for tests.
     """
 
     def __init__(self, after_s: float, log_path: Path | None = None, clock=time.monotonic):
@@ -346,7 +383,7 @@ class StallDetector:
         now = self.clock()
         size = self._size()
         if sample.read_bytes > self._read or size > self._log_size \
-                or (sample.cpu_pct is not None and sample.cpu_pct > 0):
+                or (sample.cpu_pct is not None and sample.cpu_pct >= QUIET_CPU_PCT):
             self._last_move = now
         self._read = max(self._read, sample.read_bytes)
         self._log_size = max(self._log_size, size)
