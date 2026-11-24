@@ -1,11 +1,13 @@
 """Read-only reader for Inno Setup installers, and extraction of Inno's own [Files] payload.
 
 read_setup(path) reads what an Inno Setup setup.exe holds, without running it: the loader's
-offset table (a PE resource), the 64-byte format ID, the two header blocks (CRC-32 checked,
-LZMA1-compressed or stored), the setup header, every entry list ([Types], [Components],
-[Tasks], [Dirs], [Files], [Icons], [INI], [Registry], [InstallDelete], [UninstallDelete],
-[Run], [UninstallRun]), the file locations of the second block, and the string constants of
-the compiled [Code] blob (a read-only walk; the code is never run or decompiled).
+offset table (a PE resource) or, when setup.exe has none (UseSetupLdr=no), <stem>-0.bin beside
+it, recognised by the 64-byte format ID at its start; the format ID, the two header blocks
+(CRC-32 checked, LZMA1-compressed or stored), the setup header, every entry list ([Types],
+[Components], [Tasks], [Dirs], [Files], [Icons], [INI], [Registry], [InstallDelete],
+[UninstallDelete], [Run], [UninstallRun]), the file locations of the second block, and the
+string constants of the compiled [Code] blob (a read-only walk; the code is never run or
+decompiled).
 
 Formats read: the data formats of Inno Setup 5.5.0 to 7.1.1, Unicode only (the format IDs
 are listed in FORMATS), and the one-extra-byte 5.5.0 variant that some modified builds
@@ -15,21 +17,40 @@ official compilers; the others follow the specification only and are unverified.
 Refused (InnoError, with a plain reason): anything that is not a regular file or not a
 Windows program; no offset table; a damaged table, block, chunk or record (CRC-32, sizes,
 counts, block ends); the ANSI edition of Inno Setup 5; development, unofficial and unknown
-format IDs; setups whose header blocks are encrypted (Encryption=full); setup data kept in
-separate files (UseSetupLdr=no).
+format IDs; setups whose header blocks are encrypted (Encryption=full); a layout Inno's
+compiler does not write (slice files with a compressed file location block from a loader, or a
+second slice or more than one slice per disk without disk spanning); a <stem>-0.bin whose ID
+or blocks do not check out.
 
-Extraction (plan_inno_extract, extract_inno_files) writes only the files stored inside
-setup.exe whose destination is under {app}, for the default choice of setup type,
+Where the file data is: inside setup.exe from Offset1 (the loader build without spanning), or
+in slice files beside the installer when Offset1 is 0 (disk spanning) or there is no loader.
+Slice number S is <stem>-<S div P + 1>.bin, with a letter a..z after the number when P (slices
+per disk) is above 1; the stem is setup.exe's own file name. A slice file starts with a header
+(idska32 + 32-bit size up to data format 6.5.0, idskb32 + 64-bit size from 6.5.2) whose size
+must equal the file's. A chunk starts at StartOffset in slice FirstSlice and runs to the end of
+that file, then on from just after the header of each next slice, ending in LastSlice. Only the
+installer's own folder is searched (names match without regard to letter case); the summary
+lists the slice files, present or missing, by name only. Formats and layouts that were never
+checked against a real installer are noted as unverified (slice and setup-0.bin reading was
+checked for data formats 6.3.0, 6.7.0 and 7.1.1 only).
+
+Extraction (plan_inno_extract, extract_inno_files) writes only the files stored in setup.exe
+or its slice files whose destination is under {app}, for the default choice of setup type,
 components, tasks and the first language; everything else (temporary helpers, files outside
 {app}, external and downloaded files, the uninstaller, entries that depend on a [Code] check
-function) is listed as skipped. Refused before anything is written: disk spanning, a
-password-protected setup, encrypted files, a compression method gitfurl does not handle, an
-unsafe or Windows-unusable name, a name that collides with a folder, an LZMA dictionary over
-1 GiB, and the usual prefix checks of extract.py. Files are created new (O_CREAT|O_EXCL|
+function) is listed as skipped. Refused before anything is written: a missing, short or wrong
+slice file (opened with O_NOFOLLOW; signature and size checked), a chunk that does not fit its
+slice files exactly, a password-protected setup (even when its files are not encrypted),
+encrypted files, a compression method gitfurl does not handle, an unsafe or Windows-unusable
+name, a name that collides with a folder, an LZMA dictionary over 1 GiB, and the usual prefix
+checks of extract.py. Files are created new (O_CREAT|O_EXCL|
 O_NOFOLLOW) relative to the destination's own file descriptor; each file's SHA-1 or SHA-256
 is checked, and a file that does not match (or was cut short by Stop or an error) is removed
-again, so nothing half-made is kept. Nothing from the setup is run, loaded or passed to a
-program; the helper DLLs inside the header block are skipped, never written.
+again, so nothing half-made is kept. Slice files are checked again before writing and when a
+chunk reaches them; a problem during the run is reported like other damaged data, and a
+swapped slice of the right size is caught by the file's checksum. Nothing from the setup is
+run, loaded or passed to a program; the helper DLLs inside the header block are skipped,
+never written.
 
 Written from a clean-room format specification.
 """
@@ -56,6 +77,9 @@ _F = {name: i for i, name in enumerate(FORMATS)}
 F550, F556, F557, F600, F610, F630, F6401, F642, F643, F650, F652, F660, F661, F670, \
     F7001, F7003, F711 = range(len(FORMATS))
 VERIFIED_FORMATS = frozenset(["5.5.0", "5.5.7", "6.3.0", "6.7.0", "7.1.1"])  # 5.5.0: variant
+# Slice files and setup-0.bin were checked against setups built with the official compilers
+# (6.3.3, 6.7.4, 7.1.1) on 2026-11-23; other formats follow the specification only.
+SLICES_VERIFIED_FORMATS = frozenset(["6.3.0", "6.7.0", "7.1.1"])
 
 _ID_PREFIX = b"Inno Setup Setup Data ("
 _IDS = {(f"Inno Setup Setup Data ({v})" + (" (u)" if _F[v] <= F610 else "")).encode(): v
@@ -70,6 +94,8 @@ _UNOFFICIAL = {b"Inno Setup Setup Data (5.5.7) (U)", b"Inno Setup Setup Data (5.
 
 TABLE_MAGIC = bytes.fromhex("72446c507453cde6d77b0b2a")
 CHUNK_MAGIC = b"zlb\x1a"
+SLICE_SIG_OLD = b"idska32\x1a"  # slice file header, data formats 5.5.0 to 6.5.0 (32-bit size)
+SLICE_SIG_NEW = b"idskb32\x1a"  # data formats 6.5.2 and later (64-bit size)
 COMPRESSION = {0: "stored", 1: "zlib", 2: "bzip2", 3: "lzma", 4: "lzma2"}
 METHOD_OTHER = "a method gitfurl does not handle"
 PRIVILEGES = {0: "none", 1: "power user", 2: "admin", 3: "lowest"}
@@ -87,6 +113,7 @@ MAX_CODE_CANDIDATES = 1_000_000  # possible string operands looked at in the [Co
 MAX_DECODE_RATIO = 2000  # decoded bytes thrown away per compressed byte of a chunk (see plan)
 MAX_SUBFOLDERS = 2  # folder levels below the installer's folder the preflight looks into
 MAX_SLICES_PER_DISK = 26  # slice files of one disk are lettered a to z
+MAX_SLICES = 4096  # slice files one setup may name (the plan checks each one)
 MAX_SECTIONS = 96
 MAX_RES_ENTRIES = 4096
 MAX_RESOURCE = 16 << 20  # bytes of the resource section that are read
@@ -328,6 +355,9 @@ class Setup:
     locations: list[Location] = field(default_factory=list)
     code: CodeInfo = field(default_factory=CodeInfo)
     notes: list[str] = field(default_factory=list)
+    data_file: Path | None = None  # setup-0.bin beside setup.exe (UseSetupLdr=no), else None
+    data_size: int = 0  # its size
+    spanning: bool = False  # disk spanning: the file data may run over several slice files
 
     @property
     def app_name(self) -> str:
@@ -342,8 +372,25 @@ class Setup:
         return self.strings.get("default dir name", "")
 
     @property
-    def disk_spanning(self) -> bool:
+    def loader(self) -> bool:
+        """setup.exe is Inno's loader, holding the offset table and the setup data."""
+        return self.data_file is None
+
+    @property
+    def slice_layout(self) -> bool:
+        """The file data is in slice files beside setup.exe, not inside it."""
         return self.offset1 == 0
+
+    @property
+    def disk_spanning(self) -> bool:
+        return self.spanning
+
+    @property
+    def where(self) -> str:
+        """Where the setup data was read, for detect()."""
+        if self.data_file is None:
+            return f"byte offset {self.offset0}"
+        return f"setup data in {_clean(self.data_file.name, 60)} beside the installer"
 
     @property
     def compression_name(self) -> str:
@@ -623,6 +670,13 @@ class _LzmaSink:
 
 def _read_block(fd: int, pos: int, size: int, fmt: int, cap: int, what: str) -> tuple[bytes, int]:
     """(content, end position) of one block at pos. Every CRC-32 is checked."""
+    content, end, _ = _block(fd, pos, size, fmt, cap, what)
+    return content, end
+
+
+def _block(fd: int, pos: int, size: int, fmt: int, cap: int, what: str
+           ) -> tuple[bytes, int, bool]:
+    """As _read_block, and whether the block was LZMA-compressed (False: stored)."""
     hlen = 9 if fmt >= F670 else 5
     raw = _pread(fd, 4 + hlen, pos)
     if len(raw) < 4 + hlen:
@@ -667,7 +721,7 @@ def _read_block(fd: int, pos: int, size: int, fmt: int, cap: int, what: str) -> 
         if q == 0:
             raise InnoError(f"{what} could not be read")
         p += q
-    return (sink.result() if sink is not None else bytes(plain)), end
+    return (sink.result() if sink is not None else bytes(plain)), end, bool(packed)
 
 
 # --- block 1: header and entry lists ---------------------------------------------------------
@@ -1376,41 +1430,63 @@ def read_fd(fd: int, path: Path, size: int | None = None) -> Setup:
         raise InnoError(f"the setup data could not be read ({type(exc).__name__})") from exc
 
 
-def _separate_data(path: Path) -> Path | None:
-    side = path.with_name(f"{path.stem}-0.bin")
-    try:
-        fd, _ = _open(side)
-    except InnoError:
-        return None
-    try:
-        return side if _pread(fd, len(_ID_PREFIX), 0) == _ID_PREFIX else None
-    finally:
-        os.close(fd)
+NO_TABLE = ("no Inno Setup offset table was found (not an Inno Setup installer, or one gitfurl "
+            "cannot read)")
 
 
 def _read(fd: int, path: Path, size: int) -> Setup:
     if size > MAX_FILE:
         raise InnoError("the file is larger than 64 GiB")
     found = _find_table(fd, size)
-    if found is None:
-        side = _separate_data(path)
-        if side is not None:
-            raise InnoError(f"the setup data is in separate files ({side.name}); not "
-                            "supported yet")
-        raise InnoError("no Inno Setup offset table was found (not an Inno Setup installer, or "
-                        "one gitfurl cannot read)")
-    t = _read_table(fd, size, *found)
-    raw_id = _pread(fd, 64, t.offset0)
+    if found is not None:
+        return _read_data(fd, size, path, size, _read_table(fd, size, *found), None)
+    # UseSetupLdr=no: setup.exe is the Setup program itself, and the setup data is in
+    # <stem>-0.bin beside it. Only a file that starts with a setup ID counts.
+    side = _Beside(path.parent).find(f"{path.stem}-0.bin")
+    if side is None:
+        raise InnoError(NO_TABLE)
+    name = _clean(side.name, 60)
+    try:
+        dfd, dsize = _open(side)
+    except InnoError as exc:
+        if not os.path.isfile(side) or os.path.islink(side):
+            raise InnoError(NO_TABLE) from exc  # not a file: no evidence of a setup here
+        raise InnoError(f"the setup data file {name} beside the installer could not be read: "
+                        f"{exc}") from exc
+    try:
+        head = _pread(dfd, 64, 0)
+        if not head.startswith(_ID_PREFIX):
+            raise InnoError(NO_TABLE)
+        if len(head) < 64:
+            raise InnoError(f"setup data in {name} beside the installer: the file is shorter "
+                            "than its 64-byte format ID")
+        if dsize > MAX_FILE:
+            raise InnoError(f"setup data in {name} beside the installer: the file is larger "
+                            "than 64 GiB")
+        try:
+            return _read_data(dfd, dsize, path, size, None, side)
+        except InnoError as exc:
+            raise InnoError(f"setup data in {name} beside the installer: {exc}") from exc
+    finally:
+        os.close(dfd)
+
+
+def _read_data(hfd: int, hsize: int, path: Path, size: int, t: _Table | None,
+               side: Path | None) -> Setup:
+    """The setup data from hfd: setup.exe at the table's Offset0 (t given), or setup-0.bin
+    from offset 0 (side given, no loader)."""
+    offset0 = t.offset0 if t is not None else 0
+    raw_id = _pread(hfd, 64, offset0)
     if len(raw_id) < 64:
         raise InnoError("the setup data is cut short")
     fmt = _format_of(raw_id)
     f = _F[fmt]
-    if (t.version == 1) != (f <= F643):
+    if t is not None and (t.version == 1) != (f <= F643):
         raise InnoError("the offset table's version does not match the setup data format")
-    pos = t.offset0 + 64
+    pos = offset0 + 64
     encryption = 0
     if f >= F650:
-        enc = _pread(fd, 53, pos)
+        enc = _pread(hfd, 53, pos)
         if len(enc) < 53 or zlib.crc32(enc[4:]) != struct.unpack_from("<I", enc, 0)[0]:
             raise InnoError("the encryption header is damaged (CRC-32 mismatch)")
         encryption = enc[4]
@@ -1420,10 +1496,17 @@ def _read(fd: int, path: Path, size: int) -> Setup:
         if encryption > 2:
             raise InnoError("the encryption header has an unknown value")
         pos += 53
-    block1, pos = _read_block(fd, pos, size, f, MAX_BLOCK1, "the setup header block")
-    block2, pos = _read_block(fd, pos, size, f, MAX_BLOCK2, "the file location block")
-    if pos != t.offset_exe:
+    block1, pos, _ = _block(hfd, pos, hsize, f, MAX_BLOCK1, "the setup header block")
+    block2, pos, packed2 = _block(hfd, pos, hsize, f, MAX_BLOCK2, "the file location block")
+    if t is not None and pos != t.offset_exe:
         raise InnoError("the setup data does not end where the offset table says")
+    # The file data is in slice files when the loader's Offset1 is 0 or there is no loader.
+    # With disk spanning the compiler stores the file location block; without, it compresses it.
+    if t is not None and t.offset1 == 0 and packed2:
+        raise InnoError("unexpected layout: the file data is in slice files (disk spanning), but "
+                        "the file location block is compressed, which Inno Setup's compiler "
+                        "does not write; gitfurl does not guess")
+    spanning = (t is not None and t.offset1 == 0) or (t is None and not packed2)
     variant = False
     if f == F550:
         fits = []
@@ -1437,6 +1520,9 @@ def _read(fd: int, path: Path, size: int) -> Setup:
         variant, (h, ent, notes) = fits[0]
     else:
         h, ent, notes = _parse_block1(block1, f, False, strict=f == F557)
+    if t is None and not spanning and h["slices"] != 1:
+        raise InnoError("unexpected layout: no disk spanning, but a slices-per-disk value other "
+                        "than 1; gitfurl does not guess")
     locations = _locations(block2, f, h["counts"]["file locations"])
     if f < F650 and h["encryption_used"]:
         encryption = 1
@@ -1445,17 +1531,27 @@ def _read(fd: int, path: Path, size: int) -> Setup:
     if h["arch"] is not None:
         arch_allowed, arch_64 = _arch_bits(h["arch"][0], True), _arch_bits(h["arch"][1], False)
     setup = Setup(path, size, fmt, raw_id.rstrip(b"\0").decode("ascii", "replace"), variant,
-                  t.version, t.offset0, t.offset1, t.offset_exe, encryption, h["strings"],
+                  t.version if t else 0, offset0, t.offset1 if t else 0,
+                  t.offset_exe if t else 0, encryption, h["strings"],
                   h["privileges"], h["compression"], h["slices"], h["password"],
                   h["code_version"], arch_allowed, arch_64,
                   ent["languages"], ent["custom messages"], ent["types"], ent["components"],
                   ent["tasks"], ent["dirs"], ent["files"], ent["icons"], ent["ini"],
                   ent["registry"], ent["install delete"], ent["uninstall delete"], ent["run"],
-                  ent["uninstall run"], locations, read_code(h["code"]), list(notes))
+                  ent["uninstall run"], locations, read_code(h["code"]), list(notes),
+                  side, hsize if side is not None else 0, spanning)
     _check_locations(setup)
     if not setup.verified:
         setup.notes.append(f"data format {fmt} was never checked against a real installer; "
                            "it follows the specification only (unverified)")
+    if setup.slice_layout and fmt not in SLICES_VERIFIED_FORMATS:
+        setup.notes.append("reading slice files" + (" and setup-0.bin" if side else "")
+                           + f" for data format {fmt} follows the specification only; it was "
+                           "checked against real installers only for formats "
+                           + ", ".join(sorted(SLICES_VERIFIED_FORMATS)) + " (unverified)")
+    if side is not None and pos < hsize:
+        setup.notes.append(f"{hsize - pos:,} bytes after the setup data in "
+                           f"{_clean(side.name, 60)} were ignored")
     if variant:
         setup.notes.append("the 5.5.0 layout with one extra header byte (written by some "
                            "modified Inno Setup builds) was used")
@@ -1472,6 +1568,7 @@ def _arch_bits(v: int, allowed: bool) -> str:
 
 def _check_locations(s: Setup) -> None:
     chunks: dict[tuple[int, int], int] = {}
+    head = _slice_header_len(_F[s.format])
     for loc in s.locations:
         key = (loc.first_slice, loc.start)
         if chunks.setdefault(key, loc.chunk_size) != loc.chunk_size:
@@ -1481,6 +1578,178 @@ def _check_locations(s: Setup) -> None:
                 raise InnoError("a file location points to a slice file in a single-file setup")
             if s.offset1 + loc.start + 4 + loc.chunk_size > s.offset0:
                 raise InnoError("a file location points outside the setup's file data")
+            continue
+        if not s.spanning and (loc.first_slice or loc.last_slice):
+            raise InnoError("a file location points to a second slice file in a setup without "
+                            "disk spanning")
+        if loc.start < head:
+            raise InnoError("a file location points into a slice file's header")
+
+
+# --- slice files ---------------------------------------------------------------------------
+
+def _slice_header_len(f: int) -> int:
+    """Bytes of a slice file's header: signature and size (12 up to 6.5.0, 16 from 6.5.2)."""
+    return 16 if f >= F652 else 12
+
+
+def slice_name(stem: str, per: int, n: int) -> str:
+    """The file name of slice number n (0-based) with `per` slices per disk: stem-1.bin, or
+    stem-1a.bin when a disk holds more than one slice."""
+    disk = n // per + 1
+    return f"{stem}-{disk}.bin" if per == 1 else f"{stem}-{disk}{chr(97 + n % per)}.bin"
+
+
+def check_slice_header(raw: bytes, size: int, f: int) -> int:
+    """Check a slice file's first bytes against its real size; the header length, or InnoError
+    with the reason. The header has no slice number or checksum: a slice from another build
+    or with another number passes when its own size field is right."""
+    sig = SLICE_SIG_NEW if f >= F652 else SLICE_SIG_OLD
+    head = _slice_header_len(f)
+    if len(raw) < 8:
+        raise InnoError("the file is shorter than its slice header")
+    if raw[:8] != sig:
+        if raw[:8] in (SLICE_SIG_OLD, SLICE_SIG_NEW):
+            raise InnoError("its slice header belongs to another Inno Setup version")
+        raise InnoError("it does not start with an Inno Setup slice header")
+    if len(raw) < head:
+        raise InnoError("the file is shorter than its slice header")
+    total = struct.unpack_from("<q" if head == 16 else "<I", raw, 8)[0]
+    if total != size:
+        why = " (0: the compile that made it was interrupted)" if total == 0 else ""
+        raise InnoError(f"its header gives a size of {total:,} bytes{why}, but the file has "
+                        f"{size:,} bytes")
+    return head
+
+
+def _fold(name: str) -> str:
+    """Letter case folded one character at a time, never changing the length (str.casefold
+    turns 'ß' into 'ss', which Windows does not treat as the same name)."""
+    return "".join(c.lower() if len(c.lower()) == 1 else c for c in name)
+
+
+class _Beside:
+    """Files in the installer's folder, found by name without regard to letter case (as
+    Windows does). An exact match wins; names that differ only in letter case are not
+    guessed between. Only names are looked at here; nothing is opened."""
+
+    def __init__(self, folder: Path):
+        self.folder = folder
+        self.names: dict[str, list[str]] | None = None
+
+    def find(self, name: str) -> Path | None:
+        exact = self.folder / name
+        if os.path.lexists(exact):
+            return exact
+        if self.names is None:
+            self.names = {}
+            try:
+                with os.scandir(self.folder) as it:
+                    for k, e in enumerate(it):
+                        if k >= MAX_DIR_ENTRIES:
+                            break
+                        self.names.setdefault(_fold(e.name), []).append(e.name)
+            except OSError:
+                pass
+        got = self.names.get(_fold(name), [])
+        if len(got) > 1:
+            raise InnoError(f"several files beside the installer are named {_clean(name, 60)} "
+                            "in different letter case; gitfurl does not guess between them")
+        return self.folder / got[0] if got else None
+
+
+def _open_slice(path: Path, f: int) -> tuple[int, int]:
+    """(fd, size) of a slice file whose header was checked. O_NOFOLLOW: a symbolic link is
+    refused. Raises InnoError with a plain reason."""
+    name = _clean(path.name, 60)
+    try:
+        fd, size = _open(path)
+    except InnoError as exc:
+        if os.path.islink(path):
+            raise InnoError(f"slice file {name} is a symbolic link; gitfurl does not follow "
+                            "links to slice files") from exc
+        raise InnoError(f"slice file {name}: {exc}") from exc
+    try:
+        check_slice_header(_pread(fd, 16, 0), size, f)
+    except InnoError as exc:
+        os.close(fd)
+        raise InnoError(f"slice file {name}: {exc}") from exc
+    except OSError as exc:
+        os.close(fd)
+        raise InnoError(f"slice file {name} could not be read ({exc.strerror or exc})") \
+            from exc
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, size
+
+
+def _slice_numbers(locations, cap: int) -> tuple[list[int], bool]:
+    """The slice numbers the locations name, ascending; True when there are more than cap."""
+    out: list[int] = []
+    end = -1
+    for a, b in sorted({(loc.first_slice, loc.last_slice) for loc in locations}):
+        for n in range(max(a, end + 1), b + 1):
+            if len(out) >= cap:
+                return out, True
+            out.append(n)
+        end = max(end, b)
+    return out, False
+
+
+def _stem_problem(stem: str) -> str | None:
+    if not stem or stem in (".", "..") or "/" in stem or "\\" in stem:
+        return "the installer's file name cannot be used to name its slice files"
+    return None
+
+
+def _resolve_slices(folder: Path, stem: str, per: int, numbers: list[int], f: int
+                    ) -> dict[int, tuple[Path, int]]:
+    """{slice number: (path, size)} for the numbers, each opened and its header checked.
+    Raises InnoError when one is missing or wrong. Only the installer's own folder is used."""
+    beside = _Beside(folder)
+    found: dict[int, Path] = {}
+    missing: list[str] = []
+    for n in numbers:
+        name = slice_name(stem, per, n)
+        got = beside.find(name)
+        if got is None:
+            missing.append(name)
+        else:
+            found[n] = got
+    if missing:
+        raise InnoError(f"{_n(len(missing), 'slice file is', 'slice files are')} missing beside "
+                        "the installer: " + ", ".join(_clean(m, 60) for m in missing[:5])
+                        + (" ..." if len(missing) > 5 else "")
+                        + " (gitfurl looks only in the installer's own folder)")
+    out: dict[int, tuple[Path, int]] = {}
+    for n, path in found.items():
+        fd, size = _open_slice(path, f)
+        os.close(fd)
+        out[n] = (path, size)
+    return out
+
+
+def _span_problem(loc: Location, sizes: dict[int, int], f: int) -> str | None:
+    """Why a chunk's bytes do not fit its slice files exactly (stricter than Setup), or None.
+    The payload runs from just after the chunk marker to the end of slice first_slice, then
+    from just after the header of each next slice, and must end in slice last_slice."""
+    head = _slice_header_len(f)
+    first = sizes[loc.first_slice]
+    if loc.start < head or loc.start + 4 + 1 > first:
+        return "a data chunk starts outside its slice file's data; the setup is damaged"
+    left = loc.chunk_size
+    for n in range(loc.first_slice, loc.last_slice + 1):
+        avail = sizes[n] - (loc.start + 4 if n == loc.first_slice else head)
+        if n < loc.last_slice:
+            if left <= avail:
+                return ("a data chunk ends before the last slice file its location names; the "
+                        "setup or a slice file is damaged")
+            left -= avail
+        elif left > avail:
+            return ("a data chunk runs past the end of the last slice file its location names; "
+                    "the setup or a slice file is damaged")
+    return None
 
 
 # --- choices: conditions as Inno evaluates them by default -----------------------------------
@@ -1781,11 +2050,13 @@ def summarise(s: Setup, folder: Path | None = None) -> list[str]:
     if s.arch_allowed or s.arch_64bit:
         lines.append(f"architectures allowed: {_clean(s.arch_allowed or 'any')}; 64-bit mode: "
                      f"{_clean(s.arch_64bit or 'never')}")
+    lines.extend(_layout_lines(s, folder))
     kinds = {k: 0 for k in (FILE_STORED, FILE_EXTERNAL, FILE_DOWNLOAD, FILE_UNINSTALLER)}
     for fe in s.files:
         kinds[fe.kind] += 1
     stored_size = sum(s.locations[fe.location].size for fe in s.files if fe.kind == FILE_STORED)
-    parts = [(f"{_n(kinds[FILE_STORED], 'file', 'files')} stored in setup.exe "
+    held_in = "its slice files" if s.slice_layout else "setup.exe"
+    parts = [(f"{_n(kinds[FILE_STORED], 'file', 'files')} stored in {held_in} "
               f"({_size(stored_size)})")]
     if kinds[FILE_EXTERNAL]:
         parts.append(f"{_n(kinds[FILE_EXTERNAL], 'external file', 'external files')} "
@@ -1873,39 +2144,67 @@ def summarise(s: Setup, folder: Path | None = None) -> list[str]:
     if encrypted or s.encryption:
         lines.append(f"encryption: {_n(encrypted, 'file is', 'files are')} encrypted with the "
                      "installer password; gitfurl does not decrypt installers")
-    if s.disk_spanning:
-        lines.append(f"disk spanning: the file data is in separate disk files ({_slices_text(s)}"
-                     "); gitfurl's extraction refuses it")
     if s.compression not in COMPRESSION:
         lines.append(f"file data: compressed with {METHOD_OTHER}")
     lines.extend(f"note: {n}" for n in s.notes)
     return lines
 
 
-def _slices_text(s: Setup) -> str:
-    names = slice_names(s)
-    if not names:
-        return "names not known: the slices-per-disk value is out of its range"
-    return ", ".join(names[:4])
+NAMES_NOT_KNOWN = "names not known: the slices-per-disk value is out of its range"
 
 
-def slice_names(s: Setup) -> list[str]:
-    """Names of the disk files a disk-spanning setup reads, from its file locations; empty
-    when the header's slices-per-disk value is out of its range (1 to 26)."""
-    stem = s.path.stem
+def slice_names(s: Setup, limit: int = 64) -> list[str]:
+    """Names of the slice files the setup's file locations name, in slice order (at most
+    limit); empty when the header's slices-per-disk value is out of its range (1 to 26)."""
     per = s.slices_per_disk
     if not 1 <= per <= MAX_SLICES_PER_DISK:
         return []
-    seen: list[str] = []
-    for loc in s.locations:
-        for sl in range(loc.first_slice, min(loc.last_slice, loc.first_slice + 64) + 1):
-            disk = sl // per + 1
-            name = f"{stem}-{disk}.bin" if per == 1 else f"{stem}-{disk}{chr(97 + sl % per)}.bin"
-            if name not in seen:
-                seen.append(name)
-            if len(seen) >= 64:
-                return seen
-    return seen
+    return [slice_name(s.path.stem, per, n) for n in _slice_numbers(s.locations, limit)[0]]
+
+
+def _layout_lines(s: Setup, folder: Path | None) -> list[str]:
+    """Where the setup data and the file data are, and which slice files are present (by name
+    only, as in the preflight of files beside the installer: nothing is opened here)."""
+    if not s.slice_layout:
+        return []
+    if s.data_file is not None:
+        head = (f"layout: setup data in {_clean(s.data_file.name, 60)} beside the installer "
+                "(setup.exe has no loader)")
+    else:
+        head = "layout: setup data inside setup.exe"
+    head += ("; file data in slice files beside the installer"
+             + (" (disk spanning)" if s.disk_spanning else ""))
+    lines = [head]
+    if not s.locations:
+        return lines
+    if not 1 <= s.slices_per_disk <= MAX_SLICES_PER_DISK:
+        return lines + [f"slice files: {NAMES_NOT_KNOWN}"]
+    problem = _stem_problem(s.path.stem)
+    if problem:
+        return lines + [f"slice files: {problem}"]
+    numbers, cut = _slice_numbers(s.locations, MAX_SLICES)
+    beside = _Beside(Path(folder) if folder is not None else s.path.parent)
+    names, missing = [], []
+    for n in numbers:
+        name = slice_name(s.path.stem, s.slices_per_disk, n)
+        try:
+            found = beside.find(name)
+        except InnoError:
+            found = None
+        names.append(_clean(found.name if found else name, 60))
+        if found is None:
+            missing.append(names[-1])
+    state = "all present" if not missing else f"{len(missing):,} missing"
+    lines.append(f"slice files: {_n(len(names), 'file', 'files')} named by the file locations: "
+                 + ", ".join(names[:LISTED]) + (" ..." if len(names) > LISTED else "")
+                 + f" ({state})"
+                 + (f"; the setup names more than {MAX_SLICES:,}, the rest were not looked "
+                    "for" if cut else ""))
+    if missing:
+        lines.append("warning: " + ", ".join(missing[:5]) + (" ..." if len(missing) > 5 else "")
+                     + " not found beside the installer; gitfurl's extraction refuses until "
+                     "every slice file it needs is there")
+    return lines
 
 
 # --- extraction ------------------------------------------------------------------------------
@@ -1919,12 +2218,14 @@ class Target:
 
 @dataclass
 class _ChunkPlan:
-    start: int  # chunk start, relative to setup-1
+    start: int  # chunk start, relative to Offset1 (or in slice file `first`)
     size: int  # compressed size
     compressed: bool
     dict_size: int  # LZMA/LZMA2 dictionary (0 for others)
     items: list = field(default_factory=list)  # (Location index, [Target]) by offset
     decoded: int = 0  # bytes of the chunk that are decoded: up to the end of its last file
+    first: int = 0  # slice numbers of the chunk's first and last byte (slice layouts)
+    last: int = 0
 
 
 @dataclass
@@ -1942,6 +2243,7 @@ class InnoExtractPlan:
     skipped: list[tuple[str, str]]  # (destination, reason), shown cleaned
     notes: list[str] = field(default_factory=list)
     folders: list[tuple[int, str]] = field(default_factory=lambda: [(-1, "")])
+    slices: dict = field(default_factory=dict)  # slice number -> (path, size), headers checked
 
     @property
     def target(self) -> str:
@@ -1971,8 +2273,9 @@ class InnoExtractPlan:
 
     def describe(self) -> list[str]:
         s = self.setup
+        what = "setup.exe and the files beside it" if s.slice_layout else "setup.exe"
         lines = [
-            ("NATIVE EXTRACTION (Inno Setup's own files): gitfurl reads setup.exe itself "
+            (f"NATIVE EXTRACTION (Inno Setup's own files): gitfurl reads {what} itself "
              f"(data format {s.format}, compression {s.compression_name})."),
             ("  This extracts the files Inno Setup holds for {app} only. Setup is not run: no "
              "registry entries, shortcuts, INI values, redistributables, [Run] entries or "
@@ -1982,6 +2285,16 @@ class InnoExtractPlan:
             (f"  in total: {_n(self.file_count, 'file', 'files')}, {_size(self.total_size)} to "
              f"write, from {_n(len(self.chunks), 'data chunk', 'data chunks')}"),
         ]
+        if s.data_file is not None:
+            lines.append(f"  setup data: read from {_clean(s.data_file.name, 60)} beside the "
+                         "installer (setup.exe has no loader)")
+        if self.slices:
+            names = [_clean(p.name, 60) for p, _ in self.slices.values()]
+            lines.append(f"  file data: read from {_n(len(names), 'slice file', 'slice files')} "
+                         "beside the installer: " + ", ".join(names[:LISTED])
+                         + (" ..." if len(names) > LISTED else "")
+                         + "; each one's header and size were checked"
+                         + (" (disk spanning)" if s.disk_spanning else ""))
         if self.decoded > self.total_size:
             lines.append(f"  decoded: {_size(self.decoded)} in all; "
                          f"{_size(self.decoded - self.total_size)} of it only to reach later "
@@ -2033,15 +2346,14 @@ def lzma2_dict_size(p: int) -> int:
     return 0xFFFFFFFF if p == 40 else (2 | (p & 1)) << (p // 2 + 11)
 
 
-def _dict_size(fd: int, pos: int, method: int) -> int:
-    """The LZMA/LZMA2 dictionary named at the start of a chunk's data, 0 for other methods."""
+def _dict_size(raw: bytes, method: int) -> int:
+    """The LZMA/LZMA2 dictionary named by the first bytes of a chunk's data, 0 for other
+    methods."""
     if method == 3:
-        raw = _pread(fd, 5, pos)
         if len(raw) < 5 or raw[0] >= 225:
             raise InnoError("a data chunk has invalid LZMA properties")
         return struct.unpack_from("<I", raw, 1)[0]
     if method == 4:
-        raw = _pread(fd, 1, pos)
         if len(raw) < 1:
             raise InnoError("a data chunk is cut short")
         return lzma2_dict_size(raw[0])
@@ -2068,15 +2380,14 @@ def plan_inno_extract(installer: Path, prefix_name: str, env: dict[str, str] | N
         except InnoError as exc:
             raise ExtractRefused(_clean(str(exc), 200)) from exc
     s = setup
-    if s.disk_spanning:
-        raise ExtractRefused("the installer keeps its files in separate disk files ("
-                             + _slices_text(s) + "); gitfurl reads only "
-                             "installers whose files are inside setup.exe")
     if s.password_required:
         raise ExtractRefused("the installer is password-protected; gitfurl does not extract "
                              "password-protected installers")
     if s.compression not in COMPRESSION:
         raise ExtractRefused(f"the files are compressed with {METHOD_OTHER}")
+    if s.slice_layout and not 1 <= s.slices_per_disk <= MAX_SLICES_PER_DISK:
+        raise ExtractRefused("the installer keeps its files in slice files whose "
+                             + NAMES_NOT_KNOWN)
     choice = default_choice(s)
     skipped: list[tuple[str, str]] = []
     notes: list[str] = []
@@ -2159,38 +2470,73 @@ def plan_inno_extract(installer: Path, prefix_name: str, env: dict[str, str] | N
         fe = s.files[idx]
         targets.setdefault(fe.location, []).append(Target(cur, part, _clean(fe.dest)))
     total = count = memory = 0
-    try:
-        fd, _ = _open(installer)
-    except InnoError as exc:
-        raise ExtractRefused(str(exc)) from exc
+    if any(s.locations[li].encrypted for li in targets):
+        raise ExtractRefused("a file is encrypted with the installer password; gitfurl does not "
+                             "decrypt installers")
+    f = _F[s.format]
+    slices: dict[int, tuple[Path, int]] = {}
+    fd = None
+    if s.slice_layout:
+        problem = _stem_problem(installer.stem)
+        if problem:
+            raise ExtractRefused(problem)
+        numbers, cut = _slice_numbers([s.locations[li] for li in targets], MAX_SLICES)
+        if cut:
+            raise ExtractRefused(f"the files are spread over more than {MAX_SLICES:,} slice "
+                                 "files")
+        try:
+            slices = _resolve_slices(installer.parent, installer.stem, s.slices_per_disk,
+                                     numbers, f)
+        except InnoError as exc:
+            raise ExtractRefused(str(exc)) from exc
+        source = _Slices(slices, f)
+        sizes = {n: size for n, (_, size) in slices.items()}
+    else:
+        try:
+            fd, _ = _open(installer)
+        except InnoError as exc:
+            raise ExtractRefused(str(exc)) from exc
     try:
         for li in sorted(targets):
             loc = s.locations[li]
-            if loc.encrypted:
-                raise ExtractRefused("a file is encrypted with the installer password; gitfurl "
-                                     "does not decrypt installers")
             key = (loc.first_slice, loc.start)
             ch = by_chunk.get(key)
             if ch is None:
-                pos = s.offset1 + loc.start
-                if _pread(fd, 4, pos) != CHUNK_MAGIC:
-                    raise ExtractRefused("a data chunk does not start with its magic bytes; the "
-                                         "setup is damaged")
+                if fd is not None:
+                    pos = s.offset1 + loc.start
+                    if _pread(fd, 4, pos) != CHUNK_MAGIC:
+                        raise ExtractRefused("a data chunk does not start with its magic bytes; "
+                                             "the setup is damaged")
+                    head = _pread(fd, 5, pos + 4)
+                else:
+                    problem = _span_problem(loc, sizes, f)
+                    if problem:
+                        raise ExtractRefused(problem)
+                    try:
+                        head = _first_bytes(_SliceInput(source, loc.first_slice, loc.last_slice,
+                                                        loc.start, loc.chunk_size), 5)
+                    except _DataError as exc:
+                        raise ExtractRefused(str(exc)) from exc
                 try:
-                    dsize = _dict_size(fd, pos + 4, s.compression) if loc.compressed else 0
+                    dsize = _dict_size(head, s.compression) if loc.compressed else 0
                 except InnoError as exc:
                     raise ExtractRefused(str(exc)) from exc
                 if dsize > DICT_CAP:
                     raise ExtractRefused("a data chunk uses an LZMA dictionary larger than "
                                          "1 GiB")
-                ch = by_chunk[key] = _ChunkPlan(loc.start, loc.chunk_size, loc.compressed, dsize)
+                ch = by_chunk[key] = _ChunkPlan(loc.start, loc.chunk_size, loc.compressed, dsize,
+                                                first=loc.first_slice, last=loc.last_slice)
             if ch.compressed != loc.compressed:
                 raise ExtractRefused("two files in one data chunk disagree on its compression")
+            if ch.last != loc.last_slice:
+                raise ExtractRefused("two files in one data chunk disagree on its last slice "
+                                     "file; the setup is damaged")
             ch.items.append((li, targets[li]))
             total += loc.size * len(targets[li])
             count += len(targets[li])
     finally:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
     held: dict[tuple[int, int], int] = {}  # bytes all of a chunk's files hold together
     for loc in s.locations:
         k = (loc.first_slice, loc.start)
@@ -2211,11 +2557,11 @@ def plan_inno_extract(installer: Path, prefix_name: str, env: dict[str, str] | N
                                  "is damaged")
         need = -(-end // 4096) * 4096
         memory = max(memory, min(ch.dict_size, max(need, 4096)) if ch.dict_size else 0)
-    chunks = sorted(by_chunk.values(), key=lambda c: c.start)
+    chunks = sorted(by_chunk.values(), key=lambda c: (c.first, c.start))
     prefix = prefix_path(prefix_name, env)
     dest = prefix / "drive_c" / "Games" / prefix_name
     return InnoExtractPlan(installer, prefix_name, prefix, dest, s, choice, chunks, total, count,
-                           memory, skipped, notes, folders)
+                           memory, skipped, notes, folders, slices)
 
 
 class _Stopped(Exception):
@@ -2226,13 +2572,124 @@ class _DataError(Exception):
     pass
 
 
-class _ChunkReader:
-    """A chunk's decoded bytes, read from the file CHUNK at a time; input stops at its size."""
+class _FileInput:
+    """A chunk's stored bytes inside setup.exe (from just after its marker); stops at size."""
 
-    def __init__(self, fd: int, pos: int, size: int, method: int, compressed: bool, need: int):
+    def __init__(self, fd: int, pos: int, size: int):
         self.fd = fd
         self.pos = pos
         self.left = size
+
+    def read(self, n: int) -> bytes:
+        if self.left <= 0:
+            return b""
+        data = _pread(self.fd, min(n, self.left), self.pos)
+        if not data:
+            raise _DataError("the setup file ended inside a data chunk")
+        self.pos += len(data)
+        self.left -= len(data)
+        return data
+
+    def close(self) -> None:
+        pass
+
+
+class _Slices:
+    """The slice files the plan checked; each is opened again (O_NOFOLLOW) and its header
+    checked again when a chunk reaches it, and must still have the planned size."""
+
+    def __init__(self, files: dict[int, tuple[Path, int]], f: int):
+        self.files = files
+        self.f = f
+
+    def open(self, n: int) -> tuple[int, int]:
+        got = self.files.get(n)
+        if got is None:
+            raise _DataError("a data chunk reaches a slice file the plan did not check; the "
+                             "setup is damaged")
+        path, size = got
+        try:
+            fd, real = _open_slice(path, self.f)
+        except InnoError as exc:
+            raise _DataError(str(exc)) from exc
+        if real != size:
+            os.close(fd)
+            raise _DataError(f"slice file {_clean(path.name, 60)} changed after the plan was "
+                             "made")
+        return fd, real
+
+
+class _SliceInput:
+    """A chunk's stored bytes read across slice files: from just after the chunk marker in
+    slice `first` to the end of that file, then from just after the header of each next
+    slice. Exactly size bytes, ending in slice `last`, or _DataError."""
+
+    def __init__(self, slices: _Slices, first: int, last: int, start: int, size: int):
+        self.slices = slices
+        self.head = _slice_header_len(slices.f)
+        self.cur = first
+        self.last = last
+        self.left = size
+        self.fd, self.end = slices.open(first)
+        try:
+            if start < self.head or start + 4 + 1 > self.end:
+                raise _DataError("a data chunk starts outside its slice file's data; the setup "
+                                 "is damaged")
+            if _pread(self.fd, 4, start) != CHUNK_MAGIC:
+                raise _DataError("a data chunk does not start with its magic bytes; the setup "
+                                 "or a slice file is damaged")
+        except BaseException:
+            self.close()
+            raise
+        self.pos = start + 4
+
+    def read(self, n: int) -> bytes:
+        if self.left <= 0:
+            return b""
+        while self.pos >= self.end:
+            if self.cur >= self.last:
+                raise _DataError("a data chunk runs past the end of the last slice file its "
+                                 "location names; the setup or a slice file is damaged")
+            self.close()
+            self.cur += 1
+            self.fd, self.end = self.slices.open(self.cur)
+            self.pos = self.head
+        data = _pread(self.fd, min(n, self.left, self.end - self.pos), self.pos)
+        if not data:
+            raise _DataError("a slice file ended early; it is damaged")
+        self.pos += len(data)
+        self.left -= len(data)
+        if self.left == 0 and self.cur != self.last:
+            raise _DataError("a data chunk ends before the last slice file its location names; "
+                             "the setup or a slice file is damaged")
+        return data
+
+    def close(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+
+def _first_bytes(inp, n: int) -> bytes:
+    """Up to n bytes from the start of an input (fewer only when the chunk is shorter); the
+    input is closed."""
+    try:
+        out = b""
+        while len(out) < n:
+            got = inp.read(n - len(out))
+            if not got:
+                break
+            out += got
+        return out
+    finally:
+        inp.close()
+
+
+class _ChunkReader:
+    """A chunk's decoded bytes, read from its input CHUNK at a time; input stops at its size."""
+
+    def __init__(self, inp, method: int, compressed: bool, need: int):
+        self.inp = inp
         self.method = method if compressed else 0
         self.tail = b""
         if self.method == 0:
@@ -2244,20 +2701,23 @@ class _ChunkReader:
         else:
             self.dec = self._lzma(need)
 
-    def _input(self, n: int = CHUNK) -> bytes:
-        if self.left <= 0:
-            return b""
-        data = _pread(self.fd, min(n, self.left), self.pos)
-        if not data:
-            raise _DataError("the setup file ended inside a data chunk")
-        self.pos += len(data)
-        self.left -= len(data)
-        return data
+    def _input(self, n: int | None = None) -> bytes:
+        return self.inp.read(CHUNK if n is None else n)
+
+    def _head(self, n: int) -> bytes:
+        """n bytes (fewer only at the end of the chunk), across slice files if need be."""
+        out = b""
+        while len(out) < n:
+            got = self._input(n - len(out))
+            if not got:
+                break
+            out += got
+        return out
 
     def _lzma(self, need: int):
         cap = max(4096, -(-need // 4096) * 4096)
         if self.method == 3:
-            head = self._input(5)
+            head = self._head(5)
             if len(head) < 5:
                 raise _DataError("a data chunk is cut short")
             p = head[0]
@@ -2265,7 +2725,7 @@ class _ChunkReader:
             filt = {"id": lzma.FILTER_LZMA1, "dict_size": max(4096, min(dsize, cap)),
                     "lc": p % 9, "lp": (p // 9) % 5, "pb": p // 45}
         else:
-            head = self._input(1)
+            head = self._head(1)
             if len(head) < 1:
                 raise _DataError("a data chunk is cut short")
             try:
@@ -2386,10 +2846,20 @@ def extract_inno_files(plan: InnoExtractPlan, cancel: threading.Event | None = N
             again = read_fd(fd, plan.installer, size)
         except InnoError as exc:
             raise ExtractRefused(_clean(str(exc), 200)) from exc
-        if (again.size, again.offset0, again.locations, again.files) != \
-                (plan.setup.size, plan.setup.offset0, plan.setup.locations, plan.setup.files):
+        if (again.size, again.offset0, again.data_size, again.locations, again.files) != \
+                (plan.setup.size, plan.setup.offset0, plan.setup.data_size,
+                 plan.setup.locations, plan.setup.files):
             raise ExtractRefused("the installer changed after the plan was made; make the plan "
                                  "again")
+        for path, planned in plan.slices.values():  # before anything is created
+            try:
+                sfd, real = _open_slice(path, _F[again.format])
+            except InnoError as exc:
+                raise ExtractRefused(_clean(str(exc), 200)) from exc
+            os.close(sfd)
+            if real != planned:
+                raise ExtractRefused(f"slice file {_clean(path.name, 60)} changed after the plan "
+                                     "was made; make the plan again")
         root = _make_dest(plan)
         return _write_all(plan, fd, root, cancel, on_progress)
     finally:
@@ -2472,38 +2942,45 @@ def _write_all(plan: InnoExtractPlan, fd: int, root: int, cancel, on_progress
                 pass
 
     current: list[Target] = []  # files created by this run and not checked yet
+    source = _Slices(plan.slices, _F[s.format]) if s.slice_layout else None
     try:
         for ch in plan.chunks:
             stop()
             need = max(s.locations[li].offset + s.locations[li].size for li, _ in ch.items)
-            stream = _Stream(_ChunkReader(fd, s.offset1 + ch.start + 4, ch.size,
-                                          s.compression, ch.compressed, need))
-            for li, targets in ch.items:
-                stop()
-                loc = s.locations[li]
-                while stream.pos < loc.offset:
+            if source is None:
+                inp = _FileInput(fd, s.offset1 + ch.start + 4, ch.size)
+            else:
+                inp = _SliceInput(source, ch.first, ch.last, ch.start, ch.size)
+            try:
+                stream = _Stream(_ChunkReader(inp, s.compression, ch.compressed, need))
+                for li, targets in ch.items:
                     stop()
-                    stream.pull(min(CHUNK, loc.offset - stream.pos))
-                fds: list[int] = []
-                try:
-                    for t in targets:
-                        fds.append(os.open(t.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL
-                                           | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644,
-                                           dir_fd=tree.fd(t.folder)))
-                        current.append(t)
-                    digest = _write_file(stream, loc, fds, stop)
-                finally:
-                    for out in fds:
-                        os.close(out)
-                current.clear()
-                if digest != loc.digest:
-                    remove(targets)
-                    res.hash_errors.extend(t.shown for t in targets)
-                else:
-                    res.files += len(targets)
-                    res.bytes_written += loc.size * len(targets)
-                if on_progress is not None:
-                    on_progress(res.bytes_written, plan.total_size)
+                    loc = s.locations[li]
+                    while stream.pos < loc.offset:
+                        stop()
+                        stream.pull(min(CHUNK, loc.offset - stream.pos))
+                    fds: list[int] = []
+                    try:
+                        for t in targets:
+                            fds.append(os.open(t.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                               | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644,
+                                               dir_fd=tree.fd(t.folder)))
+                            current.append(t)
+                        digest = _write_file(stream, loc, fds, stop)
+                    finally:
+                        for out in fds:
+                            os.close(out)
+                    current.clear()
+                    if digest != loc.digest:
+                        remove(targets)
+                        res.hash_errors.extend(t.shown for t in targets)
+                    else:
+                        res.files += len(targets)
+                        res.bytes_written += loc.size * len(targets)
+                    if on_progress is not None:
+                        on_progress(res.bytes_written, plan.total_size)
+            finally:
+                inp.close()
     except _Stopped:
         res.stopped = True
     except KeyboardInterrupt:

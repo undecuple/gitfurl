@@ -85,9 +85,21 @@ class Base(unittest.TestCase):
         self._tmp.cleanup()
 
     def write(self, spec_or_bytes) -> Path:
-        data = spec_or_bytes if isinstance(spec_or_bytes, bytes) else w.build(spec_or_bytes)[0]
-        self.setup.write_bytes(data)
+        """Write setup.exe; for a spec, also the files beside it (setup-0.bin, slice files),
+        after removing those of an earlier spec."""
+        if isinstance(spec_or_bytes, bytes):
+            self.setup.write_bytes(spec_or_bytes)
+            return self.setup
+        data, facts = w.build(spec_or_bytes)
+        self.write_set(data, facts["files"])
         return self.setup
+
+    def write_set(self, data: bytes, files: dict) -> None:
+        for old in self.src.glob("setup-*.bin"):
+            old.unlink()
+        self.setup.write_bytes(data)
+        for name, raw in files.items():
+            (self.src / name).write_bytes(raw)
 
     def dest(self) -> Path:
         return self.prefix / "drive_c" / "Games" / "p1"
@@ -537,7 +549,11 @@ class Reading(Base):
         with self.assertRaisesRegex(inno.InnoError, "no Inno Setup offset table"):
             inno.read_setup(self.setup)
         (self.src / "setup-0.bin").write_bytes(b"Inno Setup Setup Data (6.7.0)".ljust(64, b"\0"))
-        with self.assertRaisesRegex(inno.InnoError, "separate files"):
+        with self.assertRaisesRegex(inno.InnoError, "setup data in setup-0.bin beside the "
+                                    "installer: the encryption header is damaged"):
+            inno.read_setup(self.setup)
+        (self.src / "setup-0.bin").write_bytes(b"something else" * 10)
+        with self.assertRaisesRegex(inno.InnoError, "no Inno Setup offset table"):
             inno.read_setup(self.setup)
         self.write(b"not a program at all")
         with self.assertRaisesRegex(inno.InnoError, "not a Windows program"):
@@ -786,7 +802,6 @@ class Extract(Base):
     def test_refusals(self):
         cases = [
             (full_spec(password=True), "password-protected"),
-            (full_spec(spanning=True), "separate disk files \\(setup-1.bin\\)"),
             (full_spec(fmt="6.7.0", encryption_header=1,
                        files=[w.WFile("{app}\\x", b"x", encrypted=True)]), "encrypted"),
             (full_spec(fmt="6.3.0", encryption_flag=True,
@@ -958,6 +973,518 @@ class Cli(Base):
         self.assertEqual(rc, 1)
         self.assertIn("password-protected", err)
         self.assertIn("Nothing was written", err)
+
+
+
+# --- disk spanning and UseSetupLdr=no: hand vectors (spec section 5) ---------------------------
+
+V1 = hx("""
+0000  69 64 73 6b 61 33 32 1a 20 00 00 00 7a 6c 62 1a
+0010  00 01 02 03 04 05 06 07 08 09 0a 0b 0c 0d 0e 0f""")
+V2 = hx("""
+0000  69 64 73 6b 62 33 32 1a 24 00 00 00 00 00 00 00
+0010  7a 6c 62 1a 00 01 02 03 04 05 06 07 08 09 0a 0b
+0020  0c 0d 0e 0f""")
+V4_1 = hx("""
+0000  69 64 73 6b 62 33 32 1a 1c 00 00 00 00 00 00 00
+0010  7a 6c 62 1a 41 42 43 44 45 46 47 48""")
+V4_2 = hx("""
+0000  69 64 73 6b 62 33 32 1a 14 00 00 00 00 00 00 00
+0010  49 4a 4b 4c""")
+V4_OLD_1 = bytes.fromhex("6964736b6133321a180000007a6c621a4142434445464748")
+V4_OLD_2 = bytes.fromhex("6964736b6133321a10000000494a4b4c")
+V5A = hx("""
+0000  49 6e 6e 6f 20 53 65 74 75 70 20 53 65 74 75 70
+0010  20 44 61 74 61 20 28 35 2e 35 2e 37 29 20 28 75
+0020  29 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+0030  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+0040  ee a0 99 09 00 01 00 00 01""")
+V5C = hx("""
+0000  49 6e 6e 6f 20 53 65 74 75 70 20 53 65 74 75 70
+0010  20 44 61 74 61 20 28 37 2e 31 2e 31 29 00 00 00
+0020  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+0030  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+0040  f5 00 95 52 00 00 00 00 00 00 00 00 00 00 00 00
+0050  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+0060  00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+0070  00 00 00 00 00 a6 24 a4 5d 00 01 00 00 00 00 00
+0080  00 01""")
+
+
+def loc(first, last, start, csize, size=None):
+    return inno.Location(first, last, start, 0, csize if size is None else size, csize,
+                         bytes(32), 0, False, False, False)
+
+
+class SliceVectors(unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def put(self, name: str, data: bytes) -> Path:
+        (self.dir / name).write_bytes(data)
+        return self.dir / name
+
+    def slices(self, f: int, per: int = 1, numbers=(0, 1)) -> inno._Slices:
+        return inno._Slices(inno._resolve_slices(self.dir, "setup", per, list(numbers), f), f)
+
+    def read(self, slices, location) -> bytes:
+        inp = inno._SliceInput(slices, location.first_slice, location.last_slice,
+                               location.start, location.chunk_size)
+        return inno._first_bytes(inp, 1 << 20)
+
+    def test_names(self):
+        for n, per, name in ((0, 1, "stem-1.bin"), (1, 1, "stem-2.bin"), (9, 1, "stem-10.bin"),
+                             (0, 2, "stem-1a.bin"), (1, 2, "stem-1b.bin"), (2, 2, "stem-2a.bin"),
+                             (5, 3, "stem-2c.bin")):
+            self.assertEqual(inno.slice_name("stem", per, n), name)
+            self.assertEqual(w.slice_name("stem", per, n), name)
+
+    def test_v1_v2_valid_headers(self):
+        self.assertEqual(V1[:8], b"idska32\x1a")
+        self.assertEqual(V2[:8], b"idskb32\x1a")
+        for f in (inno.F550, inno.F630, inno.F650):
+            self.assertEqual(inno.check_slice_header(V1, 32, f), 12)
+        for f in (inno.F652, inno.F670, inno.F711):
+            self.assertEqual(inno.check_slice_header(V2, 36, f), 16)
+        self.put("setup-1.bin", V1)
+        self.assertEqual(self.read(self.slices(inno.F650, numbers=[0]), loc(0, 0, 12, 16)),
+                         bytes(range(16)))
+        self.put("setup-1.bin", V2)
+        self.assertEqual(self.read(self.slices(inno.F652, numbers=[0]), loc(0, 0, 16, 16)),
+                         bytes(range(16)))
+
+    def test_v3_invalid_headers(self):
+        v3a = bytearray(V2)
+        v3a[8] = 0x23
+        v3e = bytearray(V2)
+        v3e[8:16] = bytes(8)
+        for raw, size, f, reason in (
+                (bytes(v3a), 36, inno.F652, "size of 35 bytes, but the file has 36"),
+                (V1, 32, inno.F652, "another Inno Setup version"),
+                (V2, 36, inno.F650, "another Inno Setup version"),
+                (V2[:10], 10, inno.F652, "shorter than its slice header"),
+                (bytes(v3e), 36, inno.F652, "interrupted"),
+                (b"MZ" + bytes(30), 32, inno.F652, "does not start with")):
+            with self.subTest(reason=reason):
+                with self.assertRaisesRegex(inno.InnoError, reason):
+                    inno.check_slice_header(raw[:16], size, f)
+                path = self.put("setup-1.bin", raw)
+                with self.assertRaisesRegex(inno.InnoError, "slice file setup-1.bin: .*" + reason):
+                    inno._open_slice(path, f)
+
+    def test_v4_chunk_crossing_two_slices(self):
+        for f, one, two, start in ((inno.F652, V4_1, V4_2, 16),
+                                   (inno.F650, V4_OLD_1, V4_OLD_2, 12)):
+            with self.subTest(f=f):
+                self.assertEqual((len(one), len(two)), (28, 20) if f == inno.F652 else (24, 16))
+                self.put("setup-1.bin", one)
+                self.put("setup-2.bin", two)
+                sl = self.slices(f)
+                good = loc(0, 1, start, 12)
+                self.assertIsNone(inno._span_problem(good, {0: len(one), 1: len(two)}, f))
+                self.assertEqual(self.read(sl, good), b"ABCDEFGHIJKL")
+                reader = inno._ChunkReader(inno._SliceInput(sl, 0, 1, start, 12), 0, False, 12)
+                self.assertEqual(reader.read(100) + reader.read(100), b"ABCDEFGHIJKL")
+
+    def test_v4_failures(self):
+        self.put("setup-1.bin", V4_1)
+        self.put("setup-2.bin", V4_2)
+        sl = self.slices(inno.F652)
+        sizes = {0: 28, 1: 20, 2: 20}
+        for name, bad, reason in (("a", loc(0, 0, 16, 12), "runs past the end"),
+                                  ("b", loc(0, 1, 16, 13), "runs past the end"),
+                                  ("d", loc(0, 1, 15, 12), "starts outside"),
+                                  ("marker", loc(0, 1, 17, 11), "magic bytes")):
+            with self.subTest(name), self.assertRaisesRegex(inno._DataError, reason):
+                self.read(sl, bad)
+            if name != "marker":
+                self.assertRegex(inno._span_problem(bad, sizes, inno.F652), reason)
+        # c: LastSlice 2 although the chunk ends in slice 1 (Setup would accept this)
+        with self.assertRaisesRegex(inno.InnoError, "missing beside the installer: setup-3.bin"):
+            self.slices(inno.F652, numbers=[0, 1, 2])
+        self.put("setup-3.bin", V4_2)
+        c = loc(0, 2, 16, 12)
+        self.assertRegex(inno._span_problem(c, sizes, inno.F652), "ends before the last slice")
+        with self.assertRaisesRegex(inno._DataError, "ends before the last slice"):
+            self.read(self.slices(inno.F652, numbers=[0, 1, 2]), c)
+        # e: setup-2.bin missing
+        (self.dir / "setup-2.bin").unlink()
+        with self.assertRaisesRegex(inno.InnoError, "1 slice file is missing beside the "
+                                    "installer: setup-2.bin"):
+            self.slices(inno.F652)
+
+    def test_v4_two_slices_per_disk(self):
+        self.put("setup-1a.bin", V4_1)
+        self.put("setup-1b.bin", V4_2)
+        sl = self.slices(inno.F652, per=2)
+        self.assertEqual(self.read(sl, loc(0, 1, 16, 12)), b"ABCDEFGHIJKL")
+        with self.assertRaisesRegex(inno.InnoError, "setup-1.bin, setup-2.bin"):
+            self.slices(inno.F652, per=1)
+
+    def test_v5_setup0_starts(self):
+        self.assertEqual(V5A[64:68], w.u32(zlib.crc32(bytes.fromhex("0001000001"))))
+        self.assertEqual(zlib.crc32(bytes(49)), 0x529500F5)
+        self.assertEqual(zlib.crc32(V5C[121:130]), 0x5DA424A6)
+        v5b = bytearray(V5A)
+        v5b[0x17:0x1D] = bytes.fromhex("362e332e3029")
+        v5b[0x1D:64] = bytes(64 - 0x1D)
+        self.assertEqual(bytes(v5b[:64]).rstrip(b"\0"), b"Inno Setup Setup Data (6.3.0)")
+        v5d_id = bytearray(V5A)
+        v5d_id[0x1D] = 0x21
+        v5d_enc = bytearray(V5C)
+        v5d_enc[64] ^= 1
+        v5d_block = bytearray(V5A)
+        v5d_block[72] = 0
+        exe = self.put("setup.exe", w.pe_with_table(b"version information stand-in", 1))
+        for raw, reason in ((V5A, "the setup header block runs past the end of the file"),
+                            (bytes(v5b), "the setup header block runs past the end of the file"),
+                            (V5C, "the setup header block runs past the end of the file"),
+                            (bytes(v5d_id), "not an Inno Setup format gitfurl knows"),
+                            (bytes(v5d_enc), "encryption header is damaged"),
+                            (bytes(v5d_block), "header CRC-32 mismatch"),
+                            (V5A[:63], "shorter than its 64-byte format ID")):
+            with self.subTest(reason=reason):
+                self.put("setup-0.bin", raw)
+                with self.assertRaisesRegex(inno.InnoError, "setup data in setup-0.bin beside "
+                                            "the installer: .*" + re.escape(reason)):
+                    inno.read_setup(exe)
+
+    def test_v6_stored_block2_headers(self):
+        for f, head in ((inno.F557, "d6 38 31 fe 50 00 00 00 00"),
+                        (inno.F670, "d8 55 5b 94 50 00 00 00 00 00 00 00 00")):
+            raw = w.frame_block(bytes(0x4C), f, False)
+            self.assertEqual(raw[:len(bytes.fromhex(head))], bytes.fromhex(head))
+            tmp = self.put("block", raw)
+            with open(tmp, "rb") as fh:
+                self.assertEqual(inno._block(fh.fileno(), 0, len(raw), f, 1 << 20, "b"),
+                                 (bytes(0x4C), len(raw), False))
+
+
+# --- disk spanning and UseSetupLdr=no: synthetic installers --------------------------------
+
+BIG = bytes(RND.getrandbits(8) for _ in range(200_000))
+EXPECTED = {"readme.txt": TEXT, "docs/README-copy.txt": TEXT, "empty.txt": b"",
+            "bin/game.exe": EXE, "data/sub/b.snd": bytes(range(256)) * 40}
+
+
+class Spanning(Base):
+    def plan(self):
+        return inno.plan_inno_extract(self.setup, "p1")
+
+    def tree(self) -> dict:
+        root = self.dest()
+        return {str(p.relative_to(root)): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+
+    def clear(self):
+        if self.dest().exists():
+            shutil.rmtree(self.dest())
+
+    def build(self, **kw):
+        data, facts = w.build(full_spec(**kw))
+        self.write_set(data, facts["files"])
+        return facts
+
+    def test_extract_across_slices(self):
+        for fmt in ("5.5.7", "6.5.0", "6.5.2", "7.1.1"):
+            for method, solid, per in ((0, False, 1), (3, True, 1), (1, False, 3), (4, True, 2)):
+                with self.subTest(fmt=fmt, method=method, solid=solid, per=per):
+                    self.clear()
+                    facts = self.build(fmt=fmt, compression=method, solid=solid, spanning=True,
+                                       slice_size=9000, slices_per_disk=per)
+                    self.assertTrue(any(a != b for a, _, b in facts["places"]))
+                    self.assertGreater(len(facts["files"]), 2)
+                    if per > 1:
+                        self.assertIn("setup-1b.bin", facts["files"])
+                    s = inno.read_setup(self.setup)
+                    self.assertTrue(s.loader and s.slice_layout and s.disk_spanning)
+                    plan = self.plan()
+                    self.assertEqual(len(plan.slices), len(facts["files"]))
+                    res = inno.extract_inno_files(plan)
+                    self.assertTrue(res.ok, res.lines())
+                    self.assertEqual(self.tree(), EXPECTED)
+
+    def test_no_loader_with_and_without_spanning(self):
+        for spanning, slice_size in ((False, 0), (True, 7000)):
+            for fmt in ("6.3.0", "7.1.1"):
+                with self.subTest(spanning=spanning, fmt=fmt):
+                    self.clear()
+                    facts = self.build(fmt=fmt, loader=False, spanning=spanning,
+                                       slice_size=slice_size)
+                    self.assertIn("setup-0.bin", facts["files"])
+                    if not spanning:
+                        self.assertEqual(set(facts["files"]), {"setup-0.bin", "setup-1.bin"})
+                    s = inno.read_setup(self.setup)
+                    self.assertFalse(s.loader)
+                    self.assertEqual(s.data_file, self.src / "setup-0.bin")
+                    self.assertEqual(s.disk_spanning, spanning)
+                    self.assertEqual(s.where, "setup data in setup-0.bin beside the installer")
+                    plan = self.plan()
+                    text = "\n".join(plan.describe())
+                    self.assertIn("setup data: read from setup-0.bin beside the installer", text)
+                    self.assertIn("file data: read from", text)
+                    res = inno.extract_inno_files(plan)
+                    self.assertTrue(res.ok, res.lines())
+                    self.assertEqual(self.tree(), EXPECTED)
+
+    def test_loader_wins_over_a_setup0_beside_it(self):
+        self.write(full_spec())
+        (self.src / "setup-0.bin").write_bytes(b"Inno Setup Setup Data (6.7.0)".ljust(64, b"\0"))
+        s = inno.read_setup(self.setup)
+        self.assertTrue(s.loader)
+        self.assertFalse(s.slice_layout)
+        self.assertTrue(inno.extract_inno_files(self.plan()).ok)
+
+    def test_no_loader_and_no_setup0(self):
+        data, _ = w.build(full_spec(loader=False))
+        self.write_set(data, {})
+        with self.assertRaisesRegex(inno.InnoError, "no Inno Setup offset table"):
+            inno.read_setup(self.setup)
+        for fmt, header, reason in (("7.1.1", 2, "fully encrypted"),):
+            data, facts = w.build(full_spec(fmt=fmt, loader=False, encryption_header=header))
+            self.write_set(data, facts["files"])
+            with self.assertRaisesRegex(inno.InnoError, "setup-0.bin.*" + reason):
+                inno.read_setup(self.setup)
+        data, facts = w.build(full_spec(fmt="5.5.7", loader=False))
+        setup0 = facts["files"]["setup-0.bin"].replace(b"(5.5.7) (u)", b"(5.5.7)\0\0\0\0")
+        self.write_set(data, dict(facts["files"], **{"setup-0.bin": setup0}))
+        with self.assertRaisesRegex(inno.InnoError, "setup-0.bin.*ANSI"):
+            inno.read_setup(self.setup)
+
+    def test_setup0_and_slices_found_without_letter_case(self):
+        facts = self.build(loader=False, spanning=True, slice_size=20000)
+        for name in facts["files"]:
+            os.rename(self.src / name, self.src / name.upper())
+        s = inno.read_setup(self.setup)
+        self.assertEqual(s.data_file.name, "SETUP-0.BIN")
+        self.assertTrue(inno.extract_inno_files(self.plan()).ok)
+        self.clear()
+        shutil.copy(self.src / "SETUP-2.BIN", self.src / "Setup-2.bin")
+        with self.assertRaisesRegex(ExtractRefused, "different letter case"):
+            self.plan()
+
+    def test_exact_slice_name_wins_over_other_letter_case(self):
+        self.build(loader=False, spanning=True, slice_size=20000)
+        shutil.copy(self.src / "setup-2.bin", self.src / "SETUP-2.BIN")
+        self.assertTrue(inno.extract_inno_files(self.plan()).ok)
+
+    def test_letter_case_does_not_expand_characters(self):
+        self.assertEqual(inno._fold("STRASSE-1.bin"), "strasse-1.bin")
+        self.assertNotEqual(inno._fold("straße-1.bin"), inno._fold("STRASSE-1.bin"))
+        self.assertEqual(inno._fold("ÄÖ-1.BIN"), "äö-1.bin")
+        (self.src / "straße-1.bin").write_bytes(b"x")
+        self.assertIsNone(inno._Beside(self.src).find("STRASSE-1.bin"))
+
+    def test_io_error_on_a_slice_header_is_a_plain_refusal(self):
+        self.build(spanning=True, slice_size=20000)
+        real = inno._pread
+
+        def eio(fd, n, at):
+            if n == 16 and at == 0:
+                raise OSError(5, "Input/output error")
+            return real(fd, n, at)
+        with mock.patch.object(inno, "_pread", eio):
+            with self.assertRaisesRegex(ExtractRefused, "could not be read .Input/output error"):
+                self.plan()
+        self.assertFalse(self.dest().exists())
+
+    def test_folder_named_setup0_is_not_an_inno_setup(self):
+        data, _ = w.build(full_spec(loader=False))
+        self.write_set(data, {})
+        (self.src / "setup-0.bin").mkdir()
+        with self.assertRaisesRegex(inno.InnoError, "no Inno Setup offset table"):
+            inno.read_setup(self.setup)
+
+    def test_slice_note_says_unverified_only_for_unchecked_formats(self):
+        for fmt, unverified in (("7.1.1", False), ("6.5.0", True)):
+            with self.subTest(fmt=fmt):
+                self.clear()
+                self.build(fmt=fmt, spanning=True, slice_size=20000)
+                notes = " ".join(inno.read_setup(self.setup).notes)
+                self.assertEqual("reading slice files" in notes, unverified, notes)
+
+    def test_unexpected_layouts_are_refused(self):
+        for kw, reason in (
+                (dict(spanning=True, block2_compressed=True), "unexpected layout: the file data"),
+                (dict(loader=False, slice_size=7000), "second slice file in a setup without disk"),
+                (dict(loader=False, slices_per_disk=2), "slices-per-disk value other than 1")):
+            with self.subTest(reason=reason):
+                self.build(**kw)
+                with self.assertRaisesRegex(inno.InnoError, reason):
+                    inno.read_setup(self.setup)
+
+    def test_start_inside_the_slice_header_is_refused(self):
+        spec = full_spec(spanning=True, files=[w.WFile("{app}\\a.txt", TEXT)])
+        data, facts = w.build(spec, block2_hook=lambda raw: raw[:8] + w.i64(4) + raw[16:])
+        self.write_set(data, facts["files"])
+        with self.assertRaisesRegex(inno.InnoError, "into a slice file's header"):
+            inno.read_setup(self.setup)
+
+    def test_bad_slices_are_refused_before_anything_is_written(self):
+        def missing():
+            (self.src / "setup-2.bin").unlink()
+
+        def longer():
+            with open(self.src / "setup-2.bin", "ab") as fh:
+                fh.write(b"x")
+
+        def short():
+            os.truncate(self.src / "setup-2.bin", 10)
+
+        def link():
+            os.rename(self.src / "setup-2.bin", self.base / "moved.bin")
+            os.symlink(self.base / "moved.bin", self.src / "setup-2.bin")
+
+        for change, reason, kw in (
+                (missing, "1 slice file is missing beside the installer: setup-2.bin", {}),
+                (longer, "slice file setup-2.bin: its header gives a size of 9,000 bytes, but "
+                 "the file has 9,001", {}),
+                (short, "slice file setup-2.bin: the file is shorter", {}),
+                (link, "slice file setup-2.bin is a symbolic link", {}),
+                (lambda: None, "slice file setup-1.bin: its slice header belongs to another",
+                 {"slice_header": "new", "fmt": "6.5.0"})):
+            with self.subTest(reason=reason):
+                self.build(**dict({"fmt": "7.1.1", "spanning": True, "slice_size": 9000}, **kw))
+                change()
+                with self.assertRaisesRegex(ExtractRefused, reason):
+                    self.plan()
+                self.assertFalse(self.dest().exists())
+
+    def test_slice_changed_after_the_plan(self):
+        self.build(fmt="7.1.1", spanning=True, slice_size=9000)
+        plan = self.plan()
+        raw = (self.src / "setup-2.bin").read_bytes()
+        (self.src / "setup-2.bin").write_bytes(raw[:8] + w.i64(len(raw) + 1) + raw[16:] + b"x")
+        with self.assertRaisesRegex(ExtractRefused, "setup-2.bin changed after the plan"):
+            inno.extract_inno_files(plan)
+        (self.src / "setup-2.bin").write_bytes(raw)
+        (self.src / "setup-3.bin").unlink()
+        with self.assertRaisesRegex(ExtractRefused, "setup-3.bin"):
+            inno.extract_inno_files(plan)
+        self.assertFalse(self.dest().exists())
+
+    def test_swapped_slice_is_caught_by_the_checksum(self):
+        files = [w.WFile("{app}\\a.txt", b"a"), w.WFile("{app}\\big.bin", BIG)]
+        self.build(fmt="7.1.1", compression=0, spanning=True, slice_size=50_000, files=files)
+        two = (self.src / "setup-2.bin").read_bytes()
+        three = (self.src / "setup-3.bin").read_bytes()
+        self.assertEqual(len(two), len(three))
+        (self.src / "setup-2.bin").write_bytes(three)
+        (self.src / "setup-3.bin").write_bytes(two)
+        res = inno.extract_inno_files(self.plan())
+        self.assertFalse(res.ok)
+        self.assertEqual(res.hash_errors, ["{app}\\big.bin"])
+        self.assertEqual(self.tree(), {"a.txt": b"a"})
+
+    def test_damage_during_the_run_is_reported(self):
+        files = [w.WFile("{app}\\a.txt", b"a"), w.WFile("{app}\\big.bin", BIG)]
+        self.build(fmt="6.5.0", compression=0, spanning=True, slice_size=50_000, files=files)
+        plan = self.plan()
+        real = inno._Slices.open
+
+        def failing(slices, n):
+            if n == 2:
+                raise inno._DataError("slice file setup-3.bin: it does not start with an Inno "
+                                      "Setup slice header")
+            return real(slices, n)
+
+        with mock.patch.object(inno._Slices, "open", failing):
+            res = inno.extract_inno_files(plan)
+        self.assertFalse(res.ok)
+        self.assertIn("setup-3.bin", res.error)
+        self.assertEqual(res.removed, "{app}\\big.bin")
+        self.assertEqual(self.tree(), {"a.txt": b"a"})
+
+    def test_stop_in_the_middle_of_a_crossing_chunk(self):
+        class Cancel:
+            armed, calls = False, 0
+
+            def is_set(self):
+                if self.armed:
+                    self.calls += 1
+                return self.calls >= 30
+
+        def progress(done, total):
+            cancel.armed = True
+
+        cancel = Cancel()
+        files = [w.WFile("{app}\\a.txt", b"a"), w.WFile("{app}\\big.bin", BIG)]
+        self.build(fmt="7.1.1", compression=0, spanning=True, slice_size=50_000, files=files)
+        opened = []
+        real = inno._Slices.open
+
+        def counting(slices, n):
+            opened.append(n)
+            return real(slices, n)
+
+        with mock.patch.object(inno, "CHUNK", 4096), \
+                mock.patch.object(inno._Slices, "open", counting):
+            res = inno.extract_inno_files(self.plan(), cancel=cancel, on_progress=progress)
+        self.assertTrue(res.stopped)
+        self.assertEqual(res.removed, "{app}\\big.bin")
+        self.assertEqual(self.tree(), {"a.txt": b"a"})
+        self.assertIn(1, opened)  # the stop came after the chunk crossed into the next slice
+        self.assertNotIn(4, opened)
+
+    def test_password_and_encryption_still_refused(self):
+        for kw, reason in (
+                (dict(fmt="7.1.1", password=True), "password-protected"),
+                (dict(fmt="6.3.0", password=True, loader=False), "password-protected"),
+                (dict(fmt="6.7.0", encryption_header=1,
+                      files=[w.WFile("{app}\\x", b"x", encrypted=True)]), "encrypted")):
+            with self.subTest(reason=reason):
+                self.build(spanning=True, slice_size=9000, **kw)
+                s = inno.read_setup(self.setup)
+                self.assertEqual(s.encryption, 1 if "encrypted" == reason else 0)
+                with self.assertRaisesRegex(ExtractRefused, reason):
+                    self.plan()
+        self.assertFalse(self.dest().exists())
+
+    def test_stem_that_cannot_name_slices(self):
+        self.build(spanning=True)
+        odd = self.src / "a\\b.exe"
+        os.rename(self.setup, odd)
+        with self.assertRaisesRegex(ExtractRefused, "cannot be used to name its slice files"):
+            inno.plan_inno_extract(odd, "p1")
+
+    def test_summary_and_detect_lines(self):
+        self.build(fmt="7.1.1", spanning=True, slice_size=30_000)
+        names = sorted(p.name for p in self.src.glob("setup-*.bin"))
+        text = "\n".join(inno.summarise(inno.read_setup(self.setup)))
+        self.assertIn("layout: setup data inside setup.exe; file data in slice files beside the "
+                      "installer (disk spanning)", text)
+        self.assertIn(f"slice files: {len(names)} files named by the file locations: "
+                      f"{', '.join(names)} (all present)", text)
+        self.assertIn("files stored in its slice files", text)
+        self.assertNotIn("unverified", text)  # 7.1.1 slices were checked with real setups
+        (self.src / "setup-2.bin").unlink()
+        text = detect.describe(detect.detect(self.setup))
+        self.assertIn("(1 missing)", text)
+        self.assertIn("warning: setup-2.bin not found beside the installer; gitfurl's extraction "
+                      "refuses", text)
+        self.build(fmt="7.1.1", loader=False)
+        det = detect.detect(self.setup)
+        (ev,) = [e for e in det.evidence if e.format == "Inno Setup"]
+        self.assertEqual(ev.confidence, detect.CONF_LIKELY)
+        self.assertEqual(ev.where, "setup data in setup-0.bin beside the installer")
+        self.assertIn("setup.exe has no loader", ev.detail)
+        text = detect.describe(det)
+        self.assertIn("layout: setup data in setup-0.bin beside the installer (setup.exe has no "
+                      "loader); file data in slice files beside the installer\n", text + "\n")
+        self.assertIn("slice files: 1 file named by the file locations: setup-1.bin "
+                      "(all present)", text)
+
+    def test_cli_extract_inno_on_a_spanned_setup(self):
+        self.build(fmt="6.5.2", spanning=True, slice_size=20_000)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                mock.patch("gitfurl.cli.running_as_root", return_value=False):
+            rc = cli.main(["extract-inno", str(self.setup), "--prefix", "p1", "--yes"])
+        self.assertEqual(rc, 0, err.getvalue())
+        self.assertIn("reads setup.exe and the files beside it itself", out.getvalue())
+        self.assertIn("slice files beside the installer: setup-1.bin, setup-2.bin",
+                      out.getvalue())
+        self.assertIn("Extraction finished: 5 files", out.getvalue())
+        self.assertEqual(self.tree(), EXPECTED)
 
 
 if __name__ == "__main__":

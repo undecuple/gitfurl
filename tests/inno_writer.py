@@ -7,6 +7,12 @@ data, solid or one chunk per file, with the x86 call filter where asked) and the
 block, each LZMA1-compressed or stored), followed by a few bytes that stand in for the
 compressed Setup program. No real Inno Setup program or installer bytes are used.
 
+The other layouts: with disk spanning the file data goes into slice files (<stem>-1.bin, or
+<stem>-1a.bin with more than one slice per disk), each with its slice header, chunks running
+on from one slice into the next; with loader=False (UseSetupLdr=no) setup.exe is a Windows
+program without the offset table, the setup data is <stem>-0.bin and the file data is in
+slice files even without spanning. Those files are returned in facts["files"].
+
 Written from the same clean-room specification as gitfurl/inno.py, so agreement between the
 two does not show agreement with Inno Setup itself; tests/test_inno.py also checks the
 reader against hand-made vectors. The bytes are written to a temporary folder only for a
@@ -188,7 +194,12 @@ class Spec:
     encryption_header: int = 0  # 6.5.0 and later
     spanning: bool = False
     slices_per_disk: int = 1
-    first_slice: int = 0  # of every file location (with spanning)
+    first_slice: int = 0  # number of the first slice file written (with slice files)
+    loader: bool = True  # False: UseSetupLdr=no (setup-0.bin and slice files beside setup.exe)
+    slice_size: int = 0  # largest slice file in bytes, header included (0: one slice holds all)
+    slice_header: str = ""  # "old" (idska32, 32-bit size) or "new" (idskb32); default by format
+    block2_compressed: bool | None = None  # default: stored with spanning, else header_compressed
+    stem: str = "setup"
     app_name: str = "Test App"
     app_version: str = "1.0"
     default_dir: str = "{autopf}\\Test App"
@@ -393,35 +404,87 @@ def _location_of(sp: Spec, k: int) -> int:
     return idx
 
 
+SIG_OLD, SIG_NEW = b"idska32\x1a", b"idskb32\x1a"
+
+
+def slice_name(stem: str, per: int, n: int) -> str:
+    disk = n // per + 1
+    return f"{stem}-{disk}.bin" if per == 1 else f"{stem}-{disk}{chr(97 + n % per)}.bin"
+
+
+def slice_file(data: bytes, kind: str, size: int | None = None) -> bytes:
+    """A slice file: signature, TotalSize (size, default the real size), then data."""
+    if kind == "new":
+        total = 16 + len(data) if size is None else size
+        return SIG_NEW + i64(total) + data
+    total = 12 + len(data) if size is None else size
+    return SIG_OLD + u32(total) + data
+
+
+def lay_out(chunks: list[bytes], head: int, slice_size: int) -> tuple[list[bytes], list]:
+    """Put chunks (marker included) into slices as the compiler does: a new slice before a
+    chunk when fewer than 5 bytes are left; a chunk runs on into the next slice, whose data
+    starts just after its header. Returns (slice data without headers, [(first, start, last)])
+    with start counted from the start of the slice file."""
+    slices = [bytearray()]
+    places = []
+    room = (lambda: slice_size - head - len(slices[-1])) if slice_size else (lambda: 1 << 62)
+    for c in chunks:
+        if room() < 5:
+            slices.append(bytearray())
+        first, start = len(slices) - 1, head + len(slices[-1])
+        rest = c
+        while rest:
+            if room() <= 0:
+                slices.append(bytearray())
+            take = min(room(), len(rest))
+            slices[-1] += rest[:take]
+            rest = rest[take:]
+        places.append((first, start, len(slices) - 1))
+    return [bytes(x) for x in slices], places
+
+
 def build(sp: Spec, block1_hook=None, block2_hook=None) -> tuple[bytes, dict]:
-    """The setup.exe bytes and a dict of facts the tests use (offsets, locations).
+    """The setup.exe bytes and a dict of facts the tests use (offsets, locations, and the
+    files beside setup.exe: facts["files"], name -> bytes).
 
     The hooks, when given, change the content of the header block or the file location block
     before it is framed, so the CRC-32 values written are those of the changed bytes."""
     f = F[sp.fmt]
+    sliced = sp.spanning or not sp.loader
     stored = [wf for wf in sp.files if wf.kind == "stored" and wf.location is None]
     # file data: one chunk per file, or one solid chunk
-    groups = [stored] if sp.solid else [[wf] for wf in stored]
-    setup1 = bytearray()
-    locs = []
+    groups = [g for g in ([stored] if sp.solid else [[wf] for wf in stored]) if g]
+    chunks = []
     for group in groups:
-        if not group:
-            continue
         raw = b"".join(filter_calls(wf.data) if wf.call_filter and sp.compression else wf.data
                        for wf in group)
-        packed = pack(sp.compression, raw) if sp.compression else raw
-        start = len(setup1)
-        setup1 += b"zlb\x1a" + packed
+        chunks.append(b"zlb\x1a" + (pack(sp.compression, raw) if sp.compression else raw))
+    kind = sp.slice_header or ("new" if f >= F["6.5.2"] else "old")
+    head = 16 if kind == "new" else 12
+    files: dict[str, bytes] = {}
+    slices: list[bytes] = []
+    if sliced:
+        slices, places = lay_out(chunks, head, sp.slice_size)
+        places = [(a + sp.first_slice, start, b + sp.first_slice) for a, start, b in places]
+    else:
+        places, pos = [], 0
+        for c in chunks:
+            places.append((0, pos, 0))
+            pos += len(c)
+    setup1 = b"" if sliced else b"".join(chunks)
+    locs = []
+    for (first, start, last), group, c in zip(places, groups, chunks):
         off = 0
         for wf in group:
-            locs.append((start, off, len(wf.data), len(packed), wf))
+            locs.append((first, last, start, off, len(wf.data), len(c) - 4, wf))
             off += len(wf.data)
     loc_bytes = bytearray()
-    for start, off, size, csize, wf in locs:
+    for first, last, start, off, size, csize, wf in locs:
         digest = (hashlib.sha1 if f <= F["6.3.0"] else hashlib.sha256)(wf.data).digest()
         if wf.bad_hash:
             digest = bytes(len(digest))
-        loc_bytes += i32(sp.first_slice) + i32(sp.first_slice)
+        loc_bytes += i32(first) + i32(last)
         loc_bytes += i64(start) if f >= F["6.5.2"] else i32(start)
         loc_bytes += i64(off) + i64(size) + i64(csize) + digest
         loc_bytes += struct.pack("<Q", 0x01D9000000000000) + u32(0) + u32(0)
@@ -444,17 +507,29 @@ def build(sp: Spec, block1_hook=None, block2_hook=None) -> tuple[bytes, dict]:
     if f >= F["6.5.0"]:
         enc = u8(sp.encryption_header) + bytes(48)
         setup0 += u32(crc(enc)) + enc
+    b2c = sp.block2_compressed
+    if b2c is None:
+        b2c = False if sp.spanning else sp.header_compressed
     setup0 += frame_block(block1, f, sp.header_compressed)
-    setup0 += frame_block(bytes(loc_bytes), f, sp.header_compressed)
+    setup0 += frame_block(bytes(loc_bytes), f, b2c)
+    if sliced and 1 <= sp.slices_per_disk <= 26:
+        for k, data in enumerate(slices):
+            files[slice_name(sp.stem, sp.slices_per_disk, k + sp.first_slice)] = \
+                slice_file(data, kind)
+    exe = b"compressed Setup program stand-in" * 4
+    facts = {"places": places, "locations": len(locs), "block1": block1, "files": files,
+             "head": head}
+    if not sp.loader:
+        files[f"{sp.stem}-0.bin"] = bytes(setup0)
+        program = pe_with_table(b"version information stand-in", resource_id=1)
+        facts.update(offset0=0, offset1=0, offset_exe=0, setup0=bytes(setup0))
+        return program + exe + sp.overlay, facts
     table_v = 1 if f <= F["6.4.3"] else 2
     tsize = 44 if table_v == 1 else 64
     loader_len = _loader_len(tsize)
-    if sp.spanning:
-        setup1 = bytearray()
-    offset1 = 0 if sp.spanning else loader_len
+    offset1 = 0 if sliced else loader_len
     offset0 = loader_len + len(setup1)
     offset_exe = offset0 + len(setup0)
-    exe = b"compressed Setup program stand-in" * 4
     total = offset_exe + len(exe)
     if table_v == 1:
         body = MAGIC + u32(1) + struct.pack("<IIIIII", total, offset_exe, len(exe), crc(exe),
@@ -466,8 +541,7 @@ def build(sp: Spec, block1_hook=None, block2_hook=None) -> tuple[bytes, dict]:
     loader = pe_with_table(table)
     assert len(loader) == loader_len
     data = loader + bytes(setup1) + bytes(setup0) + exe + sp.overlay
-    facts = {"offset0": offset0, "offset1": offset1, "offset_exe": offset_exe,
-             "loader": loader_len, "block1": block1, "locations": len(locs)}
+    facts.update(offset0=offset0, offset1=offset1, offset_exe=offset_exe, loader=loader_len)
     return data, facts
 
 
