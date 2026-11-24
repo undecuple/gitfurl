@@ -593,18 +593,22 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
             if idle is not None:
                 titles = titles_now()
                 newest = tracker.newest() if tracker is not None else None
+                # No window opened after the first look: name the one on top instead.
+                top = tracker.top() if tracker is not None and newest is None else None
                 event("possibly_stalled", idle_s=round(idle), after_s=options.stall_after_s,
                       windows=titles, newest_window=newest[0] if newest else None,
-                      newest_window_s=round(newest[1]) if newest else None, advisory=True)
+                      newest_window_s=round(newest[1]) if newest else None,
+                      top_window=top, advisory=True)
                 if options.on_note is not None:
-                    from gitfurl.windows import newest_text, titles_text
+                    from gitfurl.windows import newest_text, titles_text, top_text
 
                     options.on_note(
                         f"possibly stalled: no payload read, CPU use under {QUIET_CPU_PCT:g}% and no log "
                         f"growth for "
                         f"{_dur(idle)}. This is advice only; nothing was stopped, and slow "
                         f"phases can be normal." + titles_text(titles)
-                        + (newest_text(newest, sample.elapsed_s) if titles else ""))
+                        + (newest_text(newest, sample.elapsed_s)
+                           + (top_text(top) if len(titles) > 1 else "") if titles else ""))
             if options.on_progress is not None:
                 options.on_progress(sample)
 

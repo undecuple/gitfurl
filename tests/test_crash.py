@@ -58,8 +58,8 @@ xwininfo: Window id: 0x1d5 (the root window) (has no name)
      0x1e00007 "Error": ("setup.tmp" "setup.tmp")  400x120+0+0  +300+300
      0x1e00009 "Setup - Game": ("setup.tmp" "setup.tmp")  500x380+0+0  +200+200
      0x2a00003 "Error": ("kitty" "kitty")  800x600+0+0  +0+0
-     0x1e0000b "": ("setup.tmp" "setup.tmp")  1x1+0+0  +0+0
-     0x1e0000d "Default IME": ("setup.tmp" "setup.tmp")  1x1+0+0  +0+0
+     0x1e0000b "": ("setup.tmp" "setup.tmp")  300x100+0+0  +0+0
+     0x1e0000d "Default IME": ("setup.tmp" "setup.tmp")  300x100+0+0  +0+0
      0x3c00001 "Other "quoted" C:\\dir\\": ("averyveryverylongname.exe" "averyveryverylongname.exe")  10x10+0+0  +0+0
 '''
 
@@ -74,6 +74,7 @@ class WindowTitleTests(unittest.TestCase):
             p.chmod(0o700)
         self.env = {"DISPLAY": ":9", "PATH": self.bin.name}
         self.calls = []
+        self.unmapped = set()
 
     def fake(self, pids_by_window, tree=TREE, fail=None):
         def run(argv, **kw):
@@ -81,6 +82,9 @@ class WindowTitleTests(unittest.TestCase):
             self.assertLessEqual(kw["timeout"], windows.TIMEOUT_S)
             if fail == argv[0].rsplit("/", 1)[-1]:
                 raise subprocess.TimeoutExpired(argv, 2)
+            if argv[0].endswith("xwininfo") and "-id" in argv:
+                state = "IsUnMapped" if argv[2] in self.unmapped else "IsViewable"
+                return subprocess.CompletedProcess(argv, 0, f"  Map State: {state}\n", "")
             if argv[0].endswith("xwininfo"):
                 return subprocess.CompletedProcess(argv, 0, tree, "")
             pid = pids_by_window.get(argv[2])
@@ -114,7 +118,7 @@ class WindowTitleTests(unittest.TestCase):
         self.assertEqual([c[0].rsplit("/", 1)[-1] for c in self.calls], ["xwininfo"])  # the failing one
 
     def test_checks_are_bounded(self):
-        tree = "".join(f'     0x{n:x} "W{n}": ("setup.tmp" "setup.tmp")  1x1+0+0  +0+0\n'
+        tree = "".join(f'     0x{n:x} "W{n}": ("setup.tmp" "setup.tmp")  300x100+0+0  +0+0\n'
                        for n in range(100))
         run = self.fake({}, tree=tree)
         self.assertEqual(windows.window_titles([11], ["setup.tmp"], self.env, run), [])
@@ -127,7 +131,7 @@ class WindowTitleTests(unittest.TestCase):
                                                self.env, run), ["Program Error"])
 
     def test_one_overall_deadline(self):
-        tree = "".join(f'     0x{n:x} "W{n}": ("setup.tmp" "setup.tmp")  1x1+0+0  +0+0\n'
+        tree = "".join(f'     0x{n:x} "W{n}": ("setup.tmp" "setup.tmp")  300x100+0+0  +0+0\n'
                        for n in range(10))
         clock = iter([0.0, 1.0, 2.5, 3.5, 9.0, 9.0])
         run = self.fake({}, tree=tree)
@@ -139,8 +143,10 @@ class WindowTitleTests(unittest.TestCase):
     def test_titles_text(self):
         self.assertEqual(windows.titles_text(None), "")
         self.assertEqual(windows.titles_text([]), "")
-        self.assertIn('"Error"; one of them may be waiting for an answer',
+        self.assertIn('Window open in the run: "Error"; it may be waiting for an answer',
                       windows.titles_text(["Error"]))
+        self.assertIn('"Error", "Setup"; one of them may be waiting for an answer',
+                      windows.titles_text(["Error", "Setup"]))
 
 
 class CrashNoteTests(RunEventHelpers, unittest.TestCase):
@@ -202,7 +208,7 @@ class CrashNoteTests(RunEventHelpers, unittest.TestCase):
                           window_titles=lambda pids, programs, env: ["Error"])
         stall = [n for n in notes if n.startswith("possibly stalled")]
         self.assertEqual(len(stall), 1)
-        self.assertIn('Windows open in the run: "Error"', stall[0])
+        self.assertIn('Window open in the run: "Error"', stall[0])
         self.assertIsNone(res.crash_seen_s)
         self.assertNotIn("Crash:", describe_result(res))
 
@@ -229,6 +235,42 @@ class CrashNoteTests(RunEventHelpers, unittest.TestCase):
         ev = [e for e in evs if e["event"] == "possibly_stalled"][0]
         self.assertEqual(ev["newest_window"], "Error")
         self.assertIsInstance(ev["newest_window_s"], int)
+        self.assertIsNone(ev["top_window"])
+        self.assertNotIn("The one on top", stall[0])
+
+    def test_stall_note_names_the_top_window_of_several_open_from_the_start(self):
+        self.fake_prefix_process(0)
+        notes = []
+        res = self.run_it(self.sleeper(1.0), stall_after_s=250, clock=FakeClock(100),
+                          on_note=notes.append, detailed_log=True,
+                          window_list=lambda *a, **k: [("0x6", "Select Setup Language"),
+                                                       ("0x1", "Setup - Game")])
+        stall = [n for n in notes if n.startswith("possibly stalled")]
+        self.assertTrue(stall)
+        self.assertIn('The one on top, "Select Setup Language", is the most likely', stall[0])
+        self.assertNotIn("The newest of them", stall[0])
+        evs, _text = self.events(res)
+        ev = [e for e in evs if e["event"] == "possibly_stalled"][0]
+        self.assertEqual((ev["newest_window"], ev["top_window"]),
+                         (None, "Select Setup Language"))
+
+    def test_one_window_open_from_the_start_is_listed_not_named_twice(self):
+        # The sandbox run of 2026-11-24: the language dialog was open at the first look.
+        self.fake_prefix_process(0)
+        notes = []
+        res = self.run_it(self.sleeper(1.0), stall_after_s=250, clock=FakeClock(100),
+                          on_note=notes.append, detailed_log=True,
+                          window_list=lambda *a, **k: [("0x6", "Select Setup Language")])
+        stall = [n for n in notes if n.startswith("possibly stalled")]
+        self.assertTrue(stall)
+        self.assertIn('Window open in the run: "Select Setup Language"; it may be waiting',
+                      stall[0])
+        self.assertNotIn("The one on top", stall[0])  # one window: the list says it all
+        self.assertNotIn("The newest of them", stall[0])
+        evs, _text = self.events(res)
+        ev = [e for e in evs if e["event"] == "possibly_stalled"][0]
+        self.assertEqual((ev["newest_window"], ev["top_window"]),
+                         (None, "Select Setup Language"))
 
     def test_no_crash_no_line_and_a_failing_window_reader_is_ignored(self):
         self.fake_prefix_process(0)
@@ -340,14 +382,44 @@ class WindowListCacheTests(WindowTitleTests):
 
 class WindowListOrderTests(WindowTitleTests):
     def tree(self, n):
-        return "".join(f'     0x{i:x} "W{i}": ("setup.tmp" "setup.tmp")  1x1+0+0  +0+0\n'
+        return "".join(f'     0x{i:x} "W{i}": ("setup.tmp" "setup.tmp")  300x100+0+0  +0+0\n'
                        for i in range(1, n + 1))
 
     def test_the_caps_keep_the_topmost_windows(self):
         run = self.fake({f"0x{i:x}": 11 for i in range(1, 21)}, tree=self.tree(20))
         got = windows.window_list([11], ["setup.tmp"], self.env, run)
-        # xwininfo lists bottom to top: the last lines are the newest windows.
-        self.assertEqual([t for _w, t in got], [f"W{i}" for i in range(15, 21)])
+        # xwininfo lists the topmost window first (seen with Xvfb in the sandbox).
+        self.assertEqual([t for _w, t in got], [f"W{i}" for i in range(1, 7)])
+
+    def test_hidden_helper_windows_are_left_out(self):
+        # As listed in the sandbox run of 2026-11-24 (an Inno Setup installer at its
+        # language dialog): only the dialog is a window a user can answer.
+        tree = (
+            '     0xe00006 "Select Setup Language": ("setup.tmp" "setup.tmp")  297x125+171+190  +171+190\n'
+            '     0xe00003 "Setup": ("setup.tmp" "setup.tmp")  1x1+320+240  +320+240\n'
+            '     0xa00001 "InnoSetupLdrWindow": ("setup.exe" "setup.exe")  113x2+3+29  +3+29\n')
+        run = self.fake({"0xe00006": 11, "0xe00003": 11, "0xa00001": 12}, tree=tree)
+        got = windows.window_titles([11, 12], ["setup.tmp", "setup.exe"], self.env, run)
+        self.assertEqual(got, ["Select Setup Language"])
+        checked = [c[2] for c in self.calls if c[0].endswith("xprop")]
+        self.assertEqual(checked, ["0xe00006"])  # no probe for the hidden ones
+
+    def test_an_unmapped_window_is_left_out(self):
+        # A hidden form of normal size, created after the dialog, is listed on top.
+        tree = ('     0x9 "Hidden form": ("setup.tmp" "setup.tmp")  400x300+0+0  +0+0\n'
+                '     0x6 "Select Setup Language": ("setup.tmp" "setup.tmp")  297x125+0+0  +0+0\n')
+        self.unmapped = {"0x9"}
+        run = self.fake({"0x9": 11, "0x6": 11}, tree=tree)
+        self.assertEqual(windows.window_titles([11], ["setup.tmp"], self.env, run),
+                         ["Select Setup Language"])
+        self.unmapped = set()  # shown later: listed then
+        self.assertEqual(windows.window_titles([11], ["setup.tmp"], self.env, run),
+                         ["Hidden form", "Select Setup Language"])
+
+    def test_a_line_without_a_size_is_kept(self):
+        tree = '     0x7 "Error": ("setup.tmp" "setup.tmp")\n'
+        run = self.fake({"0x7": 11}, tree=tree)
+        self.assertEqual(windows.window_titles([11], ["setup.tmp"], self.env, run), ["Error"])
 
     def test_closed_windows_leave_the_cache(self):
         cache = {"0x99": 11, "0x1": 11}
@@ -363,6 +435,16 @@ class TrackerBaselineTests(unittest.TestCase):
         for s in (3.0, 6.0, 9.0):
             t.observe([1], ["x"], s)
         self.assertEqual(t.newest(), ("Unpacking", 6.0))
+
+    def test_top_window_when_nothing_opened_after_the_first_look(self):
+        looks = [[("d", "Select Setup Language")], [("d", "Select Setup Language")]]
+        t = windows.WindowTracker({}, lambda *a, **k: looks.pop(0))
+        for s in (10.0, 20.0):
+            t.observe([1], ["x"], s)
+        self.assertIsNone(t.newest())
+        self.assertEqual(t.top(), "Select Setup Language")
+        self.assertIn('The one on top, "Select Setup Language"', windows.top_text(t.top()))
+        self.assertEqual(windows.top_text(None), "")
 
     def test_a_failed_look_forgets_the_open_windows(self):
         looks = [[("a", "Setup")], [("a", "Setup"), ("b", "Error")], None]
