@@ -31,7 +31,8 @@ must equal the file's. A chunk starts at StartOffset in slice FirstSlice and run
 that file, then on from just after the header of each next slice, ending in LastSlice. Only the
 installer's own folder is searched (names match without regard to letter case); the summary
 lists the slice files, present or missing, by name only. Formats and layouts that were never
-checked against a real installer are noted as unverified (all slice and setup-0.bin reading).
+checked against a real installer are noted as unverified (slice and setup-0.bin reading was
+checked for data formats 6.3.0, 6.7.0 and 7.1.1 only).
 
 Extraction (plan_inno_extract, extract_inno_files) writes only the files stored in setup.exe
 or its slice files whose destination is under {app}, for the default choice of setup type,
@@ -76,6 +77,9 @@ _F = {name: i for i, name in enumerate(FORMATS)}
 F550, F556, F557, F600, F610, F630, F6401, F642, F643, F650, F652, F660, F661, F670, \
     F7001, F7003, F711 = range(len(FORMATS))
 VERIFIED_FORMATS = frozenset(["5.5.0", "5.5.7", "6.3.0", "6.7.0", "7.1.1"])  # 5.5.0: variant
+# Slice files and setup-0.bin were checked against setups built with the official compilers
+# (6.3.3, 6.7.4, 7.1.1) on 2026-11-23; other formats follow the specification only.
+SLICES_VERIFIED_FORMATS = frozenset(["6.3.0", "6.7.0", "7.1.1"])
 
 _ID_PREFIX = b"Inno Setup Setup Data ("
 _IDS = {(f"Inno Setup Setup Data ({v})" + (" (u)" if _F[v] <= F610 else "")).encode(): v
@@ -1445,6 +1449,8 @@ def _read(fd: int, path: Path, size: int) -> Setup:
     try:
         dfd, dsize = _open(side)
     except InnoError as exc:
+        if not os.path.isfile(side) or os.path.islink(side):
+            raise InnoError(NO_TABLE) from exc  # not a file: no evidence of a setup here
         raise InnoError(f"the setup data file {name} beside the installer could not be read: "
                         f"{exc}") from exc
     try:
@@ -1538,10 +1544,11 @@ def _read_data(hfd: int, hsize: int, path: Path, size: int, t: _Table | None,
     if not setup.verified:
         setup.notes.append(f"data format {fmt} was never checked against a real installer; "
                            "it follows the specification only (unverified)")
-    if setup.slice_layout:
+    if setup.slice_layout and fmt not in SLICES_VERIFIED_FORMATS:
         setup.notes.append("reading slice files" + (" and setup-0.bin" if side else "")
-                           + " follows the specification only; it was never checked against "
-                           "a real installer (unverified)")
+                           + f" for data format {fmt} follows the specification only; it was "
+                           "checked against real installers only for formats "
+                           + ", ".join(sorted(SLICES_VERIFIED_FORMATS)) + " (unverified)")
     if side is not None and pos < hsize:
         setup.notes.append(f"{hsize - pos:,} bytes after the setup data in "
                            f"{_clean(side.name, 60)} were ignored")
@@ -1615,6 +1622,12 @@ def check_slice_header(raw: bytes, size: int, f: int) -> int:
     return head
 
 
+def _fold(name: str) -> str:
+    """Letter case folded one character at a time, never changing the length (str.casefold
+    turns 'ß' into 'ss', which Windows does not treat as the same name)."""
+    return "".join(c.lower() if len(c.lower()) == 1 else c for c in name)
+
+
 class _Beside:
     """Files in the installer's folder, found by name without regard to letter case (as
     Windows does). An exact match wins; names that differ only in letter case are not
@@ -1635,10 +1648,10 @@ class _Beside:
                     for k, e in enumerate(it):
                         if k >= MAX_DIR_ENTRIES:
                             break
-                        self.names.setdefault(e.name.casefold(), []).append(e.name)
+                        self.names.setdefault(_fold(e.name), []).append(e.name)
             except OSError:
                 pass
-        got = self.names.get(name.casefold(), [])
+        got = self.names.get(_fold(name), [])
         if len(got) > 1:
             raise InnoError(f"several files beside the installer are named {_clean(name, 60)} "
                             "in different letter case; gitfurl does not guess between them")
@@ -1661,6 +1674,10 @@ def _open_slice(path: Path, f: int) -> tuple[int, int]:
     except InnoError as exc:
         os.close(fd)
         raise InnoError(f"slice file {name}: {exc}") from exc
+    except OSError as exc:
+        os.close(fd)
+        raise InnoError(f"slice file {name} could not be read ({exc.strerror or exc})") \
+            from exc
     except BaseException:
         os.close(fd)
         raise

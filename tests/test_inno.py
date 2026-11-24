@@ -1262,6 +1262,46 @@ class Spanning(Base):
         with self.assertRaisesRegex(ExtractRefused, "different letter case"):
             self.plan()
 
+    def test_exact_slice_name_wins_over_other_letter_case(self):
+        self.build(loader=False, spanning=True, slice_size=20000)
+        shutil.copy(self.src / "setup-2.bin", self.src / "SETUP-2.BIN")
+        self.assertTrue(inno.extract_inno_files(self.plan()).ok)
+
+    def test_letter_case_does_not_expand_characters(self):
+        self.assertEqual(inno._fold("STRASSE-1.bin"), "strasse-1.bin")
+        self.assertNotEqual(inno._fold("straße-1.bin"), inno._fold("STRASSE-1.bin"))
+        self.assertEqual(inno._fold("ÄÖ-1.BIN"), "äö-1.bin")
+        (self.src / "straße-1.bin").write_bytes(b"x")
+        self.assertIsNone(inno._Beside(self.src).find("STRASSE-1.bin"))
+
+    def test_io_error_on_a_slice_header_is_a_plain_refusal(self):
+        self.build(spanning=True, slice_size=20000)
+        real = inno._pread
+
+        def eio(fd, n, at):
+            if n == 16 and at == 0:
+                raise OSError(5, "Input/output error")
+            return real(fd, n, at)
+        with mock.patch.object(inno, "_pread", eio):
+            with self.assertRaisesRegex(ExtractRefused, "could not be read .Input/output error"):
+                self.plan()
+        self.assertFalse(self.dest().exists())
+
+    def test_folder_named_setup0_is_not_an_inno_setup(self):
+        data, _ = w.build(full_spec(loader=False))
+        self.write_set(data, {})
+        (self.src / "setup-0.bin").mkdir()
+        with self.assertRaisesRegex(inno.InnoError, "no Inno Setup offset table"):
+            inno.read_setup(self.setup)
+
+    def test_slice_note_says_unverified_only_for_unchecked_formats(self):
+        for fmt, unverified in (("7.1.1", False), ("6.5.0", True)):
+            with self.subTest(fmt=fmt):
+                self.clear()
+                self.build(fmt=fmt, spanning=True, slice_size=20000)
+                notes = " ".join(inno.read_setup(self.setup).notes)
+                self.assertEqual("reading slice files" in notes, unverified, notes)
+
     def test_unexpected_layouts_are_refused(self):
         for kw, reason in (
                 (dict(spanning=True, block2_compressed=True), "unexpected layout: the file data"),
@@ -1415,7 +1455,7 @@ class Spanning(Base):
         self.assertIn(f"slice files: {len(names)} files named by the file locations: "
                       f"{', '.join(names)} (all present)", text)
         self.assertIn("files stored in its slice files", text)
-        self.assertIn("unverified", text)
+        self.assertNotIn("unverified", text)  # 7.1.1 slices were checked with real setups
         (self.src / "setup-2.bin").unlink()
         text = detect.describe(detect.detect(self.setup))
         self.assertIn("(1 missing)", text)
