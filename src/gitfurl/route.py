@@ -247,6 +247,29 @@ def choose_route(installer: Path, prefix_name: str, det: Detection, requested: s
     return RouteChoice(ROUTE_NATIVE, by, tuple(reasons), plan)
 
 
+def setup_unpacked(installer: Path, det: Detection):
+    """For a Setup run's preflight: extract.unpacked_size() of the archives beside the
+    installer, but only when they belong to it as the route judges that (an Inno Setup
+    installer or a FreeArc one, and archives linked to it by its script or by name), so
+    unrelated archives in the same folder (a downloads folder) are not counted. None
+    otherwise. Read-only; never raises for a folder it cannot read."""
+    from gitfurl.extract import ExtractRefused, find_archives, unpacked_size
+
+    installer = Path(installer)
+    inno = _inno(det)
+    if not (inno or _starts_with_freearc(installer)):
+        return None
+    try:
+        paths, _notes = find_archives(installer)
+    except (ExtractRefused, OSError):
+        return None
+    if not paths:
+        return None
+    unlinked, _linked = link_check(installer, paths, script_names(installer) if inno else None,
+                                   has_script=inno)
+    return None if unlinked else unpacked_size(installer)
+
+
 # --- the native plan ------------------------------------------------------------------------
 
 @dataclass
