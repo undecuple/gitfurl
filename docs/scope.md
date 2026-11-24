@@ -37,5 +37,5 @@ Searching for or downloading installers or games, bundled installers or assets, 
 
 ## Limitations and open questions
 - Wine was not available when M1 was written, so `doctor` was only tested with mocks.
-- Interface toolkits (TUI, GUI) are not chosen. See `docs/architecture.md`.
+- Interface: a tkinter window first, with the command line (`gitfurl cli`) as the opt-in alternative; there is no TUI. See `docs/architecture.md`.
 - Licence: GPL-3.0-or-later chosen by the maintainer.
