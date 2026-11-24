@@ -156,6 +156,7 @@ class DbInfo:
     db_version: str | None = None
     db_date: datetime | None = None
     problem: str | None = None
+    directory: str | None = None  # the database folder, when it came from clamconf
 
     def age_days(self, now: datetime | None = None) -> float | None:
         if self.db_date is None:
@@ -176,7 +177,7 @@ def parse_version(text: str) -> DbInfo:
     parts = first[len("ClamAV "):].split("/")
     info.engine = clean(parts[0].strip(), 40)
     if len(parts) < 3:
-        info.problem = "no signature database reported (clamscan found none)"
+        info.problem = NO_DATABASE
         return info
     info.db_version = clean(parts[1].strip(), 40)
     try:
@@ -187,10 +188,61 @@ def parse_version(text: str) -> DbInfo:
     return info
 
 
-def database_info(clamscan: str, runner=subprocess.run) -> DbInfo:
-    """Run `clamscan --version` (a bounded probe, as `doctor` does for wine). Never raises."""
+NO_DATABASE = "no signature database reported (clamscan found none)"
+
+
+def _probe(argv: list[str], runner):
+    """Run a bounded read-only probe. (text, None) or (None, problem). Never raises."""
     try:  # bytes, decoded below with replacement: odd output cannot raise
-        proc = runner([clamscan, "--version"], capture_output=True,
+        proc = runner(argv, capture_output=True, timeout=VERSION_TIMEOUT_S, check=False,
+                      stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return None, f"timed out after {VERSION_TIMEOUT_S}s"
+    except (OSError, ValueError) as exc:
+        return None, f"could not run: {getattr(exc, 'strerror', None) or exc}"
+    if proc.returncode != 0:
+        return None, f"exited with status {proc.returncode}"
+    out = proc.stdout or b""
+    return (out.decode("utf-8", "replace") if isinstance(out, bytes) else out), None
+
+
+def database_dir(clamscan: str, runner=subprocess.run, which=shutil.which) -> str | None:
+    """The folder ClamAV reads its signatures from, as `clamconf` (ClamAV's own read-only
+    configuration report, next to clamscan or on PATH) names it, or None."""
+    beside = Path(clamscan).with_name("clamconf")
+    clamconf = str(beside) if os.access(beside, os.X_OK) else which("clamconf")
+    if not clamconf:
+        return None
+    text, _problem = _probe([clamconf], runner)
+    for line in (text or "").splitlines():
+        if line.startswith("Database directory:"):
+            folder = line.partition(":")[2].strip()
+            return folder if folder and len(folder.splitlines()) == 1 else None
+    return None
+
+
+def database_info(clamscan: str, runner=subprocess.run, which=shutil.which) -> DbInfo:
+    """Run `clamscan --version` (a bounded probe, as `doctor` does for wine). Never raises.
+
+    Some ClamAV builds (1.5 here) print only the engine for `--version` and read no database
+    then. In that case the database folder is asked of `clamconf`, and `clamscan
+    --database=FOLDER --version` is run once more; that is the folder a scan reads too."""
+    info = _database_info([clamscan, "--version"], runner)
+    if info.problem != NO_DATABASE:
+        return info
+    folder = database_dir(clamscan, runner, which)
+    if folder is None:
+        return info
+    again = _database_info([clamscan, f"--database={folder}", "--version"], runner)
+    if again.db_version is None:
+        return info
+    again.directory = clean(folder, 200)
+    return again
+
+
+def _database_info(argv: list[str], runner) -> DbInfo:
+    try:  # bytes, decoded below with replacement: odd output cannot raise
+        proc = runner(argv, capture_output=True,
                       timeout=VERSION_TIMEOUT_S, check=False, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return DbInfo("", problem=f"version check timed out after {VERSION_TIMEOUT_S}s")
@@ -208,7 +260,8 @@ def describe_database(info: DbInfo, now: datetime | None = None) -> list[str]:
     lines = [f"ClamAV version line: {info.line or '(none)'}"]
     if info.db_date is not None:
         age = info.age_days(now)
-        lines.append(f"signature database {info.db_version}, dated {info.date_text()}")
+        where = f" in {info.directory} (from clamconf)" if info.directory else ""
+        lines.append(f"signature database {info.db_version}, dated {info.date_text()}{where}")
         if age is not None and age > DB_WARN_DAYS:
             lines.append(f"WARNING: the signature database is {int(age)} days old (more than "
                          f"{DB_WARN_DAYS}). Update it yourself with freshclam; gitfurl never "

@@ -121,9 +121,13 @@ def _clamscan_lines(t: ToolReport) -> list[str]:
     note = " (optional, for --scan; gitfurl never updates its database)"
     if t.problem:
         return [f"clamscan: unavailable ({t.problem}){note}"]
-    from gitfurl.scan import describe_database, parse_version
+    from gitfurl.scan import NO_DATABASE, database_info, describe_database, parse_version
 
     info = parse_version(t.version or "")
+    if info.problem == NO_DATABASE and t.path:  # ClamAV 1.5: --version alone reads no database
+        found = database_info(t.path)
+        if found.db_version is not None:
+            info = found
     engine = f"ClamAV {info.engine}" if info.engine else "version not recognised"
     return [f"clamscan: {engine} at {t.path}{note}",
             *(f"  {ln}" for ln in describe_database(info))]
