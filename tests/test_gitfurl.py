@@ -1612,6 +1612,36 @@ class PrefixGroupTests(unittest.TestCase):
         server = (Path(self.tmp.name) / "server.txt").read_text().strip()
         self.assertEqual(server, f"-k WINEPREFIX={Path(self.tmp.name) / 'p'}")
 
+    def test_should_stop_ends_the_group_from_another_thread(self):
+        # The window's Stop during prefix creation: the run waits on a worker thread, where
+        # no Ctrl-C can reach it.
+        import threading
+        import time
+
+        from gitfurl.prefixes import PrefixStopped, run_in_group
+
+        box, stop = {}, threading.Event()
+
+        def work():
+            try:
+                run_in_group(self.argv, self.env, 60, str(Path(self.tmp.name) / "wine"),
+                             grace_s=2, should_stop=stop.is_set)
+            except PrefixStopped as exc:
+                box["exc"] = exc
+
+        th = threading.Thread(target=work)
+        th.start()
+        pids = self._pids()
+        stop.set()
+        th.join(30)
+        self.assertIn("exc", box)
+        self.assertIn("asked this prefix's Wine server to exit", "; ".join(box["exc"].notes))
+        for pid in pids:
+            end = time.monotonic() + 5
+            while pid_alive(pid) and time.monotonic() < end:
+                time.sleep(0.05)
+            self.assertFalse(pid_alive(pid), pid)
+
     def test_ctrl_c_ends_the_group_and_reraises(self):
         import signal
         import threading

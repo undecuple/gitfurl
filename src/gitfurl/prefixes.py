@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from pathlib import Path
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
@@ -137,8 +138,15 @@ def _cleanup_group(proc, env: dict[str, str], wine: str, grace_s: float, guard) 
     return notes
 
 
+class PrefixStopped(Exception):
+    """Stop was asked for (a Stop button) while wineboot ran. `notes` says what was done."""
+
+
+STOP_POLL_S = 0.2
+
+
 def run_in_group(argv: list[str], env: dict[str, str], timeout: float, wine: str,
-                 grace_s: float = 5.0):
+                 grace_s: float = 5.0, should_stop=None):
     """Run argv in its own process group and wait up to `timeout` seconds.
 
     On a timeout or Ctrl-C only that group is signalled (TERM, then KILL), then this
@@ -146,6 +154,10 @@ def run_in_group(argv: list[str], env: dict[str, str], timeout: float, wine: str
     the group is out of reach. A second Ctrl-C during the cleanup is held back and only
     shortens the grace wait. The exception that ends the wait (subprocess.TimeoutExpired or
     KeyboardInterrupt) is re-raised with a `notes` list saying what was really done.
+
+    `should_stop` (a callable, for a Stop button on another thread) is asked every
+    STOP_POLL_S seconds; when it returns true the group is ended the same way and
+    PrefixStopped is raised.
     """
     import subprocess
 
@@ -159,7 +171,19 @@ def run_in_group(argv: list[str], env: dict[str, str], timeout: float, wine: str
             guard.release()
             if guard.hits:
                 raise KeyboardInterrupt
-            return subprocess.CompletedProcess(argv, proc.wait(timeout))
+            if should_stop is None:
+                return subprocess.CompletedProcess(argv, proc.wait(timeout))
+            deadline = time.monotonic() + timeout
+            while True:
+                if should_stop():
+                    raise PrefixStopped("stopped while the prefix was being created")
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                try:
+                    return subprocess.CompletedProcess(argv, proc.wait(min(STOP_POLL_S, left)))
+                except subprocess.TimeoutExpired:
+                    continue
         except BaseException as exc:
             guard.hits = 0  # a Ctrl-C held before the start is this exception, not a second one
             guard.__enter__()
@@ -170,7 +194,7 @@ def run_in_group(argv: list[str], env: dict[str, str], timeout: float, wine: str
 
 
 def create_prefix(name: str, wine: str, env: dict[str, str] | None = None, run=None,
-                  extra_env: dict[str, str] | None = None, wrap=None) -> int:
+                  extra_env: dict[str, str] | None = None, wrap=None, should_stop=None) -> int:
     """Create a dedicated prefix. Refuses to touch an existing path. Returns wine's exit status.
 
     An empty marker file (INCOMPLETE_MARKER) is written in the new folder before wineboot
@@ -179,6 +203,8 @@ def create_prefix(name: str, wine: str, env: dict[str, str] | None = None, run=N
     Without an injected `run` (tests), wineboot runs in its own process group so a timeout
     or Ctrl-C can end it and its helpers (see run_in_group). `wrap`, if given, turns the
     wineboot argv into the argv to start (the memory limit's systemd-run scope).
+    `should_stop` lets a Stop button end wineboot (see run_in_group); PrefixStopped is then
+    raised and the folder is kept with its marker, so it is never used as a complete prefix.
     """
     import subprocess
 
@@ -198,9 +224,16 @@ def create_prefix(name: str, wine: str, env: dict[str, str] | None = None, run=N
     argv = wrap(plan["argv"]) if wrap else plan["argv"]
     try:
         if run is None:
-            proc = run_in_group(argv, env=child, timeout=WINEBOOT_TIMEOUT_S, wine=wine)
+            proc = run_in_group(argv, env=child, timeout=WINEBOOT_TIMEOUT_S, wine=wine,
+                                should_stop=should_stop)
         else:
             proc = run(argv, env=child, timeout=WINEBOOT_TIMEOUT_S, check=False)
+    except PrefixStopped as exc:
+        done = "; ".join(getattr(exc, "notes", [])) or "no cleanup details"
+        raise PrefixStopped(
+            f"creating the prefix was stopped ({path}). What gitfurl did: {done}. The prefix "
+            "folder was kept and is marked incomplete, so gitfurl will not use it; delete the "
+            "folder yourself before using that name again.") from exc
     except subprocess.TimeoutExpired as exc:
         done = "; ".join(getattr(exc, "notes", [])) or "no cleanup details"
         raise RuntimeError(

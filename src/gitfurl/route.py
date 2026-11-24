@@ -407,11 +407,13 @@ def _rate_text(done: int, total: int, elapsed: float) -> str:
 
 def run_native(plan: NativeInstallPlan, cancel=None, on_line=None, detailed_log: bool = False,
                progress_interval: float = 10.0, env: dict[str, str] | None = None,
-               scan_summary: str | None = None, clock=time.monotonic) -> NativeResult:
+               scan_summary: str | None = None, clock=time.monotonic,
+               on_progress=None) -> NativeResult:
     """Unpack an approved native plan. The prefix must exist. Starts no process.
 
-    `on_line(text)` receives throttled progress lines (on this thread; there is no progress
-    thread). Raises ExtractRefused before anything is written (nothing was created then
+    `on_line(text)` receives throttled progress lines and `on_progress(done, total, elapsed)`
+    the same samples as numbers (both on this thread; there is no progress thread). Raises
+    ExtractRefused before anything is written (nothing was created then
     except, rarely, empty folders the refusal lists); afterwards every problem is in the
     result. A Ctrl-C while files are written ends the unpack (status 130); files already
     written are kept. A Ctrl-C after the unpack has returned (while the listings or the report
@@ -453,6 +455,8 @@ def run_native(plan: NativeInstallPlan, cancel=None, on_line=None, detailed_log:
         event("progress", bytes_written=done, total_bytes=total, percent=pct)
         if on_line is not None:
             on_line(_rate_text(done, total, now - t0))
+        if on_progress is not None:
+            on_progress(done, total, now - t0)
 
     result = None
     try:
@@ -523,11 +527,12 @@ def run_native(plan: NativeInstallPlan, cancel=None, on_line=None, detailed_log:
 
 
 def native_prefix_create(plan: NativeInstallPlan, memory_limit: bool,
-                         env: dict[str, str] | None = None, run=None) -> int:
+                         env: dict[str, str] | None = None, run=None, should_stop=None) -> int:
     """Create the plan's prefix with wineboot, as the Wine route does (same memory scope when
     the memory limit is on), with Wine's Mono and Gecko dialogs turned off for that command
     only (NATIVE_WINEBOOT_ENV). Returns wine's exit status. Raises as create_prefix does, and
-    MemoryLimitError when the limit was asked for and cannot be used."""
+    MemoryLimitError when the limit was asked for and cannot be used. `should_stop` lets a
+    Stop button end wineboot (prefixes.PrefixStopped)."""
     from gitfurl.prefixes import create_prefix
 
     scope = None
@@ -538,7 +543,169 @@ def native_prefix_create(plan: NativeInstallPlan, memory_limit: bool,
     try:
         return create_prefix(plan.prefix_name, plan.wine or "wine", env, run,
                              extra_env=dict(NATIVE_WINEBOOT_ENV),
-                             wrap=scope.wrap if scope else None)
+                             wrap=scope.wrap if scope else None, should_stop=should_stop)
     finally:
         if scope is not None:
             scope.finish()
+
+
+# --- what stops a native run before anything is done (the command line and the window) ----
+
+@dataclass(frozen=True)
+class NativeStop:
+    kind: str  # no_prefix | no_wine | scope | space | memory
+    detail: str = ""
+
+    @property
+    def memory_related(self) -> bool:
+        """The command line exits with status 2 for these (status 1 for the others)."""
+        return self.kind in ("scope", "memory")
+
+
+def native_stops(xplan, *, missing: bool, create_ok: bool, wine: str | None,
+                 scope_problem: str | None, memory_check: bool,
+                 meminfo: str = "/proc/meminfo") -> list[NativeStop]:
+    """Why a native run of `xplan` must not start, in the order they are reported. Reads
+    `/proc/meminfo` and free space only; changes nothing.
+
+    missing: the prefix folder does not exist; create_ok: creating it was asked for;
+    wine: the Wine found on PATH (needed only to create the prefix); scope_problem: why the
+    memory limit cannot be used for wineboot (None if it can, or is off); memory_check: compare
+    the decoders' memory with free memory.
+    """
+    create = missing and create_ok
+    stops = []
+    if missing and not create_ok:
+        stops.append(NativeStop("no_prefix", str(xplan.prefix)))
+    if create and wine is None:
+        stops.append(NativeStop("no_wine"))
+    if scope_problem:
+        stops.append(NativeStop("scope", scope_problem))
+    # For a prefix still to be created, the space is measured on the nearest existing folder
+    # above it, with room for the prefix itself, so nothing is created when it cannot fit.
+    problem = (xplan.space_problem_before_prefix(PREFIX_ALLOWANCE) if create
+               else None if missing else xplan.problem())
+    if problem:
+        stops.append(NativeStop("space", problem))
+    if memory_check:
+        mem = memory_problem(xplan.memory, meminfo)
+        if mem:
+            stops.append(NativeStop("memory", mem))
+    return stops
+
+
+# --- one approved native run on a worker thread (the window) ------------------------------
+
+class NativeControl:
+    """Stop for a native run started on another thread: the scan, wineboot and the unpack
+    each check it. Only gitfurl's own processes (the scan's and wineboot's groups) are ever
+    signalled."""
+
+    def __init__(self):
+        import threading
+
+        self.event = threading.Event()
+        self.notes: list[str] = []
+
+    @property
+    def cancelled(self) -> bool:
+        return self.event.is_set()
+
+    def request_stop(self) -> list[str]:
+        self.event.set()
+        return self.notes
+
+
+@dataclass
+class NativeOutcome:
+    """How perform_native ended. `result` is the unpack's NativeResult when it ran; otherwise
+    `message` says why nothing (or only the prefix) was done, and `status` is 1, 2 or 130."""
+
+    status: int
+    message: str | None = None
+    result: NativeResult | None = None
+    scan_summary: str | None = None
+    prefix_created: bool = False
+
+
+def perform_native(plan: NativeInstallPlan, control: NativeControl, *, memory_limit: bool,
+                   scan_plan=None, scan_result=None, allow_scan_hit: bool = False,
+                   on_progress=None, on_note=None, detailed_log: bool = False,
+                   progress_interval: float = 3.0, env: dict[str, str] | None = None,
+                   create=native_prefix_create, run=run_native) -> NativeOutcome:
+    """Run an approved native plan, in the command line's order: the ClamAV scan (if any),
+    the prefix creation (if asked), then the unpack. Meant for a worker thread.
+
+    Raises scan.ScanBlocked when the scan stops the run (so the caller can offer the override
+    the Wine route offers). Every other problem is returned as a NativeOutcome. The caller
+    does the cleanup, as before.
+    """
+    import subprocess
+
+    from gitfurl.extract import ExtractRefused
+    from gitfurl.memlimit import MemoryLimitError
+    from gitfurl.prefixes import PrefixStopped
+
+    summary = None
+    if scan_plan is not None:
+        from gitfurl.scan import ScanBlocked, decide, run_scan
+
+        result = scan_result if scan_result is not None else \
+            run_scan(scan_plan, should_stop=lambda: control.cancelled)
+        if control.cancelled and scan_result is None:
+            return NativeOutcome(130, "Stopped during the ClamAV scan. Nothing was run or "
+                                      "created.")
+        proceed, summary = decide(result, allow_scan_hit)
+        if not proceed:
+            raise ScanBlocked(summary, result)
+        if on_note is not None:
+            on_note(summary)
+    xplan = plan.extract
+    if plan.create_prefix:
+        if control.cancelled:
+            return NativeOutcome(130, "Stopped before the prefix was created. Nothing was "
+                                      "unpacked.", scan_summary=summary)
+        try:
+            status = create(plan, memory_limit, env, should_stop=lambda: control.cancelled)
+        except MemoryLimitError as exc:
+            return NativeOutcome(2, f"{exc}. Nothing was unpacked.", scan_summary=summary)
+        except PrefixStopped as exc:
+            return NativeOutcome(130, f"{exc} Nothing was unpacked.", scan_summary=summary)
+        except FileExistsError as exc:
+            return NativeOutcome(1, f"{exc}. Nothing was unpacked.", scan_summary=summary)
+        except subprocess.TimeoutExpired:
+            return NativeOutcome(1, "wine did not finish in time; the prefix folder may be "
+                                    "incomplete. Nothing was unpacked.", scan_summary=summary)
+        except RuntimeError as exc:
+            return NativeOutcome(1, f"{exc} Nothing was unpacked.", scan_summary=summary)
+        if status != 0:
+            return NativeOutcome(1, f"creating the prefix failed (wine exited {status}). "
+                                    "Nothing was unpacked.", scan_summary=summary)
+        problem = xplan.problem()
+        if problem:
+            return NativeOutcome(1, f"{problem}. The prefix was created; nothing was written "
+                                    "in it.", scan_summary=summary, prefix_created=True)
+    if control.cancelled:
+        return NativeOutcome(130, "Stopped before the unpack. Nothing was unpacked.",
+                             scan_summary=summary, prefix_created=plan.create_prefix)
+    existed = os.path.lexists(xplan.dest)  # extract() refuses a destination that exists
+    try:
+        res = run(plan, cancel=control.event, detailed_log=detailed_log,
+                  progress_interval=progress_interval, env=env, scan_summary=summary,
+                  on_progress=on_progress)
+    except ExtractRefused as exc:
+        if exc.stopped:
+            return NativeOutcome(130, "Stopped before the unpack. Nothing was unpacked.",
+                                 scan_summary=summary, prefix_created=plan.create_prefix)
+        return NativeOutcome(1, f"{exc}. {exc.outcome()}", scan_summary=summary,
+                             prefix_created=plan.create_prefix)
+    except OSError as exc:
+        why = exc.strerror or exc
+        if not existed and os.path.lexists(xplan.dest):
+            msg = (f"the log could not be written ({why}) after the unpack started; files "
+                   f"already written in {xplan.dest} are kept and nothing was deleted. The "
+                   "unpack's result was not recorded.")
+        else:
+            msg = f"the log could not be written ({why}). Nothing was unpacked."
+        return NativeOutcome(1, msg, scan_summary=summary, prefix_created=plan.create_prefix)
+    return NativeOutcome(res.status, None, res, summary, plan.create_prefix)

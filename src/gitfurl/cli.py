@@ -595,10 +595,9 @@ def _native_install(args, installer, det, choice) -> int:
     approval of the whole plan (scan, prefix creation, unpack, listings, cleanup)."""
     from gitfurl.extract import ExtractRefused
     from gitfurl.route import (
-        PREFIX_ALLOWANCE,
         NativeInstallPlan,
-        memory_problem,
         native_prefix_create,
+        native_stops,
         run_native,
     )
 
@@ -623,15 +622,6 @@ def _native_install(args, installer, det, choice) -> int:
     missing = not xplan.prefix.is_dir()
     create = missing and args.create_prefix
     wine = shutil.which("wine") if create else None
-    if not dry and missing and not args.create_prefix:
-        print(f"error: prefix does not exist: {xplan.prefix}. Create it first with "
-              f"'gitfurl prefix create {prefix_name}', or add --create-prefix. Nothing was run.",
-              file=sys.stderr)
-        return 1
-    if not dry and create and wine is None:
-        print("error: wine not found on PATH; it is needed to create the prefix. Run 'gitfurl "
-              "cli doctor'. Nothing was run.", file=sys.stderr)
-        return 1
     memory_lines: list[str] = []
     scope_problem = None
     if create:
@@ -643,11 +633,23 @@ def _native_install(args, installer, det, choice) -> int:
                                                       availability() if enabled else None)
         memory_lines = [f"for the prefix creation: {ln}" if i == 0 else ln
                         for i, ln in enumerate(memory_lines)]
-        if scope_problem and not dry:
-            for line in memory_lines:
-                print(line)
-            print(f"error: {scope_problem}. {MEMORY_OFF_HINT}", file=sys.stderr)
-            return 2
+    stops = native_stops(xplan, missing=missing, create_ok=args.create_prefix, wine=wine,
+                         scope_problem=scope_problem, memory_check=not args.no_memory_limit)
+    stop = {s.kind: s.detail for s in stops}
+    if not dry and "no_prefix" in stop:
+        print(f"error: prefix does not exist: {xplan.prefix}. Create it first with "
+              f"'gitfurl prefix create {prefix_name}', or add --create-prefix. Nothing was run.",
+              file=sys.stderr)
+        return 1
+    if not dry and "no_wine" in stop:
+        print("error: wine not found on PATH; it is needed to create the prefix. Run 'gitfurl "
+              "cli doctor'. Nothing was run.", file=sys.stderr)
+        return 1
+    if not dry and "scope" in stop:
+        for line in memory_lines:
+            print(line)
+        print(f"error: {scope_problem}. {MEMORY_OFF_HINT}", file=sys.stderr)
+        return 2
     scan_lines: list[str] = []
     if scan_plan is not None:
         from gitfurl.scan import database_info, describe_scan_plan
@@ -670,27 +672,19 @@ def _native_install(args, installer, det, choice) -> int:
     for line in measure(installer, xplan.prefix).describe().splitlines():
         print(f"  {line}")
     print("Only unpack installers you are authorised to use.")
-    # For a prefix still to be created, the space is measured on the nearest existing folder
-    # above it, with room for the prefix itself, so nothing is created when it cannot fit.
-    problem = (xplan.space_problem_before_prefix(PREFIX_ALLOWANCE) if create
-               else None if missing else xplan.problem())
-    mem_problem = None if args.no_memory_limit else memory_problem(xplan.memory)
+    problem, mem_problem = stop.get("space"), stop.get("memory")
     if dry:
-        stops = []
-        if missing and not args.create_prefix:
-            stops.append(f"the prefix does not exist: {xplan.prefix} (add --create-prefix, or "
-                         "create it first)")
-        if create and wine is None:
-            stops.append("wine not found on PATH; it is needed to create the prefix")
-        if scope_problem:
-            stops.append(f"{scope_problem} (for the prefix creation; add --no-memory-limit to "
-                         "create it without the memory limit)")
-        if problem:
-            stops.append(problem)
-        if mem_problem:
-            stops.append(f"{mem_problem} (add --no-memory-limit to unpack anyway)")
-        for item in stops:
-            print(f"a real run would stop now: {item}")
+        dry_text = {
+            "no_prefix": lambda d: (f"the prefix does not exist: {d} (add --create-prefix, or "
+                                    "create it first)"),
+            "no_wine": lambda d: "wine not found on PATH; it is needed to create the prefix",
+            "scope": lambda d: (f"{d} (for the prefix creation; add --no-memory-limit to "
+                                "create it without the memory limit)"),
+            "space": lambda d: d,
+            "memory": lambda d: f"{d} (add --no-memory-limit to unpack anyway)",
+        }
+        for s in stops:
+            print(f"a real run would stop now: {dry_text[s.kind](s.detail)}")
         return 0
     if problem:
         print(f"error: {problem}. " + ("Nothing was run or created." if create else
