@@ -48,7 +48,7 @@ def probe_tkinter() -> ToolReport:
     if importlib.util.find_spec("tkinter") is None:
         return ToolReport("tkinter", None, None,
                           "not installed (the graphical app needs it; try python3-tk)")
-    return ToolReport("tkinter", "importable", "available", None)
+    return ToolReport("tkinter", None, "available (importable)", None)
 
 
 def machine_resources(meminfo: str = "/proc/meminfo") -> str:
@@ -97,14 +97,16 @@ def format_report(report: dict) -> str:
     lines = [f"platform: {report['platform']}"]
     if report.get("resources"):
         lines.append(f"machine: {report['resources']}")
+    notes = {"bwrap": " (optional, for --portable)",
+             "umu": " (optional, for the proton runtime)",
+             "innoextract": " (optional; only noted: gitfurl never runs it to extract)"}
     for key in ("wine", "bwrap", "umu", "innoextract", "tkinter"):
         t: ToolReport = report[key]
-        note = {"umu": " (optional, for the proton runtime)",
-                "innoextract": " (optional; only noted: this version never runs it to extract)"}
         if t.problem:
-            lines.append(f"{t.name}: unavailable ({t.problem})" + note.get(key, "") * (key == "umu"))
+            text = f"unavailable ({t.problem})"
         else:
-            lines.append(f"{t.name}: {t.version} at {t.path}" + note.get(key, "") * (key == "innoextract"))
+            text = t.version + (f" at {t.path}" if t.path else "")
+        lines.append(f"{t.name}: {text}{notes.get(key, '')}")
     scan = report.get("clamscan")
     if scan is not None:
         lines.extend(_clamscan_lines(scan))
@@ -122,4 +124,6 @@ def _clamscan_lines(t: ToolReport) -> list[str]:
     from gitfurl.scan import describe_database, parse_version
 
     info = parse_version(t.version or "")
-    return [f"clamscan: at {t.path}{note}", *(f"  {ln}" for ln in describe_database(info))]
+    engine = f"ClamAV {info.engine}" if info.engine else "version not recognised"
+    return [f"clamscan: {engine} at {t.path}{note}",
+            *(f"  {ln}" for ln in describe_database(info))]
