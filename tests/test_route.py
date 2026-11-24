@@ -318,8 +318,8 @@ class ChooseRouteTests(Base):
         # Review finding: --unattended or --portable were only listed as "do not apply" and the
         # run went native, so a scripted Setup run silently skipped Setup.
         self.arc("NAME-01.bin", lzma_blocks())
-        for opt in ("--unattended", "--portable", "--show-changes", "--stall-after",
-                    "--runtime proton", "--wine-debug"):
+        for opt in ("--unattended", "--portable", "--show-changes", "--runtime proton",
+                    "--wine-debug"):
             choice = choose_route(self.setup, "p1", detect(self.setup), "auto", self.env,
                                   setup_options=[opt])
             self.assertEqual((choice.route, choice.chosen_by), (ROUTE_WINE, "gitfurl"), opt)
@@ -394,6 +394,17 @@ class NativeCliTests(Base):
         self.assertEqual(code, 0)
         self.assertIn("route: native (chosen by gitfurl)", out)
         self.assertIn("--wine-addons does not apply to the native route", out)
+
+    def test_stall_advice_does_not_change_the_route(self):
+        # Asking for advice must not turn a native run into a Setup run (the window's own
+        # stall advice never changes the route either).
+        self.make_prefix()
+        with no_process():
+            code, out, _ = run_cli("install", str(self.setup), "--prefix", "p1", "--dry-run",
+                                   "--stall-after", "600")
+        self.assertEqual(code, 0)
+        self.assertIn("route: native (chosen by gitfurl)", out)
+        self.assertIn("--stall-after does not apply to the native route", out)
 
     def test_setup_only_options_on_auto_take_the_wine_route(self):
         self.make_prefix()

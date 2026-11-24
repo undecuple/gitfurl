@@ -484,6 +484,20 @@ RUNTIME_DOWNLOAD_NOTE = ("\n\nProton runs through umu-run. If its runtime is not
                          "machine, umu-run downloads it on first use (a network download).")
 
 
+# Setup runs in the window get stall advice: a note when nothing has moved for this long.
+WINDOW_STALL_S = 120.0
+STALL_PLAN_LINE = ("If nothing moves for 2 minutes (no installer data read, almost no CPU use, "
+                   "no log growth), a note says so and, when the run's windows can be read "
+                   "(not in a portable run), lists them and names the one that opened most "
+                   "recently; it is advice only, nothing is stopped or answered.")
+
+
+def keeps_note(note: str) -> bool:
+    """Notes that stay on screen until the run ends (the progress line is overwritten every
+    few seconds): a crash or a stall, which may need the user to look at a window."""
+    return note.startswith(("crash:", "possibly stalled:"))
+
+
 def stop_applies(pending: dict, control) -> bool:
     """True while `control` belongs to the run in progress and has not been stopped yet.
 
@@ -1165,6 +1179,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         busy["on"] = True
         run["kind"], run["stopping"] = kind, False
         status_var.set(message)
+        run["message"] = message
         create_btn.state(["disabled"])
         run_btn.state(["disabled"])
         new_btn.state(["disabled"])
@@ -1323,6 +1338,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             validate_installer(installer_var.get().strip()), plan.prefix).describe()
         if proton:
             extra += RUNTIME_DOWNLOAD_NOTE
+        extra += "\n\n" + STALL_PLAN_LINE
         if changes_var.get():
             extra += "\n\nWhat the installer changed will be listed afterwards."
             if plan.portable:
@@ -1358,7 +1374,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         pending["portable"] = plan.portable
         options = RunOptions(on_progress=ui_updates.put, progress_interval=3.0,
                              detailed_log=detail_var.get(), control=control,
-                             on_note=note_received)
+                             on_note=note_received, stall_after_s=WINDOW_STALL_S)
         if scan_plan is not None:
             status_var.set("Scanning the installer with ClamAV first...")
         launch(plan, tool, create, track, options, ctx)
@@ -1550,6 +1566,9 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                 smp = ui_updates.get_nowait()
                 if isinstance(smp, str):  # a note (memory limit change, stall advisory)
                     progress_var.set(smp)
+                    if keeps_note(smp) and busy["on"] and not run["stopping"]:
+                        status_var.set(f"{run.get('message', '')}\n{smp}".strip())
+                        status_label.configure(fg=w.AMBER)
                     continue
                 bar.set(smp.percent or 0)
                 progress_var.set(smp.line())

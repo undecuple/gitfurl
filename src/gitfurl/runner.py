@@ -365,6 +365,7 @@ class RunOptions:
     stall_after_s: float | None = None  # advisory "possibly stalled" after this much idle time
     on_note: object = None  # callable(str): one-line advisory notes (stall, crash handler)
     window_titles: object = None  # callable(pids, programs, env) -> list|None; tests inject
+    window_list: object = None  # callable(pids, programs, env, pid_of=) -> list|None; tests
     clock: object = time.monotonic  # injected in tests
     proc_root: str = "/proc"  # injected in tests
     meminfo: str = "/proc/meminfo"  # injected in tests
@@ -536,13 +537,24 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
     def windows_now(sample) -> list[str] | None:
         if plan.portable:  # _NET_WM_PID is a pid inside bwrap's namespace: cannot be matched
             return None
+        try:
+            return titles_of(sample.pids, programs_of(sample), child_env)
+        except Exception:  # noqa: BLE001 - a note must never break the run
+            return None
+
+    # With stall advice on, each sample also looks at the run's windows (one xwininfo, and
+    # xprop only for windows not seen before), so a stall note can name the newest one.
+    tracker = None
+    if stall is not None and not plan.portable:
+        from gitfurl.windows import WindowTracker
+
+        tracker = WindowTracker(child_env, options.window_list)
+
+    def programs_of(sample) -> list[str]:
         programs = list(sample.helpers)
         if sample.crash_pids:  # its "Program Error" window belongs to winedbg.exe
             programs.extend(CRASH_HANDLER_NAMES)
-        try:
-            return titles_of(sample.pids, programs, child_env)
-        except Exception:  # noqa: BLE001 - a note must never break the run
-            return None
+        return programs
 
     # The monitor also runs for notes alone: it is how a crash is seen.
     if options.on_progress is not None or stall is not None or options.on_note is not None:
@@ -554,9 +566,19 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
             if events:  # detailed log only
                 event("processes", count=sample.procs, programs=list(sample.helpers))
                 event("memory", mem_available_bytes=memory_available(options.meminfo))
+            # At most one look at the windows per sample: the tracker's when it runs (stall
+            # advice on), otherwise one only for a crash note. Each look is bounded (TOTAL_S).
+            look = None
+            if tracker is not None:
+                found = tracker.observe(sample.pids, programs_of(sample), sample.elapsed_s)
+                look = None if found is None else list(dict.fromkeys(t for _w, t in found))
+
+            def titles_now():
+                return look if tracker is not None else windows_now(sample)
+
             if crash["seen_s"] is None and new_crash(sample):
                 crash["seen_s"] = sample.elapsed_s
-                titles = windows_now(sample)
+                titles = titles_now()
                 event("crash_handler", elapsed_s=round(sample.elapsed_s),
                       programs=list(sample.helpers), windows=titles, advisory=True)
                 if options.on_note is not None:
@@ -569,17 +591,20 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
                         + titles_text(titles))
             idle = stall.check(sample) if stall else None
             if idle is not None:
-                titles = windows_now(sample)
+                titles = titles_now()
+                newest = tracker.newest() if tracker is not None else None
                 event("possibly_stalled", idle_s=round(idle), after_s=options.stall_after_s,
-                      windows=titles, advisory=True)
+                      windows=titles, newest_window=newest[0] if newest else None,
+                      newest_window_s=round(newest[1]) if newest else None, advisory=True)
                 if options.on_note is not None:
-                    from gitfurl.windows import titles_text
+                    from gitfurl.windows import newest_text, titles_text
 
                     options.on_note(
                         f"possibly stalled: no payload read, CPU use under {QUIET_CPU_PCT:g}% and no log "
                         f"growth for "
                         f"{_dur(idle)}. This is advice only; nothing was stopped, and slow "
-                        f"phases can be normal." + titles_text(titles))
+                        f"phases can be normal." + titles_text(titles)
+                        + (newest_text(newest, sample.elapsed_s) if titles else ""))
             if options.on_progress is not None:
                 options.on_progress(sample)
 
