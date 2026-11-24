@@ -134,6 +134,10 @@ class NativePlanTests(NativeBase):
         self.assertTrue(text.endswith("Only unpack installers you are authorised to use."))
         self.assertNotIn("--route", text)
         self.assertNotIn("--no-memory-limit", text)
+        self.assertNotIn(gui.NATIVE_ADDONS_LINE, text)
+        on = gui.native_plan_text(plan, det, preflight="free: plenty", wine_addons=True)
+        self.assertIn(gui.NATIVE_ADDONS_LINE, on)  # the switch is on but not used here
+        self.assertNotIn("--wine-addons", on)
 
 
 class ProgressAndEndTests(unittest.TestCase):

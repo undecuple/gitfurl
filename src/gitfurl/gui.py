@@ -282,10 +282,17 @@ def native_stop_text(stop) -> str:
     }[stop.kind](stop.detail)
 
 
+NATIVE_ADDONS_LINE = ("The Mono and Gecko dialogs switch is not used here: the native route's "
+                      "wineboot always runs without those dialogs (the unpack needs neither).")
+
+
 def native_plan_text(plan, det, *, memory_lines=(), preflight: str = "",
-                     scan_db_lines=()) -> str:
-    """The approval text for a native run: every step, what is skipped, then the checks."""
+                     scan_db_lines=(), wine_addons: bool = False) -> str:
+    """The approval text for a native run: every step, what is skipped, then the checks.
+    wine_addons: the window's Mono and Gecko switch is on; the plan says it is not used."""
     lines = [window_words(ln) for ln in plan.describe()]
+    if wine_addons:
+        lines.append(NATIVE_ADDONS_LINE)
     lines += list(memory_lines)
     lines += ["", window_words(describe_detection(det, plan.choice))]
     if preflight:
@@ -1403,7 +1410,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                                  + "\n\nNothing was run, created or written.")
             return
         text = native_plan_text(plan, det, memory_lines=mem_lines,
-                                preflight=measure(installer, xplan.prefix).describe())
+                                preflight=measure(installer, xplan.prefix).describe(),
+                                wine_addons=addons_var.get())
         if not messagebox.askyesno("Unpack this installer?", text, icon="warning",
                                    default="no"):
             return
