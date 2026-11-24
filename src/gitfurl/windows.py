@@ -5,7 +5,11 @@ it lists windows, it never clicks, closes or types into one. It needs `xwininfo`
 `xprop` on PATH and a DISPLAY (Wine draws its windows through X11, also under XWayland);
 without them it returns None and the note says nothing about windows.
 
-How: `xwininfo -root -tree` lists every window with its title and class. Wine names a
+How: `xwininfo -root -tree` lists every window with its title, class and size, the topmost
+first (seen with Xvfb in the sandbox, 2026-11-24). Windows smaller than MIN_SIDE pixels
+either way are left out: Inno Setup's hidden loader and application windows (2 and 1 pixel
+high) are such windows, never what a user answers; so is a window that is not mapped
+(`xwininfo -id`, asked for each window that passes the other checks). Wine names a
 window's class after the program (for example "setup.tmp"), so only windows whose class
 matches a program running in the prefix are checked further, and each of those must have a
 _NET_WM_PID (from `xprop`) that is one of the prefix's processes. Every call has a short
@@ -30,10 +34,12 @@ MAX_TITLES = 6
 # Hidden windows Windows (and Wine) give every GUI program for keyboard input: never what a
 # user waits on ("Default IME" was listed in the sandbox run of 2026-11-24).
 HIDDEN_TITLES = frozenset(["Default IME", "MSCTFIME UI"])
+MIN_SIDE = 8  # pixels; a smaller window is a hidden helper window, not a dialog
 
 # `     0x1e00007 "Title": ("res_name" "res_class")  400x200+0+0  +100+100`
 # xwininfo prints titles without escaping, so the title runs to the last '": (' on the line.
-_LINE = re.compile(r'^\s*(0x[0-9a-fA-F]+) "(.*)": \("([^"\n]*)" "([^"\n]*)"\)', re.M)
+_LINE = re.compile(r'^\s*(0x[0-9a-fA-F]+) "(.*)": \("([^"\n]*)" "([^"\n]*)"\)'
+                   r'(?:[ \t]+(\d+)x(\d+))?', re.M)
 _PID = re.compile(r"_NET_WM_PID\(CARDINAL\) = (\d+)")
 
 
@@ -94,12 +100,14 @@ def window_list(pids, programs, env: dict[str, str] | None = None, run=subproces
             del pid_of[wid]
     found: list[tuple[str, str]] = []
     checked, spent = 0, False
-    # xwininfo lists bottom to top; the newest windows are usually on top, so they are
-    # looked at first and are not the ones the caps leave out.
-    for wid, title, name, cls in reversed(rows):
+    # xwininfo lists the topmost window first; the newest windows are usually on top, so
+    # they are looked at first and are not the ones the caps leave out.
+    for wid, title, name, cls, width, height in rows:
         if not title.strip() or title in HIDDEN_TITLES \
                 or not (_matches(cls, programs) or _matches(name, programs)):
             continue
+        if width and height and min(int(width), int(height)) < MIN_SIDE:
+            continue  # a hidden helper window (Inno's loader is 2 pixels high)
         pid = pid_of.get(wid) if pid_of is not None else None
         if pid is None:
             if spent:
@@ -117,11 +125,18 @@ def window_list(pids, programs, env: dict[str, str] | None = None, run=subproces
             if pid_of is not None:
                 pid_of[wid] = pid
         if pid in pids:
+            # A hidden window of normal size (a form built but not shown) is listed too,
+            # and a new one is on top: ask its map state, each time (it changes). A probe
+            # that fails or has no time left keeps the window.
+            left = deadline - time.monotonic()
+            state = _probe([xwininfo, "-id", wid], env, run, min(TIMEOUT_S, left)) \
+                if left > 0 else None
+            if state is not None and "IsViewable" not in state:
+                continue
             found.append((wid, clean(title, 80)))
             if len(found) >= MAX_TITLES:
                 break
-    found.reverse()  # back to xwininfo's order
-    return found
+    return found  # the topmost first
 
 
 class WindowTracker:
@@ -167,6 +182,12 @@ class WindowTracker:
         seen = self.first_seen[wid]
         return None if seen <= self.first_look else (title, seen)
 
+    def top(self) -> str | None:
+        """The title of the open window on top (window_list lists the topmost first), or
+        None. Used when no window opened after the first look: a dialog the installer shows
+        straight away (a language choice) is then already open at that look."""
+        return self.open[0][1] if self.open else None
+
 
 def newest_text(newest: tuple[str, float] | None, elapsed_s: float) -> str:
     """One sentence naming the newest window for a stall note, or ""."""
@@ -178,10 +199,22 @@ def newest_text(newest: tuple[str, float] | None, elapsed_s: float) -> str:
             "ago) and is still open; it is the most likely to be waiting for an answer.")
 
 
+def top_text(title: str | None) -> str:
+    """One sentence naming the window on top for a stall note (when several are listed),
+    or ""."""
+    if not title:
+        return ""
+    return (f' The one on top, "{title}", is the most likely to be waiting for an answer; '
+            "it was already open at gitfurl's first look at the run's windows.")
+
+
 def titles_text(titles: list[str] | None) -> str:
     """One sentence for a note, or "" when nothing is known."""
     if not titles:
         return ""
     shown = ", ".join(f'"{t}"' for t in titles)
+    if len(titles) == 1:
+        return (f" Window open in the run: {shown}; it may be waiting for an answer (gitfurl "
+                "does not answer or close it).")
     return (f" Windows open in the run: {shown}; one of them may be waiting for an answer "
             "(gitfurl does not answer or close them).")
