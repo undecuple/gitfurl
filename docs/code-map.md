@@ -2,7 +2,7 @@
 
 A map of the source for people changing it: layers, which module uses which, the main control and data flows, the entry points, and which tests and CI jobs cover what. The per-module details are in [architecture.md](architecture.md); this page is the overview. The diagrams are Mermaid (GitHub draws them).
 
-Checked against `main` at b62cb909 (2026-11-24). The import graph below was read from the source with Python's `ast` module, so it lists every `from gitfurl… import` in each file, including imports inside functions.
+Checked against `main` at 562a8e5b (2026-11-24). The import graph below was read from the source with Python's `ast` module, so it lists every `from gitfurl… import` in each file, including imports inside functions.
 
 ## Layers
 
@@ -110,7 +110,7 @@ flowchart TD
   N4 --> N5["run_native() → extract.extract()<br/>farc_codecs pull pipeline, CRC-32, Stop"]
   N5 --> N6["listings: program candidates, redistributables (not run)<br/>log 0600, optional event log, optional cleanup"]
   D -->|wine or proton| W0{"--dry-run?"}
-  W0 -->|yes| W1["build_plan() and the plan lines:<br/>portable, unattended, scan, memory, detection, preflight"]
+  W0 -->|yes| W1["build_plan() and the plan lines:<br/>portable, unattended, scan, memory, detection,<br/>preflight (with route.setup_unpacked())"]
   W0 -->|no| W2["_real_install(): build_plan(), plan_cleanup()"]
   W2 --> W3{"approval"}
   W3 -->|yes| W4["runner.run_tracked()"]
@@ -194,17 +194,17 @@ flowchart LR
 | Test file | Covers | Test-only helpers |
 |---|---|---|
 | `tests/test_gitfurl.py` | `app`, `cli`, `doctor`, `detect`, `prefixes`, `runner`, `preflight`, `procgroup`, `progress`, `changes`, `cleanup`, `gui` plain functions, `route` | - |
-| `tests/test_route.py` | `route` (choice, native plan and run), `cli install` on both routes, `gui.window_route_text` | `tests/farc_writer.py` |
+| `tests/test_route.py` | `route` (choice, native plan and run, `setup_unpacked`), `cli install` on both routes, `extract.unpacked_size` and the Setup route's preflight, `gui.window_route_text` | `tests/farc_writer.py` |
 | `tests/test_farc.py` | `farc` index reader, `detect` with archives | `tests/farc_writer.py` |
 | `tests/test_extract.py` | `extract`, `cli extract` | `tests/farc_writer.py` |
 | `tests/test_codecs.py` | `farc_codecs` (lzma, exe, delta, rep, 4x4, srep, VHASH, SipHash, AES), chains through `extract` | `tests/farc_writer.py` |
 | `tests/test_inno.py` | `inno` reader, `[Code]` scan, preflight, `extract-inno`, `detect` and `cli` lines | `tests/inno_writer.py` |
 | `tests/test_unattended.py` | `unattended`, its CLI and window options | - |
 | `tests/test_portable.py` | `portable`, `runner` wrapping, window option | - |
-| `tests/test_scan.py` | `scan`, the scan gate, `doctor` lines | - |
+| `tests/test_scan.py` | `scan`, the scan gate, the database version (with the `clamconf` fallback), `doctor` lines | - |
 | `tests/test_memlimit.py` | `memlimit`, `runner` scope, `doctor`, window option | - |
 | `tests/test_progress.py` | `progress` (fake `/proc`), stall detector | - |
-| `tests/test_crash.py` | `progress.prefix_processes` (crash handler), `windows` (fake `xwininfo`/`xprop`), the crash and stall notes in `runner` | `tests/test_gitfurl.py` (`RunEventHelpers`) |
+| `tests/test_crash.py` | `progress.prefix_processes` (crash handler), `windows` (fake `xwininfo`/`xprop`: order, size and map-state filters, the newest and top window), the crash and stall notes in `runner` | `tests/test_gitfurl.py` (`RunEventHelpers`) |
 | `tests/test_gui_polish.py` | `theme`, `widgets`, window polish (window parts skipped without `xvfb-run` or tkinter) | - |
 | `tests/test_gui_stop.py` | Stop in the real window | `tests/gui_stop_driver.py` (`xvfb-run -a`) |
 | `tests/test_native_run.py` | `route.native_stops`, `route.perform_native` (stop checks, Stop during the scan and wineboot, cancel) | `tests/test_route.py` (`Base`, archive builders on `tests/farc_writer.py`) |
@@ -217,6 +217,6 @@ Local check with the pinned versions: `ruff==0.11.13 check src tests` and `PYTHO
 
 ## What this map does not show
 
-- The internal structure of `gui.py` (about 1,750 lines: pages, dialogs and the run loop in one `main()` closure). Its pages are named in the [user guide](user-guide.md); the map shows only its calls into the core.
+- The internal structure of `gui.py` (about 1,760 lines: pages, dialogs and the run loop in one `main()` closure). Its pages are named in the [user guide](user-guide.md); the map shows only its calls into the core.
 - Decoder internals of `farc_codecs.py` and the record layouts of `inno.py`: they follow the clean-room specifications, which are not in the repository.
 - Timing: which calls happen on Tk's thread and which on the worker thread beyond the sequence above.

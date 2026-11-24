@@ -228,6 +228,34 @@ def find_archives(installer: Path) -> tuple[list[Path], list[str]]:
     return found, notes
 
 
+@dataclass
+class Unpacked:
+    """What the FreeArc archives beside an installer unpack to, from their own indexes."""
+    total: int  # bytes, summed over the archives whose index was read
+    read: int  # archives whose index was read
+    found: int  # archives found (some may not have been readable)
+    complete: bool = True  # False when the folder listing stopped early (MAX_DIR_ENTRIES)
+
+
+def unpacked_size(installer: Path) -> Unpacked | None:
+    """Sum of the file sizes in the indexes of the FreeArc archives beside the installer,
+    or None when no archive is there or none could be read. Read-only (bounded index reads,
+    as for the plan); a method gitfurl cannot decode does not matter here, only the sizes."""
+    try:
+        paths, notes = find_archives(Path(installer))
+    except (ExtractRefused, OSError):  # an OSError can come from reading the folder listing
+        return None
+    total = read = 0
+    for path in paths:
+        try:
+            arc = farc.read_archive(path)
+        except farc.FarcError:
+            continue
+        total += arc.total_size
+        read += 1
+    return Unpacked(total, read, len(paths), not notes) if read else None
+
+
 def plan_extract(installer: Path, prefix_name: str,
                  env: dict[str, str] | None = None) -> ExtractPlan:
     """Read every archive's index and check every name. Writes nothing. Raises ExtractRefused."""

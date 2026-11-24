@@ -747,6 +747,70 @@ class NativeCliTests(Base):
         self.assertIn("command:     wine", out)
 
 
+class UnpackedSizeTests(Base):
+    """The Setup route's preflight: free space against what the archives unpack to."""
+
+    def test_sizes_from_the_indexes_readable_or_not(self):
+        from gitfurl.extract import unpacked_size
+
+        self.assertIsNone(unpacked_size(self.setup))  # no archive beside it
+        (self.src / "NAME-03.bin").write_bytes(b"ArC\x01" + b"\0" * 64)  # unreadable
+        self.assertIsNone(unpacked_size(self.setup))  # none readable
+        self.arc("NAME-01.bin", lzma_blocks())
+        self.arc("NAME-02.bin", chain_blocks())
+        two = unpacked_size(self.setup)
+        want = len(GAME) + len(TEXT) + 2 * 256 * 64 + len(b"MZ redist")
+        self.assertEqual((two.total, two.read, two.found, two.complete), (want, 2, 3, True))
+        with mock.patch("gitfurl.extract.find_archives", side_effect=OSError(5, "EIO")):
+            self.assertIsNone(unpacked_size(self.setup))  # a folder that cannot be listed
+        with mock.patch("gitfurl.extract.find_archives",
+                        return_value=([self.src / "NAME-01.bin"], ["stopped early"])):
+            self.assertFalse(unpacked_size(self.setup).complete)
+
+    def test_only_archives_that_belong_to_the_installer_count(self):
+        from gitfurl.route import setup_unpacked
+
+        self.arc("NAME-01.bin", lzma_blocks())
+        self.assertIsNotNone(setup_unpacked(self.setup, detect(self.setup)))
+        other = self.base / "Downloads"
+        other.mkdir()
+        nsis = other / "tool-setup.exe"
+        nsis.write_bytes(b"MZ" + b"\0" * 4096)  # neither Inno Setup nor FreeArc
+        (other / "unrelated-game.bin").write_bytes(make_archive(*lzma_blocks()))
+        self.assertIsNone(setup_unpacked(nsis, detect(nsis)))
+        inno = other / "setup.exe"
+        inno.write_bytes(INNO)  # Inno Setup, but the archive's name does not link it
+        self.assertIsNone(setup_unpacked(inno, detect(inno)))
+
+    def test_preflight_lines_and_warning(self):
+        from gitfurl.extract import Unpacked
+        from gitfurl.preflight import Preflight
+
+        pf = Preflight(10**9, Path("/x"), 10**6, True, 8 * 10**9, 4,
+                       Unpacked(3 * 10**9, 1, 2))
+        text = pf.describe()
+        self.assertIn("the 1 FreeArc archive beside the installer unpack to 3.00 GB "
+                      "(1 of 2 readable; at least)", text)
+        pf.unpacked = Unpacked(3 * 10**9, 2, 2, complete=False)
+        self.assertIn("(at least; the folder was not looked at in full)", pf.describe())
+        pf.unpacked = Unpacked(3 * 10**9, 1, 2)
+        self.assertIn("space the install needs: at least that much", text)
+        self.assertIn("advisory: free space (1.00 GB) is smaller than what the archives", text)
+        pf.free_bytes = 4 * 10**9
+        self.assertEqual(pf.warnings(), [])
+        pf.unpacked = None
+        self.assertIn("space the install needs: unknown", pf.describe())
+
+    def test_setup_route_dry_run_shows_the_unpacked_size(self):
+        self.arc("NAME-01.bin", lzma_blocks())
+        with no_process():
+            code, out, _ = run_cli("install", str(self.setup), "--prefix", "p1", "--dry-run",
+                                   "--route", "wine", "--no-memory-limit")
+        self.assertEqual(code, 0)
+        self.assertIn("read from the archives' own indexes: the 1 FreeArc archive", out)
+        self.assertIn("space the install needs: at least that much", out)
+
+
 class GuiRouteLineTests(Base):
     def test_window_takes_the_automatic_route_or_setup_when_asked(self):
         try:

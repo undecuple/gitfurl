@@ -24,7 +24,7 @@ from gitfurl.prefixes import (
     wineboot_line,
 )
 from gitfurl.preflight import measure
-from gitfurl.route import ROUTE_CHOICES, ROUTE_NATIVE, choose_route
+from gitfurl.route import ROUTE_CHOICES, ROUTE_NATIVE, choose_route, setup_unpacked
 from gitfurl.runner import (
     CANCEL_REMAINS,
     CANCELLED_STATUS,
@@ -210,7 +210,8 @@ def main(argv: list[str] | None = None) -> int:
     for line in describe_detection(det, choice).splitlines():
         print(line)
     print("preflight (read-only, advisory):")
-    for line in measure(installer, plan.prefix).describe().splitlines():
+    for line in measure(installer, plan.prefix,
+                        unpacked=setup_unpacked(installer, det)).describe().splitlines():
         print(f"  {line}")
     print("Running an installer can expose files the current user can access.")
     return 0
@@ -505,7 +506,8 @@ def _real_install(args, det, choice) -> int:
     for line in describe_detection(det, choice).splitlines():
         print(line)
     print("preflight (read-only, advisory):")
-    for line in measure(installer, plan.prefix).describe().splitlines():
+    for line in measure(installer, plan.prefix,
+                        unpacked=setup_unpacked(installer, det)).describe().splitlines():
         print(f"  {line}")
     if scan_plan is not None:
         from gitfurl.scan import database_info, describe_scan_plan

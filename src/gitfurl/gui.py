@@ -1341,8 +1341,11 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         if cleanup_var.get() != "none":
             extra += "\n\nIf the installer exits with status 0, " + clean.describe()
         extra += "\n\n" + route_text_now()
+        from gitfurl.route import setup_unpacked
+
+        checked = validate_installer(installer_var.get().strip())
         extra += "\n\nChecks before the run (read-only, advisory):\n" + measure(
-            validate_installer(installer_var.get().strip()), plan.prefix).describe()
+            checked, plan.prefix, unpacked=setup_unpacked(checked, detect(checked))).describe()
         if proton:
             extra += RUNTIME_DOWNLOAD_NOTE
         extra += "\n\n" + STALL_PLAN_LINE

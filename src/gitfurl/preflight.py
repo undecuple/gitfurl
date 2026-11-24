@@ -2,7 +2,9 @@
 
 Everything here is read-only and local. Measured values come from the machine; anything
 that is a guess is labelled "estimate". Nothing here blocks a run: the install's real space
-need is unknown to gitfurl, so no multiplier is applied to the installer's size.
+need is unknown to gitfurl, so no multiplier is applied to the installer's size. When the
+FreeArc archives beside the installer can be read, what they unpack to (from their own
+indexes) is a lower bound for a Setup run, and free space is compared with it.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ class Preflight:
     folder_complete: bool  # False when counting stopped early (the value is "at least")
     mem_bytes: int | None  # measured: MemAvailable
     cpu_threads: int  # measured
+    unpacked: object = None  # extract.Unpacked: read from the archives' own indexes, or None
 
     def lines(self) -> list[str]:
         def gb(n):
@@ -40,13 +43,29 @@ class Preflight:
         out.append("measured: memory available: "
                    + ("unknown" if self.mem_bytes is None else gb(self.mem_bytes))
                    + f", {self.cpu_threads} CPU threads")
-        out.append("space the install needs: unknown. estimate: the installed size is usually larger "
-                   "than the installer's files, by an amount gitfurl cannot tell.")
+        u = self.unpacked
+        if u is not None:
+            some = (f" ({u.read} of {u.found} readable; at least)" if u.read != u.found else
+                    "" if u.complete else " (at least; the folder was not looked at in full)")
+            out.append(f"read from the archives' own indexes: the {u.read} FreeArc archive"
+                       f"{'s' if u.read != 1 else ''} beside the installer unpack to "
+                       f"{gb(u.total)}{some}")
+            out.append("space the install needs: at least that much. estimate: Setup may need "
+                       "more (its own files, redistributables, temporary copies).")
+        else:
+            out.append("space the install needs: unknown. estimate: the installed size is "
+                       "usually larger than the installer's files, by an amount gitfurl "
+                       "cannot tell.")
         return out
 
     def warnings(self) -> list[str]:
         out = []
-        if self.free_bytes is not None and self.free_bytes < self.folder_bytes:
+        u = self.unpacked
+        if u is not None and self.free_bytes is not None and self.free_bytes < u.total:
+            out.append(f"advisory: free space ({self.free_bytes / 1e9:.2f} GB) is smaller than "
+                       f"what the archives beside the installer unpack to ({u.total / 1e9:.2f} "
+                       "GB), so Setup is likely to run out of space. You can still go ahead.")
+        elif self.free_bytes is not None and self.free_bytes < self.folder_bytes:
             out.append("advisory, estimate: free space is smaller than the files in the installer's "
                        "folder, so the install may not fit. You can still go ahead.")
         if self.mem_bytes is not None and self.mem_bytes < LOW_MEMORY_BYTES:
@@ -105,11 +124,15 @@ def memory_available(meminfo: str = "/proc/meminfo") -> int | None:
     return None
 
 
-def measure(installer: Path, prefix: Path, meminfo: str = "/proc/meminfo") -> Preflight:
+def measure(installer: Path, prefix: Path, meminfo: str = "/proc/meminfo",
+            unpacked=None) -> Preflight:
+    """`unpacked`: route.setup_unpacked(installer, det), for a Setup run (the native route
+    checks its own space and stops on it)."""
     where = nearest_existing(prefix)
     try:
         free = shutil.disk_usage(where).free
     except OSError:
         free = None
     size, complete = folder_size(installer.parent)
-    return Preflight(free, where, size, complete, memory_available(meminfo), os.cpu_count() or 0)
+    return Preflight(free, where, size, complete, memory_available(meminfo), os.cpu_count() or 0,
+                     unpacked)
