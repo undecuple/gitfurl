@@ -45,7 +45,7 @@ The [latest release](https://github.com/undecuple/gitfurl/releases/latest) has a
 
 Terminal instead: `python -m gitfurl cli --help` (same code, same approvals).
 
-Optional: `python -m gitfurl cli desktop-entry` (or `gitfurl cli desktop-entry` once installed, or the release program) adds it to your application menu. It shows the plan and asks first; `--remove` takes it away.
+Optional: `python -m gitfurl cli desktop-entry` (or `gitfurl cli desktop-entry` once installed; the release program is not yet checked for this) adds it to your application menu. It shows the plan and asks first; `--remove` takes it away.
 
 <p align="center"><img src="docs/assets/divider-stripe.svg" width="660" alt=""></p>
 
