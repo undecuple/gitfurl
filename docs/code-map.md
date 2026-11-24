@@ -105,7 +105,7 @@ flowchart TD
   B --> C["detect.detect(): headers, inno.read_fd(), farc.read_fd() for archives beside it"]
   C --> D{"route.choose_route()<br/>auto · native · wine"}
   D -->|native| N1["NativeInstallPlan.describe()<br/>(dry run stops here)"]
-  N1 --> N2["memory_problem(), space check"]
+  N1 --> N2["unpack_memory_problem(), space check"]
   N2 --> N3{"approval<br/>typed yes or --yes"}
   N3 -->|yes| N4["native_prefix_create()<br/>wineboot, mscoree/mshtml off, incomplete marker"]
   N4 --> N5["run_native() → extract.extract()<br/>farc_codecs pull pipeline, CRC-32, Stop"]
