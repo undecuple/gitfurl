@@ -35,6 +35,7 @@ from gitfurl.runner import (
     describe_result,
     logs_root,
     run_tracked,
+    runtime_env,
     validate_installer,
     validate_wine_debug,
 )
@@ -143,6 +144,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="when gitfurl creates the prefix, let Wine show its Mono and Gecko install "
                            "dialogs (answering Install makes Wine download them); default: off, "
                            "wineboot runs with WINEDLLOVERRIDES=mscoree,mshtml=")
+    create.add_argument("--runtime", choices=RUNTIMES, default="wine",
+                        help="wine (default) or proton, through umu-run; use the runtime the "
+                             "installs into this prefix will use")
+    create.add_argument("--proton-path", metavar="DIR",
+                        default=os.environ.get("PROTONPATH"),
+                        help="a Proton folder you already have (or set PROTONPATH); never "
+                             "downloaded")
     pre_sub.add_parser("list", help="list dedicated prefixes")
     desk = sub.add_parser(
         "desktop-entry",
@@ -354,16 +362,34 @@ def _prefix_command(args) -> int:
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
-    wine = shutil.which("wine")
+    if args.wine_addons and args.runtime != "wine":
+        print("error: --wine-addons applies only to the wine runtime (Proton sets up its own "
+              "prefix). Nothing was changed.", file=sys.stderr)
+        return 1
+    try:
+        runtime_extra = runtime_env(args.runtime, args.proton_path)
+    except ValueError as exc:
+        print(f"error: {exc}. Nothing was changed.", file=sys.stderr)
+        return 1
+    tool = "umu-run" if args.runtime == "proton" else "wine"
+    wine = shutil.which(tool)
     if wine is None:
-        print("error: wine not found on PATH; run 'gitfurl doctor'. Nothing was changed.",
+        print(f"error: {tool} not found on PATH; run 'gitfurl doctor'. Nothing was changed.",
               file=sys.stderr)
         return 1
-    extra = wineboot_env("wine", args.wine_addons)
+    extra = {**runtime_extra, **wineboot_env(args.runtime, args.wine_addons)}
     plan = plan_create(args.name, wine, extra_env=extra)
     print(f"This will create a new dedicated prefix at {plan['path']}")
-    print(f"command: {' '.join(plan['argv'])}  (with WINEPREFIX set for that command only)")
-    print(wineboot_line("wine", args.wine_addons))
+    shown = " ".join(f"{k}={v}" for k, v in runtime_extra.items())
+    print(f"command: {' '.join(plan['argv'])}  (with WINEPREFIX{' ' + shown if shown else ''} "
+          "set for that command only)")
+    line = wineboot_line(args.runtime, args.wine_addons)
+    if line:
+        print(line)
+    if args.runtime == "proton":
+        print("umu-run downloads the Steam Linux Runtime on its first run unless it is already "
+              "present (a network download that gitfurl does not make). Use this prefix for "
+              "Proton installs (--runtime proton).")
     print("Your existing ~/.wine is not used or changed.")
     if not args.yes:
         if not sys.stdin.isatty():
@@ -385,7 +411,7 @@ def _prefix_command(args) -> int:
               "error: wine did not finish in time; the prefix directory may be incomplete.",
               file=sys.stderr)
         return 1
-    print(f"wine exited with status {status}")
+    print(f"{tool} exited with status {status}")
     return 0 if status == 0 else 1
 
 
