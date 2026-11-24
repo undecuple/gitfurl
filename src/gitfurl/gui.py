@@ -27,6 +27,8 @@ from gitfurl.prefixes import (
     plan_create,
     prefixes_root,
     validate_prefix_name,
+    wineboot_env,
+    wineboot_line,
 )
 from gitfurl.preflight import measure
 from gitfurl.safety import ROOT_MESSAGE, running_as_root
@@ -135,7 +137,7 @@ def memory_problem(enabled: bool, avail=None, meminfo: str = "/proc/meminfo") ->
 def describe_plan(installer: str, prefix: str, runtime: str = "wine",
                   proton_path: str | None = None, portable: bool = False,
                   scan: bool = False, memory_limit: bool = False, unattended: bool = False,
-                  now=None) -> tuple[str, str | None]:
+                  now=None, wine_addons: bool = False) -> tuple[str, str | None]:
     """Return (preview text, error). No side effects: the scan is described, never run; the
     memory limit lines read files only."""
     if not installer.strip():
@@ -149,7 +151,8 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
                           runtime=runtime, proton_path=proton_path, portable=portable,
                           scan=scan_plan, memory_limit=memory_limit,
                           unattended=unattended_for(validate_installer(installer.strip()),
-                                                    prefix.strip(), unattended, now))
+                                                    prefix.strip(), unattended, now),
+                          wine_addons=wine_addons)
         portable_lines = []
         if portable:
             from gitfurl.portable import check_portable_supported, describe_portable, find_bwrap
@@ -169,6 +172,9 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
         f"working dir: {plan.cwd}\n"
         + "".join(f"env:         {k}={v}\n" for k, v in plan.env_overrides.items())
     )
+    boot = boot_line(plan.runtime, wine_addons) if not plan.prefix.is_dir() else None
+    if boot:
+        text += f"if created:  {boot}\n"
     if portable_lines:
         text += "\n".join(portable_lines) + "\n"
     if plan.unattended is not None:
@@ -178,6 +184,19 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
     text += "\n".join(describe_memory(memory_limit, memory_availability() if memory_limit
                                       else None)[0])
     return text.rstrip(), None
+
+
+WINE_ADDONS_TITLE = "Let Wine offer Mono and Gecko when it creates a prefix"
+WINE_ADDONS_NOTE = ("Off by default: a prefix gitfurl creates with Wine gets no Mono (.NET) or "
+                    "Gecko (Internet Explorer parts), so creating it needs no answer and Wine "
+                    "downloads nothing. Most installers need neither. Turn this on to have Wine "
+                    "show its install dialogs (answering Install downloads them). Not used for "
+                    "Proton or the native route.")
+
+
+def boot_line(runtime: str, addons: bool) -> str | None:
+    """The window's line on how a new prefix is booted (wineboot_line in its words)."""
+    return wineboot_line(runtime, addons, option=f"'{WINE_ADDONS_TITLE}'")
 
 
 SETUP_INSTEAD_TITLE = "Run Setup instead (Wine/Proton route)"
@@ -527,6 +546,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     scan_var = tk.BooleanVar(value=False)
     memory_var = tk.BooleanVar(value=True)  # the memory limit: on by default
     unattended_var = tk.BooleanVar(value=False)
+    addons_var = tk.BooleanVar(value=False)  # Wine's Mono and Gecko dialogs: off
     setup_var = tk.BooleanVar(value=False)  # "Run Setup instead": off, so the route is automatic
     route_cache: dict = {}
     progress_var = tk.StringVar(value="Shown while an installer runs: payload read, rate, rough ETA.")
@@ -899,6 +919,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         return memory_switch["w"]
 
     row(c, MEMORY_TITLE, MEMORY_NOTE, memory_widget)
+    row(c, WINE_ADDONS_TITLE, WINE_ADDONS_NOTE,
+        lambda p: w.Switch(p, addons_var, command=lambda: refresh_plan()))
     row(c, SETUP_INSTEAD_TITLE, SETUP_INSTEAD_NOTE,
         lambda p: w.Switch(p, setup_var, command=lambda: refresh_plan()))
     row(c, UNATTENDED_TITLE, UNATTENDED_NOTE,
@@ -1115,7 +1137,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         else:
             text, err = describe_plan(installer_var.get(), name, runtime, proton_dir(),
                                       portable_var.get(), scan_var.get(), memory_var.get(),
-                                      unattended_var.get())
+                                      unattended_var.get(), wine_addons=addons_var.get())
             set_text(plan_box, text or (err or ""))
             rows = plan_checklist(installer_problem(installer_var.get()), prefix_error, exists,
                                   create_var.get(), runtime, bool(tool), err,
@@ -1220,11 +1242,14 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         except ValueError as exc:
             messagebox.showerror("Proton", str(exc))
             return
+        extra_env = {**extra_env, **wineboot_env(runtime_var.get(), addons_var.get())}
         plan = plan_create(name, tool, extra_env=extra_env)
+        boot = boot_line(runtime_var.get(), addons_var.get())
         if not messagebox.askyesno(
             "Create prefix?",
             f"Create a new dedicated prefix at:\n{plan['path']}\n\nCommand: "
             f"{' '.join(plan['argv'])}\nRuntime: {runtime_var.get()}\n\n"
+            + (f"{boot}\n\n" if boot else "") +
             "Your ~/.wine is not used or changed."
             + (RUNTIME_DOWNLOAD_NOTE if runtime_var.get() == "proton" else ""),
             default="no",
@@ -1253,7 +1278,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         now = datetime.now()  # one time stamp: the approved text names the same Inno log
         text, err = describe_plan(installer_var.get(), selected_prefix(), runtime_var.get(),
                                   proton_dir(), portable_var.get(), scan_var.get(),
-                                  memory_var.get(), unattended_var.get(), now)
+                                  memory_var.get(), unattended_var.get(), now,
+                                  wine_addons=addons_var.get())
         err = err or memory_problem(memory_var.get())
         if err:
             messagebox.showerror("Cannot run", err)
@@ -1275,7 +1301,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                           portable=portable_var.get(), scan=scan_plan,
                           memory_limit=memory_var.get(),
                           unattended=unattended_for(validate_installer(installer_var.get().strip()),
-                                                    selected_prefix(), unattended_var.get(), now))
+                                                    selected_prefix(), unattended_var.get(), now),
+                          wine_addons=addons_var.get())
         missing = not plan.prefix.is_dir()
         if missing and not create_var.get():
             messagebox.showerror("Prefix missing", f"{plan.prefix} does not exist. Create it first, "
@@ -1671,6 +1698,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                     "scan_switch": scan_switch,
                     "scan_reason": scan_reason,
                     "setup_var": setup_var,
+                    "addons_var": addons_var,
                     "changes_var": changes_var,
                     "plan_checklist_rows": lambda: {k: (bool(f.winfo_manager()), m.cget("text"))
                                                     for k, (f, _mk, m) in check_rows.items()},

@@ -43,6 +43,9 @@ class InstallPlan:
     # A gitfurl.unattended.UnattendedPlan: run an Inno Setup installer without its wizard
     # (its switches are already in argv). Off by default.
     unattended: object = None
+    # Keep Wine's Mono and Gecko install dialogs when the prefix is created (wine runtime).
+    # Off by default: wineboot gets prefixes.QUIET_WINEBOOT_ENV.
+    wine_addons: bool = False
 
     @property
     def installer(self) -> Path:
@@ -89,7 +92,8 @@ def runtime_env(runtime: str, proton_path: str | None) -> dict[str, str]:
 def build_plan(installer: Path, prefix_name: str, env: dict[str, str] | None = None,
                runtime: str = "wine", proton_path: str | None = None,
                portable: bool = False, scan=None,
-               memory_limit: bool = False, unattended=None) -> InstallPlan:
+               memory_limit: bool = False, unattended=None,
+               wine_addons: bool = False) -> InstallPlan:
     prefix = prefix_path(prefix_name, env)
     extra = runtime_env(runtime, proton_path)
     if portable:
@@ -124,6 +128,7 @@ def build_plan(installer: Path, prefix_name: str, env: dict[str, str] | None = N
         scan=scan,
         memory_limit=memory_limit,
         unattended=unattended,
+        wine_addons=wine_addons,
     )
 
 
@@ -724,7 +729,10 @@ def run_with_prefix(plan: InstallPlan, wine: str, create_if_missing: bool,
             raise FileNotFoundError(
                 f"prefix does not exist: {plan.prefix} (run 'gitfurl cli prefix create')"
             )
-        extra = {k: v for k, v in plan.env_overrides.items() if k != "WINEPREFIX"}
+        from gitfurl.prefixes import with_wineboot_env
+
+        extra = with_wineboot_env({k: v for k, v in plan.env_overrides.items()
+                                   if k != "WINEPREFIX"}, plan.runtime, plan.wine_addons)
         boot_scope = None
         if plan.memory_limit:  # wineboot gets the same limits, fixed (no adjustment)
             from gitfurl.memlimit import prepare
