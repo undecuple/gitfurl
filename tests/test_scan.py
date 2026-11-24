@@ -466,12 +466,19 @@ class VersionTests(unittest.TestCase):
         base = {"platform": "p", "wine": r, "bwrap": r, "umu": r, "innoextract": r, "tkinter": r}
         text = doctor.format_report({**base, "clamscan": doctor.ToolReport(
             "clamscan", "/usr/bin/clamscan", VERSION, None)})
-        self.assertIn("clamscan: at /usr/bin/clamscan", text)
+        self.assertIn("clamscan: ClamAV 1.4.3 at /usr/bin/clamscan (optional, for --scan", text)
         self.assertIn("dated 2025-10-02", text)
         self.assertIn("never updates", text)
         text = doctor.format_report({**base, "clamscan": doctor.ToolReport(
             "clamscan", None, None, "not found on PATH")})
         self.assertIn("clamscan: unavailable (not found on PATH)", text)
+        text = doctor.format_report({**base, "clamscan": doctor.ToolReport(
+            "clamscan", "/usr/bin/clamscan", "ClamAV 1.5.4", None)})
+        self.assertIn("clamscan: ClamAV 1.5.4 at /usr/bin/clamscan", text)
+        self.assertIn("no signature database reported", text)
+        text = doctor.format_report({**base, "clamscan": doctor.ToolReport(
+            "clamscan", "/usr/bin/clamscan", "odd", None)})
+        self.assertIn("clamscan: version not recognised at /usr/bin/clamscan", text)
 
 
 class RunGateTests(Fixture):

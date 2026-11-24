@@ -827,6 +827,27 @@ class ReviewFixTests(unittest.TestCase):
         self.assertIn("tkinter", doctor.format_report(
             {"platform": "x", "wine": r, "bwrap": r, "umu": r, "innoextract": r, "tkinter": r}))
 
+    def test_doctor_wording(self):
+        # Seen on a real system on 2026-11-23: "tkinter: available at importable", and the
+        # optional notes shown only on one of found/missing.
+        from gitfurl import doctor
+
+        with mock.patch("importlib.util.find_spec", return_value=object()):
+            tk = doctor.probe_tkinter()
+        found = doctor.ToolReport("x", "/bin/x", "x 1.0", None)
+        gone = doctor.ToolReport("x", None, None, "not found on PATH")
+        for tool in (found, gone):
+            text = doctor.format_report({"platform": "p", "wine": tool, "bwrap": tool,
+                                         "umu": tool, "innoextract": tool, "tkinter": tk})
+            self.assertIn("tkinter: available (importable)\n", text)
+            self.assertNotIn("at importable", text)
+            lines = text.splitlines()  # platform, wine, bwrap, umu-run, innoextract, tkinter
+            self.assertTrue(lines[2].endswith("(optional, for --portable)"), lines[2])
+            self.assertTrue(lines[3].endswith("(optional, for the proton runtime)"), lines[3])
+            self.assertTrue(lines[4].endswith(
+                "(optional; only noted: gitfurl never runs it to extract)"), lines[4])
+            self.assertNotIn("optional", lines[1])  # wine
+
     def test_version_is_the_same_everywhere(self):
         import tomllib
 
