@@ -20,6 +20,11 @@ try:
 except ImportError:  # python -m unittest tests.test_route
     from tests.farc_writer import F, make_archive
 
+try:
+    import inno_writer as w
+except ImportError:  # python -m unittest tests.test_route
+    from tests import inno_writer as w
+
 from gitfurl import cli
 from gitfurl.detect import ROUTE_NATIVE, ROUTE_UNSUPPORTED, ROUTE_WINE, describe, detect
 from gitfurl.route import (
@@ -27,7 +32,9 @@ from gitfurl.route import (
     archives_not_linked,
     choose_route,
     is_redist,
+    link_check,
     memory_problem,
+    script_names,
 )
 
 INNO = b"MZ" + b"\0" * 200 + b"Inno Setup Setup Data (5.5.0) (u)" + b"\0" * 40
@@ -116,7 +123,8 @@ class ChooseRouteTests(Base):
         line = choice.line()
         self.assertIn("route: native (chosen by gitfurl)", line)
         self.assertIn("an Inno Setup installer; its payload is 2 FreeArc archives", line)
-        self.assertIn("storing, lzma, exe, delta or rep", line)
+        self.assertIn("storing, lzma, exe, delta, rep, 4x4 (with lzma inside) or srep", line)
+        self.assertIn("the archives share the installer's name or its folder's", line)
         self.assertEqual(len(choice.extract.archives), 2)
 
     def test_unhandled_method_falls_back_to_wine_with_the_reason(self):
@@ -238,6 +246,73 @@ class ChooseRouteTests(Base):
         self.assertIsNotNone(names("dl", "setup.exe", "01.bin"))  # no base name at all
         self.assertIsNotNone(names("ab", "setup.exe", "ab-01.bin"))  # too short to match a folder
         self.assertIsNotNone(names("NAME game", "setup.exe", "NAME-01.bin", "other.bin"))
+
+    def script_setup(self, folder, *names, code=()):
+        """A synthetic Inno Setup installer in `folder` whose script names `names` as external
+        [Files] sources ({src}\\name) and `code` as [Code] strings."""
+        where = self.base / folder
+        where.mkdir(exist_ok=True)
+        files = [w.WFile("{app}\\", kind="external", source="{src}\\" + n) for n in names]
+        data, _ = w.build(w.Spec(files=files, code=w.code_blob(list(code)) if code else b""))
+        inst = where / "setup.exe"
+        inst.write_bytes(data)
+        return inst
+
+    def put(self, inst, name, blocks_folders):
+        blocks, folders = blocks_folders
+        (inst.parent / name).write_bytes(make_archive(blocks, folders))
+
+    def test_archives_the_setup_script_names_are_linked(self):
+        # Names unrelated to the installer and its folder: the name check alone says Wine.
+        inst = self.script_setup("dl", "data-01.bin")
+        self.put(inst, "data-01.bin", lzma_blocks())
+        self.put(inst, "data-02.bin", chain_blocks())  # the numbered file after a named one
+        with no_process():
+            choice = choose_route(inst, "p1", detect(inst), "auto", self.env)
+        self.assertEqual((choice.route, choice.chosen_by), (ROUTE_NATIVE, "gitfurl"),
+                         choice.line())
+        self.assertIn("the setup script names every archive", choice.line())
+        self.assertEqual(script_names(inst), {"data-01.bin", "data-02.bin"})
+
+    def test_archive_named_in_code_is_linked(self):
+        inst = self.script_setup("dl", code=["{src}\\pack.arc"])
+        self.put(inst, "pack.arc", lzma_blocks())
+        choice = choose_route(inst, "p1", detect(inst), "auto", self.env)
+        self.assertEqual(choice.route, ROUTE_NATIVE, choice.line())
+
+    def test_an_archive_the_script_does_not_name_falls_back_to_wine(self):
+        inst = self.script_setup("dl", "data-01.bin")
+        self.put(inst, "data-01.bin", lzma_blocks())
+        self.put(inst, "extra.arc", chain_blocks())
+        choice = choose_route(inst, "p1", detect(inst), "auto", self.env)
+        self.assertEqual(choice.route, ROUTE_WINE)
+        line = choice.line()
+        self.assertIn("the setup script names 1 of the 2 (not named: extra.arc;", line)
+        self.assertIn("use --route native", line)
+        choice = choose_route(inst, "p1", detect(inst), "native", self.env)
+        self.assertEqual((choice.route, choice.chosen_by), (ROUTE_NATIVE, "you"))
+        self.assertIn("you chose this route although the FreeArc archives", choice.line())
+
+    def test_script_names_never_raises(self):
+        self.assertIsNone(script_names(self.setup))  # INNO is a header only, not setup data
+        self.assertIsNone(script_names(self.base / "missing.exe"))
+        self.arc("unrelated.arc", lzma_blocks())
+        self.assertIn("could not be read for the names it uses", self.choose().line())
+
+    def test_link_check_with_script_names(self):
+        inst, arcs = Path("/x/dl/setup.exe"), [Path("/x/dl/a.bin"), Path("/x/dl/b.bin")]
+        self.assertEqual(link_check(inst, arcs, {"a.bin", "b.bin", "c.bin"}),
+                         (None, "the setup script names every archive"))
+        why, how = link_check(inst, arcs, {"a.bin"})
+        self.assertIsNone(how)
+        self.assertIn("do not share one base name, and the setup script names 1 of the 2", why)
+        self.assertEqual(link_check(Path("/x/dl/a.arc"), [Path("/x/dl/a.arc")], set()),
+                         (None, "the installer is the archive"))
+        why, _ = link_check(Path("/x/dl/a.arc"), [Path("/x/dl/a.arc"), Path("/x/dl/z.arc")],
+                            has_script=False)
+        self.assertIn("the installer has no setup script gitfurl can read", why)
+        # The name check still links archives the script does not name.
+        self.assertEqual(link_check(inst, [Path("/x/dl/setup-1.bin")], set())[0], None)
 
     def test_setup_only_options_choose_wine_on_auto(self):
         # Review finding: --unattended or --portable were only listed as "do not apply" and the

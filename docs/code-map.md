@@ -60,7 +60,7 @@ flowchart LR
   cli --> cleanup & detect & doctor & extract & inno & memlimit & portable & prefixes & preflight & route & runner & safety & scan & unattended
   gui --> cleanup & detect & doctor & memlimit & portable & prefixes & preflight & route & runner & scan & theme & unattended & widgets
   widgets --> pixelfont & theme
-  route --> changes & detect & extract & farc & memlimit & prefixes & runner
+  route --> changes & detect & extract & farc & inno & memlimit & prefixes & runner
   runner --> changes & memlimit & portable & prefixes & preflight & procgroup & progress & scan & unattended
   detect --> farc & inno
   inno --> detect & extract & farc & prefixes
