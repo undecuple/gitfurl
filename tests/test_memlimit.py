@@ -783,12 +783,12 @@ class PrefixCreationTests(unittest.TestCase):
 
 
 class GuiTests(unittest.TestCase):
-    def test_memory_problem_and_checklist(self):
-        from gitfurl.gui import MEMORY_TITLE, memory_problem, plan_checklist, run_reason
+    def test_memory_limit_problem_and_checklist(self):
+        from gitfurl.gui import MEMORY_TITLE, memory_limit_problem, plan_checklist, run_reason
 
         none = Availability(False, "systemd-run was not found on PATH")
-        self.assertIsNone(memory_problem(False, none))
-        why = memory_problem(True, none)
+        self.assertIsNone(memory_limit_problem(False, none))
+        why = memory_limit_problem(True, none)
         self.assertIn("NOT available: systemd-run was not found on PATH", why)
         self.assertIn(f"Turn off '{MEMORY_TITLE}'", why)
         rows = plan_checklist(None, None, True, True, "wine", True, None, why)
@@ -796,8 +796,8 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(run_reason(rows, busy=False).startswith("Run is off: memory limit"))
         with tempfile.TemporaryDirectory() as d:
             ok = Availability(True, "ok", "/usr/bin/systemd-run", "/usr/bin/systemctl")
-            self.assertIsNone(memory_problem(True, ok, meminfo(Path(d) / "m", 16 * GIB, 9 * GIB)))
-            low = memory_problem(True, ok, meminfo(Path(d) / "m", 16 * GIB, GIB))
+            self.assertIsNone(memory_limit_problem(True, ok, meminfo(Path(d) / "m", 16 * GIB, 9 * GIB)))
+            low = memory_limit_problem(True, ok, meminfo(Path(d) / "m", 16 * GIB, GIB))
             self.assertIn("Free at least", low)
 
 

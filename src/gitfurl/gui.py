@@ -123,7 +123,7 @@ def unattended_for(installer, prefix: str, enabled: bool, now=None):
     return plan_unattended(prefix, detect(installer), now)
 
 
-def memory_problem(enabled: bool, avail=None, meminfo: str = "/proc/meminfo") -> str | None:
+def memory_limit_problem(enabled: bool, avail=None, meminfo: str = "/proc/meminfo") -> str | None:
     """Why Run must stay off for the memory limit, or None. Reads files only."""
     if not enabled:
         return None
@@ -400,7 +400,7 @@ def plan_checklist(installer_error: str | None, prefix_error: str | None, prefix
     Run is allowed only when every row is ok. A row that is not ok says what is missing in
     words, so the state never depends on colour alone. `plan_error` is a problem the plan
     itself reports after the other rows pass (for example a missing Proton folder).
-    `memory_error` is why the memory limit cannot be used (see memory_problem); it is always
+    `memory_error` is why the memory limit cannot be used (see memory_limit_problem); it is always
     shown, since only the user can decide to run without the limit.
     """
     tool = "umu-run" if runtime == "proton" else "Wine"
@@ -1162,7 +1162,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             set_text(plan_box, text or (err or ""))
             rows = plan_checklist(installer_problem(installer_var.get()), prefix_error, exists,
                                   create_var.get(), runtime, bool(tool), err,
-                                  memory_problem(memory_var.get()), as_root=running_as_root())
+                                  memory_limit_problem(memory_var.get()), as_root=running_as_root())
         for key, (frame, mark, msg) in check_rows.items():
             hit = next((r for r in rows if r[0] == key), None)
             if hit is None:
@@ -1302,7 +1302,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                                   proton_dir(), portable_var.get(), scan_var.get(),
                                   memory_var.get(), unattended_var.get(), now,
                                   wine_addons=addons_var.get())
-        err = err or memory_problem(memory_var.get())
+        err = err or memory_limit_problem(memory_var.get())
         if err:
             messagebox.showerror("Cannot run", err)
             return

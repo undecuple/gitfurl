@@ -533,11 +533,11 @@ def _real_install(args, det, choice) -> int:
     except ValueError as exc:
         print(f"error: {exc}. Nothing was run.", file=sys.stderr)
         return 1
-    memory_lines, memory_problem = _memory_lines(plan)
-    if memory_problem:
+    memory_lines, limit_problem = _memory_lines(plan)
+    if limit_problem:
         for line in memory_lines:
             print(line)
-        print(f"error: {memory_problem}. {MEMORY_OFF_HINT}", file=sys.stderr)
+        print(f"error: {limit_problem}. {MEMORY_OFF_HINT}", file=sys.stderr)
         return 2
     print(f"About to run: {plan.preview()}")
     print(f"prefix: {plan.prefix}" + (" (will be created first)" if missing else ""))

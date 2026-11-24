@@ -158,7 +158,7 @@ def main() -> int:
     # not depend on this machine's systemd; run_tracked is a fake, so no scope is created.
     gui.memory_availability = lambda *_a, **_k: Availability(
         True, "test", "/fake/systemd-run", "/fake/systemctl")
-    gui.memory_problem = lambda *_a, **_k: None
+    gui.memory_limit_problem = lambda *_a, **_k: None
     messagebox.askyesno = ask
     messagebox.showerror = lambda title, msg, **_k: errors.append(f"{title}: {msg}")
     filedialog.askopenfilename = lambda **_k: installer

@@ -335,7 +335,7 @@ class NativeInstallPlan:
         return lines
 
 
-def memory_problem(need: int, meminfo: str = "/proc/meminfo") -> str | None:
+def unpack_memory_problem(need: int, meminfo: str = "/proc/meminfo") -> str | None:
     """Why the unpack's decoders may not fit in free memory now, or None. Reads meminfo only.
 
     `need` is ExtractPlan.memory (the most one data block's decoders may hold at once). The
@@ -612,7 +612,7 @@ def native_stops(xplan, *, missing: bool, create_ok: bool, wine: str | None,
     if problem:
         stops.append(NativeStop("space", problem))
     if memory_check:
-        mem = memory_problem(xplan.memory, meminfo)
+        mem = unpack_memory_problem(xplan.memory, meminfo)
         if mem:
             stops.append(NativeStop("memory", mem))
     return stops

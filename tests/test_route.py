@@ -33,7 +33,7 @@ from gitfurl.route import (
     choose_route,
     is_redist,
     link_check,
-    memory_problem,
+    unpack_memory_problem,
     script_names,
 )
 
@@ -329,16 +329,16 @@ class ChooseRouteTests(Base):
                                   setup_options=[opt])
             self.assertEqual(choice.route, ROUTE_NATIVE, opt)
 
-    def test_memory_problem_compares_with_memavailable_minus_the_reserve(self):
+    def test_unpack_memory_problem_compares_with_memavailable_minus_the_reserve(self):
         gib = 1 << 30
         info = self.base / "meminfo"
         info.write_text(f"MemTotal: {4 * gib // 1024} kB\nMemAvailable: {2 * gib // 1024} kB\n")
-        self.assertIsNone(memory_problem(0, str(info)))
-        self.assertIsNone(memory_problem(gib // 2, str(info)))  # 2 GiB - 1 GiB reserve
-        text = memory_problem(2 * gib, str(info))
+        self.assertIsNone(unpack_memory_problem(0, str(info)))
+        self.assertIsNone(unpack_memory_problem(gib // 2, str(info)))  # 2 GiB - 1 GiB reserve
+        text = unpack_memory_problem(2 * gib, str(info))
         self.assertIn("may need up to 2.0 GiB", text)
         self.assertIn("MemAvailable 2.00 GiB", text)
-        self.assertIn("could not read", memory_problem(1, str(self.base / "missing")))
+        self.assertIn("could not read", unpack_memory_problem(1, str(self.base / "missing")))
 
     def test_redistributable_names(self):
         self.assertTrue(is_redist(["_Redist"], "x.exe"))

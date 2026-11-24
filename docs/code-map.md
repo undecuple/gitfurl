@@ -2,7 +2,7 @@
 
 A map of the source for people changing it: layers, which module uses which, the main control and data flows, the entry points, and which tests and CI jobs cover what. The per-module details are in [architecture.md](architecture.md); this page is the overview. The diagrams are Mermaid (GitHub draws them).
 
-Checked against `main` at df6c6c10 (2026-11-24). The import graph below was read from the source with Python's `ast` module, so it lists every `from gitfurl… import` in each file, including imports inside functions.
+Checked against `main` at b63da882 (2026-11-24). The import graph below was read from the source with Python's `ast` module, so it lists every `from gitfurl… import` in each file, including imports inside functions.
 
 ## Layers
 
@@ -105,7 +105,7 @@ flowchart TD
   B --> C["detect.detect(): headers, inno.read_fd(), farc.read_fd() for archives beside it"]
   C --> D{"route.choose_route()<br/>auto · native · wine"}
   D -->|native| N1["NativeInstallPlan.describe()<br/>(dry run stops here)"]
-  N1 --> N2["memory_problem(), space check"]
+  N1 --> N2["unpack_memory_problem(), space check"]
   N2 --> N3{"approval<br/>typed yes or --yes"}
   N3 -->|yes| N4["native_prefix_create()<br/>wineboot, mscoree/mshtml off, incomplete marker"]
   N4 --> N5["run_native() → extract.extract()<br/>farc_codecs pull pipeline, CRC-32, Stop"]
