@@ -32,6 +32,27 @@ def fake_run_tracked(plan, tool, create, track, env=None, run=None, options=None
     return (0, Path("fake.log"), None)
 
 
+stops: list = []  # the should_stop callable each fake prefix creation got
+
+
+def fake_create_prefix(name, wine, env=None, run=None, extra_env=None, wrap=None,
+                       should_stop=None):
+    """Stands in for wineboot: waits for `released` or a Stop, as run_in_group would."""
+    from gitfurl.prefixes import PrefixStopped
+
+    from gitfurl.prefixes import INCOMPLETE_MARKER, prefixes_root
+
+    stops.append(should_stop)
+    folder = prefixes_root() / name
+    folder.mkdir(parents=True)
+    (folder / INCOMPLETE_MARKER).write_text("")  # as create_prefix does before wineboot
+    while not released.wait(0.02):
+        if should_stop is not None and should_stop():
+            raise PrefixStopped(f"creating the prefix was stopped (fake {name})")
+    (folder / INCOMPLETE_MARKER).unlink()  # wineboot exited 0
+    return 0
+
+
 def ask(title, *_a, **_k):
     dialogs.append(title)
     ans = answers[title]
@@ -92,7 +113,58 @@ def stop_enabled(root):
     return button(root, "Stop")._state == "normal"
 
 
+def prefix_scenario(root, name):
+    stop = button(root, "Stop")
+    answers["Create prefix?"] = True
+    button(root, "Create now")._click(None)
+    pump(root, lambda: len(stops) == 1, "the prefix creation to start")
+    assert stops[0] is not None, "Create passed no should_stop"
+    assert stop_visible(root) and stop_enabled(root)
+    assert "Creating prefix" in label_texts(root)
+    if name == "create_yes":
+        answers["Stop creating the prefix?"] = True
+        stop._click(None)
+        assert dialogs[-1] == "Stop creating the prefix?"
+        assert not stop_enabled(root)
+        assert "Stopping the prefix creation..." in label_texts(root)
+        pump(root, lambda: "Stopped: creating the prefix was stopped" in label_texts(root),
+             "the stopped result")
+        assert not stop_visible(root) and stop_enabled(root)
+        text = label_texts(root)
+        assert "incomplete" in text, text  # the folder is not shown as ready
+        assert "Prefix was not completely created" in text, text  # and Run stays off
+    elif name == "create_ended_while_open":
+        def ends_then_yes():
+            released.set()  # wineboot ends while the dialog is open
+            pump(root, lambda: "exited with status 0" in label_texts(root),
+                 "the result while the dialog is open")
+            return True
+
+        answers["Stop creating the prefix?"] = ends_then_yes
+        stop._click(None)
+        settle(root)
+        text = label_texts(root)
+        assert "exited with status 0" in text and "Stopping" not in text, text
+        assert not stops[0]()  # the late Yes did not set the flag
+        assert stop_enabled(root) and not stop_visible(root)
+        assert "incomplete" not in text, text
+    elif name == "create_no":
+        answers["Stop creating the prefix?"] = False
+        stop._click(None)
+        settle(root)
+        assert not stops[0]() and stop_enabled(root) and stop_visible(root)
+        released.set()
+        pump(root, lambda: "exited with status 0" in label_texts(root), "the result")
+        assert not stop_visible(root)
+    else:
+        raise AssertionError(f"unknown scenario {name}")
+    assert not errors, errors
+
+
 def scenario(root, name):
+    if name.startswith("create_"):
+        prefix_scenario(root, name)
+        return
     stop = button(root, "Stop")
     control = start_run(root)
     assert stop_visible(root) and stop_enabled(root)
@@ -154,6 +226,7 @@ def scenario(root, name):
 def main() -> int:
     name, installer = sys.argv[1], sys.argv[2]
     gui.run_tracked = fake_run_tracked
+    gui.create_prefix = fake_create_prefix
     # The memory limit stays on (its default) but is reported as available, so the case does
     # not depend on this machine's systemd; run_tracked is a fake, so no scope is created.
     gui.memory_availability = lambda *_a, **_k: Availability(
