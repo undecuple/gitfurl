@@ -2,7 +2,7 @@
 
 A map of the source for people changing it: layers, which module uses which, the main control and data flows, the entry points, and which tests and CI jobs cover what. The per-module details are in [architecture.md](architecture.md); this page is the overview. The diagrams are Mermaid (GitHub draws them).
 
-Checked against `main` at 1183f440 (2026-11-23). The import graph below was read from the source with Python's `ast` module, so it lists every `from gitfurl… import` in each file, including imports inside functions.
+Checked against `main` at b62cb909 (2026-11-24). The import graph below was read from the source with Python's `ast` module, so it lists every `from gitfurl… import` in each file, including imports inside functions.
 
 ## Layers
 
@@ -58,9 +58,9 @@ Arrows point from a module to the modules it imports. Modules with no gitfurl im
 flowchart LR
   app --> cli & gui
   cli --> cleanup & detect & doctor & extract & inno & memlimit & portable & prefixes & preflight & route & runner & safety & scan & unattended
-  gui --> cleanup & detect & doctor & memlimit & portable & prefixes & preflight & route & runner & scan & theme & unattended & widgets
+  gui --> cleanup & detect & doctor & memlimit & portable & prefixes & preflight & route & runner & safety & scan & theme & unattended & widgets
   widgets --> pixelfont & theme
-  route --> changes & detect & extract & farc & inno & memlimit & prefixes & runner
+  route --> changes & detect & extract & farc & inno & memlimit & prefixes & runner & scan
   runner --> changes & memlimit & portable & prefixes & preflight & procgroup & progress & scan & unattended & windows
   windows --> detect
   detect --> farc & inno
@@ -86,7 +86,7 @@ Notes:
 |---|---|---|
 | `gitfurl` (console script) | `app.main()` | from `pyproject.toml` `[project.scripts]` |
 | `python -m gitfurl` | `__main__.py` → `app.main()` | |
-| The window | `gui.main(start="library", prefix=None, driver=None)` | `driver` is the test hook `tests/gui_stop_driver.py` uses |
+| The window | `gui.main(start="library", prefix=None, driver=None)` | `driver` is the test hook `tests/gui_stop_driver.py` and `tests/gui_native_driver.py` use |
 | `gitfurl cli doctor` | `doctor.run_doctor()`, `format_report()` | read-only probes with a timeout |
 | `gitfurl cli install` | `cli.main()` → `choose_route()` → `_native_install()` or `_real_install()` (dry run printed inline) | see the flow below |
 | `gitfurl cli extract` | `cli._extract_command()` → `extract.plan_extract()`, `extract.extract()` | FreeArc archives beside the installer, into an existing prefix |
@@ -207,11 +207,16 @@ flowchart LR
 | `tests/test_crash.py` | `progress.prefix_processes` (crash handler), `windows` (fake `xwininfo`/`xprop`), the crash and stall notes in `runner` | `tests/test_gitfurl.py` (`RunEventHelpers`) |
 | `tests/test_gui_polish.py` | `theme`, `widgets`, window polish (window parts skipped without `xvfb-run` or tkinter) | - |
 | `tests/test_gui_stop.py` | Stop in the real window | `tests/gui_stop_driver.py` (`xvfb-run -a`) |
+| `tests/test_native_run.py` | `route.native_stops`, `route.perform_native` (stop checks, Stop during the scan and wineboot, cancel) | `tests/test_route.py` (`Base`, archive builders on `tests/farc_writer.py`) |
+| `tests/test_gui_native.py` | the window's native-route plain functions (route switches, stop texts, footer, root refusal, plan and approval, progress, end text, cleanup) | `tests/test_native_run.py` (`NativeBase`) |
+| `tests/test_gui_native_xvfb.py` | the native route in the real window: Run and the unpack, Stop, the "Run Setup instead" switch, declining the approval | `tests/gui_native_driver.py` (`xvfb-run -a`) |
+| `tests/test_wineboot.py` | `prefixes.wineboot_env`, `with_wineboot_env`, `wineboot_line`; `--wine-addons` on `install` and `prefix create`; the window's plan line | - |
+| `tests/test_gui_stall.py` | which crash and stall notes the window keeps on screen; the 120 s stall advice | - |
 
 Local check with the pinned versions: `ruff==0.11.13 check src tests` and `PYTHONPATH=src pytest==8.3.5 -q tests` on Python 3.11 (see [development.md](development.md)). Manual runs with real or synthetic installers go through `tools/sandbox.sh` only; they are recorded in [testing.md](testing.md).
 
 ## What this map does not show
 
-- The internal structure of `gui.py` (1,340 lines: pages, dialogs and the run loop in one `main()` closure). Its pages are named in the [user guide](user-guide.md); the map shows only its calls into the core.
+- The internal structure of `gui.py` (about 1,750 lines: pages, dialogs and the run loop in one `main()` closure). Its pages are named in the [user guide](user-guide.md); the map shows only its calls into the core.
 - Decoder internals of `farc_codecs.py` and the record layouts of `inno.py`: they follow the clean-room specifications, which are not in the repository.
 - Timing: which calls happen on Tk's thread and which on the worker thread beyond the sequence above.
