@@ -24,6 +24,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - The plan no longer says "native extraction is not available in this version"; the route line gives the real choice.
 
 ### Changed
+- **FreeArc extraction removes a file that fails its CRC-32 check** and names it, as `extract-inno` already does with its checksums, so no damaged file is left in the prefix looking complete. If it cannot be removed, the result names it as damaged and still there. A file cut short by Stop is still kept and named as incomplete.
 - FreeArc names: `\` now counts as a folder separator, like `/`, so names from an archive made on Windows are no longer counted as unsafe for that alone.
 
 ## [1.3.0] - 2026-11-18
