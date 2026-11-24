@@ -2320,8 +2320,9 @@ class FakeClock:
         return self.now
 
 
-class RunEventTests(unittest.TestCase):
-    """Stall advisory, process and memory events, and the three-field result. Fakes only."""
+class RunEventHelpers:
+    """Fixture and helpers for runs with a fake /proc (no test methods: tests/test_crash.py
+    uses them too)."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -2360,8 +2361,8 @@ class RunEventTests(unittest.TestCase):
         from gitfurl.runner import RunOptions, execute
 
         return execute(self.plan, "/x/wine", self.env, run,
-                       RunOptions(progress_interval=0.05, proc_root=str(self.proc),
-                                  meminfo=str(self.meminfo), **opts))
+                       RunOptions(**{"progress_interval": 0.05, "proc_root": str(self.proc),
+                                     "meminfo": str(self.meminfo), **opts}))
 
     def sleeper(self, seconds=0.6, write=0):
         def run(argv, **kw):
@@ -2380,6 +2381,10 @@ class RunEventTests(unittest.TestCase):
 
         text = Path(res.log_path).with_suffix(".events.jsonl").read_text()
         return [json.loads(line) for line in text.splitlines()], text
+
+
+class RunEventTests(RunEventHelpers, unittest.TestCase):
+    """Stall advisory, process and memory events, and the three-field result. Fakes only."""
 
     def test_stall_advisory_fires_once_and_never_signals(self):
         notes = []
@@ -2421,13 +2426,19 @@ class RunEventTests(unittest.TestCase):
         log.write_text("a")
         d = StallDetector(25, log, FakeClock(10))
         self.assertIsNone(d.check(smp(read=5)))  # read grew
-        self.assertIsNone(d.check(smp(read=5, cpu=2.0)))  # cpu used
+        self.assertIsNone(d.check(smp(read=5, cpu=5.0)))  # cpu used (3% or more)
         log.write_text("ab")
         self.assertIsNone(d.check(smp(read=5, cpu=0.0)))  # log grew
         self.assertIsNone(d.check(smp(read=5, cpu=0.0)))  # idle 10
         self.assertIsNone(d.check(smp(read=5, cpu=0.0)))  # idle 20
         self.assertIsNotNone(d.check(smp(read=5, cpu=0.0)))  # idle 30: fires
         self.assertIsNone(d.check(smp(read=5, cpu=0.0)))  # only once
+        # Wine's own background processes use about 1-2% while nothing happens (Wine 11.0,
+        # 2026-11-24): that is quiet, not movement.
+        d = StallDetector(25, None, FakeClock(10))
+        self.assertIsNone(d.check(smp(cpu=1.5)))
+        self.assertIsNone(d.check(smp(cpu=2.9)))
+        self.assertIsNotNone(d.check(smp(cpu=1.0)))
 
     def test_processes_and_memory_events_without_env_values(self):
         self.fake_prefix_process(pos=2 << 20)

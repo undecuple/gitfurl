@@ -159,6 +159,36 @@ Not tested: data formats 5.5.0 (stock), 5.5.6, 6.0.0, 6.1.0, 6.4.0.1, 6.4.2, 6.4
 
 Cross-check on 2026-11-23 inside `tools/sandbox.sh` (no network, Python 3.11, `python3 -I`, a copy of `src/`; not under Wine). 18 setups were built in the sandbox with the official Inno Setup 6.3.3, 6.7.4 and 7.1.1 compilers (downloaded from jrsoftware's GitHub releases) from 39 generated files (9.2 MB): per version, spanning with solid and non-solid LZMA2, three slices per disk with zip, no loader without and with spanning, and a single-file control. Nine of them (spanning and no loader) were also installed silently under Wine to confirm the builds; every installed file matched. gitfurl read every setup (the layout and the slice file names in the plan matched the files the compiler wrote), and `plan_inno_extract()` and `extract_inno_files()` wrote all 39 files of each, every one matching its source's sha256, with nothing extra. With one 7.1.1 spanning setup changed: a deleted slice and a slice cut by 100 bytes were refused before anything was written, naming the file; two slices swapped ended in "a data chunk could not be decompressed" with the partial file removed. Not checked: Inno Setup 5.5.x (no official 5.5.9 download was available), searching `..\DISK<n>` folders (gitfurl looks only beside the installer), files extracted under Wine.
 
+## Crashes and stuck windows (2026-11-24, UTC)
+
+`tests/test_crash.py` (fake `/proc`, fake `xwininfo` and `xprop`) and `tests/test_gitfurl.py` (stall detector):
+- the crash handler is found under both names, `winedbg.exe` and `winedbg`;
+- a crash handler that appears during the run gives one note, a `crash_handler` event, a log line and the `Crash:` end line, even when only the final sample sees it;
+- one that was running before the run is not counted;
+- the crash note and the stall note list the window titles they are given;
+- a failing window reader is ignored;
+- a portable run does not ask for windows and records `windows: null`;
+- the window reader:
+  - lists only windows whose class matches a program in the prefix and whose `_NET_WM_PID` is one of its processes, including winedbg's "Program Error" window;
+  - reads titles that contain quotes and backslashes;
+  - skips untitled windows and Wine's hidden "Default IME" windows;
+  - returns "unknown" without a display, without the tools, or when a probe fails;
+  - checks at most 16 windows within one 3 s deadline;
+- CPU use under 3% counts as quiet for the stall advisory.
+
+In the sandbox (`tools/sandbox.sh`, no network, `xvfb-run -a`, Wine 11.0 wow64) on 2026-11-24 between 13:04 and 13:11 UTC, with no installer. A fresh prefix was made with `wineboot`, then gitfurl's runner ran Wine's own `rundll32.exe ntdll.dll,DbgBreakPoint` (an unhandled breakpoint, so Wine starts its crash handler) with a 2 s sample interval and a 20 s stall time, and was stopped after the stall note.
+- The first run found the cause of two problems:
+  - Wine 11.0 names the crash handler `winedbg` in `/proc`, so it was not seen;
+  - Wine's background processes used 1–2% CPU throughout, so the stall advisory never fired.
+- After both fixes:
+  - the crash note came 2 s into the run, listing "Program Error";
+  - the stall note came after 20 s;
+  - the log line, the `crash_handler` and `possibly_stalled` events, and the `Crash:` end line were all written;
+  - nothing was stopped by gitfurl except through the test's own Stop.
+- That run also listed "Default IME" and "rundll32". The filter for the IME windows was added after it and was tested with unit tests only.
+
+Not run: a real installer that crashes, a desktop session (XWayland), Proton, and a portable run.
+
 ## Archives the setup script names (2026-11-24, UTC)
 
 `tests/test_route.py`, with Inno Setup installers built by the tests (`tests/inno_writer.py`): archives named by an external `[Files]` source, with the numbered file after it, are linked and the automatic choice is native in a folder whose name links nothing; an archive named in a `[Code]` string is linked; an extra archive the script does not name makes the choice Wine with "the setup script names 1 of the 2 (not named: ...)", and `--route native` then says the archives were not linked; a setup that cannot be read falls back to the name check and says so. In the sandbox (`tools/sandbox.sh`, no network) on 2026-11-24 at 02:54 UTC, only the route choice (nothing unpacked, nothing run) for the second synthetic installer from 2026-11-20: the script names both of its archives, and the automatic choice is now native ("the setup script names every archive"), where it was Wine before.
