@@ -29,6 +29,7 @@ from gitfurl.prefixes import (
     validate_prefix_name,
 )
 from gitfurl.preflight import measure
+from gitfurl.safety import ROOT_MESSAGE, running_as_root
 from gitfurl.runner import (
     CANCEL_REMAINS,
     RUNTIMES,
@@ -179,27 +180,177 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
     return text.rstrip(), None
 
 
-WINDOW_NOT_NATIVE = ("this window does not run the native route yet; 'gitfurl cli install' "
-                     "does (Setup is then not run and gitfurl unpacks the archives itself)")
+SETUP_INSTEAD_TITLE = "Run Setup instead (Wine/Proton route)"
+SETUP_INSTEAD_NOTE = ("Off by default: when the installer's payload is FreeArc archives gitfurl "
+                      "can read, gitfurl unpacks them itself and Setup is not run (the plan says "
+                      "what is skipped). Turn this on to have Setup run and do all of its own "
+                      "steps.")
+
+# The native plan's text names command-line options; the window names its own switches.
+WINDOW_WORDS = (
+    ("run it with: gitfurl cli install <file> --prefix ",
+     "choose that file as the installer here, with the prefix "),
+    ("to unpack them anyway, use --route native",
+     "to unpack them anyway, run 'gitfurl cli install --route native' (the window does not "
+     "offer this)"),
+    ("--route wine", f"the '{SETUP_INSTEAD_TITLE}' switch"),
+    ("--no-memory-limit", f"turning off '{MEMORY_TITLE}'"),
+    ("Create it first with 'gitfurl cli prefix create ", "Create it first (Create now) for '"),
+    ("to have gitfurl unpack the archives itself instead, use --route native (these options "
+     "then do not apply)", "to have gitfurl unpack the archives itself instead, turn those "
+     "options off"),
+)
 
 
-def window_route_text(installer, prefix: str, env=None) -> str:
-    """The detection text with the window's honest route line. Reads headers and archive
-    indexes only. The window always runs Setup (the Wine/Proton route); when gitfurl would
-    have picked the native route, the line says so."""
-    from gitfurl.route import RouteChoice, choose_route
+def window_words(text: str) -> str:
+    for cli_text, window_text in WINDOW_WORDS:
+        text = text.replace(cli_text, window_text)
+    return text
+
+
+def window_setup_options(portable: bool, unattended: bool, runtime: str,
+                         show_changes: bool) -> list[str]:
+    """The window's options that only a Setup run uses (as the command line's --portable,
+    --unattended, --runtime proton and --show-changes): any of them makes the route Wine."""
+    return [label for on, label in (
+        (portable, "portable install"), (unattended, UNATTENDED_TITLE.lower()),
+        (runtime == "proton", "the Proton runtime"),
+        (show_changes, "showing what the installer changed")) if on]
+
+
+def window_route(installer, prefix: str, *, setup_instead: bool = False,
+                 setup_options=(), env=None):
+    """(detection, RouteChoice or None, error text or None). Reads headers and archive
+    indexes only. The route is chosen as the command line's automatic choice; the 'Run Setup
+    instead' switch asks for the Wine/Proton route."""
+    from gitfurl.route import choose_route
 
     det = detect(installer)
     try:
-        auto = choose_route(installer, prefix, det, "auto", env)
+        choice = choose_route(installer, prefix, det, "wine" if setup_instead else "auto", env,
+                              setup_options=list(setup_options))
     except ValueError as exc:
-        return describe_detection(det) + f"\nroute: not chosen ({exc})."
-    if auto.route == "native":
-        choice = RouteChoice("wine", "this window", ("Setup runs under Wine/Proton",
-                                                      WINDOW_NOT_NATIVE))
+        return det, None, str(exc)
+    return det, choice, None
+
+
+def window_route_text(installer, prefix: str, env=None, *, setup_instead: bool = False,
+                      setup_options=()) -> str:
+    """The detection text with the route line the window will take."""
+    det, choice, error = window_route(installer, prefix, setup_instead=setup_instead,
+                                      setup_options=setup_options, env=env)
+    if choice is None:
+        return describe_detection(det) + f"\nroute: not chosen ({error})."
+    return window_words(describe_detection(det, choice))
+
+
+NATIVE_STOP_LINE = ("Stop ends the ClamAV scan, the prefix creation (its own process group, then "
+                    "this prefix's wineserver -k) or the unpack between files or 1 MiB chunks. "
+                    "Files already written are kept and nothing is deleted.")
+
+
+def native_stop_text(stop) -> str:
+    """One route.NativeStop in the window's words."""
+    return {
+        "no_prefix": lambda d: (f"The prefix does not exist: {d}. Create it first, or turn on "
+                                "'Create the prefix if it does not exist'."),
+        "no_wine": lambda d: "Wine is not on PATH; it is needed to create the prefix.",
+        "scope": lambda d: (f"The memory limit cannot be used to create the prefix: {d}. Turn "
+                            f"off '{MEMORY_TITLE}' to create it without the limit."),
+        "space": lambda d: window_words(d) + ".",
+        "memory": lambda d: (f"{d}. Turn off '{MEMORY_TITLE}' to unpack without this check "
+                             "(the unpack can then use all free memory)."),
+    }[stop.kind](stop.detail)
+
+
+def native_plan_text(plan, det, *, memory_lines=(), preflight: str = "",
+                     scan_db_lines=()) -> str:
+    """The approval text for a native run: every step, what is skipped, then the checks."""
+    lines = [window_words(ln) for ln in plan.describe()]
+    lines += list(memory_lines)
+    lines += ["", window_words(describe_detection(det, plan.choice))]
+    if preflight:
+        lines += ["", "Checks before the run (read-only, advisory):", preflight]
+    if scan_db_lines:
+        lines += ["", *scan_db_lines]
+    lines += ["", NATIVE_STOP_LINE, "", "Only unpack installers you are authorised to use."]
+    return "\n".join(lines)
+
+
+def native_plan_for(installer, choice, *, create_ok: bool, memory_on: bool, wine=None,
+                    scan_plan=None, db_info=None, cleanup_text=None, avail=None,
+                    meminfo: str = "/proc/meminfo"):
+    """(route.NativeInstallPlan, its stops, memory lines) for the window, built the way the
+    command line builds them. Reads files and free space only; starts nothing."""
+    from gitfurl.route import NativeInstallPlan, native_stops
+
+    xplan = choice.extract
+    missing = not xplan.prefix.is_dir()
+    create = missing and create_ok
+    memory_lines, scope_problem = [], None
+    if create:
+        memory_lines, scope_problem = describe_memory(
+            memory_on, (avail if avail is not None else memory_availability()) if memory_on
+            else None, meminfo)
+        memory_lines = [f"for the prefix creation: {ln}" if i == 0 else ln
+                        for i, ln in enumerate(memory_lines)]
+    stops = native_stops(xplan, missing=missing, create_ok=create_ok,
+                         wine=wine if create else None, scope_problem=scope_problem,
+                         memory_check=memory_on, meminfo=meminfo)
+    scan_lines = scanmod.describe_scan_plan(scan_plan, db_info) if scan_plan is not None else []
+    plan = NativeInstallPlan(installer, xplan.prefix_name, xplan.prefix, choice, create,
+                             wine if create else None, scan_lines, cleanup_text, [],
+                             memory_check=memory_on)
+    return plan, stops, memory_lines
+
+
+class NativeSample:
+    """A native unpack's progress for the window's bar and line (route.run_native numbers)."""
+
+    def __init__(self, done: int, total: int, elapsed: float):
+        self.done, self.total, self.elapsed = done, total, elapsed
+
+    @property
+    def percent(self) -> float:
+        return 100.0 * self.done / self.total if self.total else 100.0
+
+    def line(self) -> str:
+        from gitfurl.route import _rate_text
+
+        return _rate_text(self.done, self.total, self.elapsed)
+
+
+def native_cleanup_allowed(outcome, stopped: bool) -> bool:
+    """Cleanup only after a complete unpack (status 0) that nobody asked to stop. A Stop that
+    lands after the unpack has returned (during the listings) still skips the cleanup, since
+    the Stop dialog says nothing is deleted."""
+    return not stopped and outcome.result is not None and outcome.result.status == 0
+
+
+def native_end_text(outcome, cleanup_line: str | None, notes) -> tuple[str, str]:
+    """(end text, colour: "ok", "warn" or "error") for a route.NativeOutcome."""
+    notes = list(notes)
+    if len(notes) > 5:  # the first (the scan result, if any) and the latest four
+        notes = [notes[0], "...", *notes[-4:]]
+    tail = "".join(f"\n{n}" for n in notes)
+    res = outcome.result
+    if res is None:
+        head = "Stopped. " if outcome.status == 130 else "Not unpacked. "
+        return (head + window_words(outcome.message or "") + tail,
+                "warn" if outcome.status == 130 else "error")
+    if res.status == 0:
+        head, colour = "Unpacked (Setup was not run).", "ok"
+        clean = f"\n{cleanup_line}" if cleanup_line and cleanup_line != "skipped" else ""
+    elif res.status == 130:
+        head, colour = "Stopped. Files already written are kept; nothing was deleted.", "warn"
+        clean = "\nCleanup skipped." if cleanup_line else ""
     else:
-        choice = auto
-    return describe_detection(det, choice)
+        head, colour = "The unpack ended with an error.", "warn"
+        clean = "\nCleanup skipped: the unpack did not complete." if cleanup_line else ""
+    body = "\n".join(window_words(ln) for ln in res.lines)
+    logs = (f"\nEvent log: {res.events_path}" if res.events_path else "") + \
+        f"\nLocal log: {res.log_path} (may contain your user name and paths)"
+    return f"{head}\n{body}{clean}{tail}{logs}", colour
 
 
 def installer_problem(installer: str) -> str | None:
@@ -215,7 +366,8 @@ def installer_problem(installer: str) -> str | None:
 
 def plan_checklist(installer_error: str | None, prefix_error: str | None, prefix_exists: bool,
                    will_create: bool, runtime: str, runtime_found: bool,
-                   plan_error: str | None = None, memory_error: str | None = None
+                   plan_error: str | None = None, memory_error: str | None = None,
+                   runtime_needed: bool = True, as_root: bool = False
                    ) -> list[tuple[str, bool, str]]:
     """What Run needs, as (key, ok, text) rows in screen order. No side effects.
 
@@ -226,10 +378,12 @@ def plan_checklist(installer_error: str | None, prefix_error: str | None, prefix
     shown, since only the user can decide to run without the limit.
     """
     tool = "umu-run" if runtime == "proton" else "Wine"
-    rows = [
+    rows = [("root", False, ROOT_MESSAGE)] if as_root else []
+    rows += [
         ("installer", installer_error is None,
          "Installer file chosen" if installer_error is None else installer_error),
-        ("runtime", runtime_found,
+        ("runtime", runtime_found or not runtime_needed,
+         f"{tool} not needed: gitfurl unpacks the archives itself" if not runtime_needed else
          f"{tool} found" if runtime_found else f"{tool} not found on PATH"),
     ]
     if prefix_error is not None:
@@ -259,10 +413,13 @@ def run_reason(rows: list[tuple[str, bool, str]], busy: bool) -> str:
     return f"Run is off: {missing[0]}{more}"
 
 
-def create_reason(prefix_error: str | None, prefix_exists: bool, busy: bool) -> str:
+def create_reason(prefix_error: str | None, prefix_exists: bool, busy: bool,
+                  as_root: bool = False) -> str:
     """Text for a disabled Create now button, or "" when it is allowed."""
     if busy:
         return "Create is off: something is already running."
+    if as_root:
+        return f"Create is off: {ROOT_MESSAGE}"
     if prefix_error is not None:
         return f"Create is off: {prefix_error}"
     if prefix_exists:
@@ -283,12 +440,12 @@ def key_hints(page: str) -> str:
 
 
 def run_state_text(kind: str | None, stopping: bool) -> str:
-    """The footer's run state. kind is None, "prefix" or "install"."""
+    """The footer's run state. kind is None, "prefix", "install" or "native"."""
     if kind is None:
         return "Idle"
     if stopping:
         return "Stopping..."
-    return "Creating prefix" if kind == "prefix" else "Installer running"
+    return {"prefix": "Creating prefix", "native": "Unpacking"}.get(kind, "Installer running")
 
 
 def run_in_thread(fn, results: queue.Queue) -> None:
@@ -370,6 +527,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     scan_var = tk.BooleanVar(value=False)
     memory_var = tk.BooleanVar(value=True)  # the memory limit: on by default
     unattended_var = tk.BooleanVar(value=False)
+    setup_var = tk.BooleanVar(value=False)  # "Run Setup instead": off, so the route is automatic
+    route_cache: dict = {}
     progress_var = tk.StringVar(value="Shown while an installer runs: payload read, rate, rough ETA.")
     pending = {"cleanup": None, "control": None, "proton": False}
     proton_var = tk.StringVar(value=os.environ.get("PROTONPATH", ""))
@@ -662,7 +821,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     c = w.RoundCard(det)
     c.pack(fill="x")
     check_rows: dict[str, tuple[tk.Frame, tk.Label, tk.Label]] = {}
-    for key in ("installer", "runtime", "prefix", "plan", "memory"):
+    for key in ("root", "installer", "runtime", "prefix", "plan", "memory"):
         rr = tk.Frame(c.body, bg=w.PANEL)
         mark = tk.Label(rr, text="", bg=w.PANEL, fg=FG, font=F(T["body"], True), width=2)
         mark.pack(side="left", anchor="n")
@@ -740,6 +899,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         return memory_switch["w"]
 
     row(c, MEMORY_TITLE, MEMORY_NOTE, memory_widget)
+    row(c, SETUP_INSTEAD_TITLE, SETUP_INSTEAD_NOTE,
+        lambda p: w.Switch(p, setup_var, command=lambda: refresh_plan()))
     row(c, UNATTENDED_TITLE, UNATTENDED_NOTE,
         lambda p: w.Switch(p, unattended_var, command=lambda: refresh_plan()))
     row(c, "Show what the installer changed on my system",
@@ -879,6 +1040,41 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     def proton_dir():
         return proton_var.get().strip() or None
 
+    def current_route():
+        """(detection, RouteChoice or None, error) for the chosen installer and switches.
+        Reads headers and archive indexes; cached until the file or a switch changes."""
+        text = installer_var.get().strip()
+        if installer_problem(text) is not None:
+            return None, None, None
+        installer = validate_installer(text)
+        try:
+            st = installer.stat()
+        except OSError:
+            return None, None, None
+        options = tuple(window_setup_options(portable_var.get(), unattended_var.get(),
+                                             runtime_var.get(), changes_var.get()))
+        key = (str(installer), st.st_mtime_ns, st.st_size, selected_prefix(), setup_var.get(),
+               options)
+        if route_cache.get("key") != key:
+            route_cache.clear()  # a failed choice must not leave the old value under a new key
+            value = window_route(installer, selected_prefix(), setup_instead=setup_var.get(),
+                                 setup_options=options)
+            route_cache["key"], route_cache["value"] = key, value
+        return route_cache["value"]
+
+    def route_text_now():
+        """The route line for the approval: the route Run takes, from current_route()."""
+        det, choice, error = current_route()
+        if det is None:
+            return ""
+        if choice is None:
+            return describe_detection(det) + f"\nroute: not chosen ({error})."
+        return window_words(describe_detection(det, choice))
+
+    def native_choice():
+        _det, choice, _err = current_route()
+        return choice if choice is not None and choice.route == "native" else None
+
     def refresh_plan(*_):
         name = selected_prefix()
         title_var.set(name or "No prefix")
@@ -891,14 +1087,39 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                                            else str(exc))
             sub_var.set("invalid name")
         runtime = runtime_var.get()
-        text, err = describe_plan(installer_var.get(), name, runtime, proton_dir(),
-                                  portable_var.get(), scan_var.get(), memory_var.get(),
-                                  unattended_var.get())
-        set_text(plan_box, text or (err or ""))
         tool = wine_path["umu"] if runtime == "proton" else wine_path["value"]
-        rows = plan_checklist(installer_problem(installer_var.get()), prefix_error, exists,
-                              create_var.get(), runtime, bool(tool), err,
-                              memory_problem(memory_var.get()))
+        native, preview_error = None, None
+        try:
+            native = native_choice() if prefix_error is None else None
+            if native is not None:
+                plan, stops, mem_lines = native_plan_for(
+                    validate_installer(installer_var.get().strip()), native,
+                    create_ok=create_var.get(), memory_on=memory_var.get(),
+                    wine=wine_path["value"])
+        except Exception as exc:  # noqa: BLE001 - shown in the checklist; nothing runs
+            native, preview_error = None, f"The plan could not be made: {exc}"
+        if preview_error is not None:
+            set_text(plan_box, preview_error)
+            rows = plan_checklist(installer_problem(installer_var.get()), prefix_error, exists,
+                                  create_var.get(), runtime, bool(tool), preview_error,
+                                  as_root=running_as_root())
+        elif native is not None:
+            set_text(plan_box, "\n".join([window_words(ln) for ln in plan.describe()]
+                                         + mem_lines))
+            plan_stops = [s for s in stops if s.kind not in ("no_prefix", "no_wine")]
+            needs_wine = not exists and create_var.get()
+            rows = plan_checklist(installer_problem(installer_var.get()), prefix_error, exists,
+                                  create_var.get(), "wine", bool(wine_path["value"]),
+                                  native_stop_text(plan_stops[0]) if plan_stops else None,
+                                  None, runtime_needed=needs_wine, as_root=running_as_root())
+        else:
+            text, err = describe_plan(installer_var.get(), name, runtime, proton_dir(),
+                                      portable_var.get(), scan_var.get(), memory_var.get(),
+                                      unattended_var.get())
+            set_text(plan_box, text or (err or ""))
+            rows = plan_checklist(installer_problem(installer_var.get()), prefix_error, exists,
+                                  create_var.get(), runtime, bool(tool), err,
+                                  memory_problem(memory_var.get()), as_root=running_as_root())
         for key, (frame, mark, msg) in check_rows.items():
             hit = next((r for r in rows if r[0] == key), None)
             if hit is None:
@@ -910,7 +1131,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             if not frame.winfo_manager():
                 frame.pack(fill="x", pady=2)
         reason = run_reason(rows, busy["on"])
-        c_reason = create_reason(prefix_error, exists, busy["on"])
+        c_reason = create_reason(prefix_error, exists, busy["on"], running_as_root())
         if busy["on"]:
             reason_var.set(run_state_text(run["kind"], run["stopping"]) + ".")
         else:
@@ -979,6 +1200,9 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         refresh_footer()
 
     def create_clicked():
+        if running_as_root():
+            messagebox.showerror("Not as root", f"{ROOT_MESSAGE} Nothing was changed.")
+            return
         name = selected_prefix()
         try:
             validate_prefix_name(name)
@@ -1011,6 +1235,18 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         poll("prefix")
 
     def run_clicked():
+        if running_as_root():
+            messagebox.showerror("Not as root", f"{ROOT_MESSAGE} Nothing was run.")
+            return
+        route_cache.clear()  # Run decides from the files as they are now, not from the preview
+        try:
+            native = native_choice()
+        except Exception as exc:  # noqa: BLE001 - shown, nothing started
+            messagebox.showerror("Cannot run", f"{exc}. Nothing was run.")
+            return
+        if native is not None:
+            run_native_clicked(native)
+            return
         proton = runtime_var.get() == "proton"
         from datetime import datetime
 
@@ -1055,8 +1291,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             if missing else ""
         if cleanup_var.get() != "none":
             extra += "\n\nIf the installer exits with status 0, " + clean.describe()
-        extra += "\n\n" + window_route_text(validate_installer(installer_var.get().strip()),
-                                             prefix_var.get().strip())
+        extra += "\n\n" + route_text_now()
         extra += "\n\nChecks before the run (read-only, advisory):\n" + measure(
             validate_installer(installer_var.get().strip()), plan.prefix).describe()
         if proton:
@@ -1101,6 +1336,104 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             status_var.set("Scanning the installer with ClamAV first...")
         launch(plan, tool, create, track, options, ctx)
 
+    def run_native_clicked(choice):
+        """The native route: Setup is not run; gitfurl unpacks the archives itself after one
+        approval of the whole plan (scan, prefix creation, unpack, listings, cleanup)."""
+        installer = validate_installer(installer_var.get().strip())
+        det, _c, _e = current_route()
+        xplan = choice.extract
+        try:
+            scan_plan = scanmod.build_scan_plan(installer, scanmod.find_clamscan()) \
+                if scan_var.get() else None
+            clean = plan_cleanup(installer, cleanup_var.get(),
+                                 [xplan.prefix, prefixes_root(), logs_root()])
+        except ValueError as exc:
+            messagebox.showerror("Cannot run", f"{exc}. Nothing was run.")
+            return
+        db = scanmod.database_info(scan_plan.clamscan) if scan_plan is not None else None
+        plan, stops, mem_lines = native_plan_for(
+            installer, choice, create_ok=create_var.get(), memory_on=memory_var.get(),
+            wine=wine_path["value"], scan_plan=scan_plan, db_info=db,
+            cleanup_text=clean.describe() if cleanup_var.get() != "none" else None)
+        if stops:
+            messagebox.showerror("Cannot run", "\n\n".join(native_stop_text(s) for s in stops)
+                                 + "\n\nNothing was run, created or written.")
+            return
+        text = native_plan_text(plan, det, memory_lines=mem_lines,
+                                preflight=measure(installer, xplan.prefix).describe())
+        if not messagebox.askyesno("Unpack this installer?", text, icon="warning",
+                                   default="no"):
+            return
+        pending["cleanup"] = clean
+        cleanup_var.set("none")  # one run at a time; choose again for the next
+        start_busy("Creating the prefix, then unpacking (Setup is not run)..."
+                   if plan.create_prefix else "Unpacking (Setup is not run)...", "native")
+        bar.set(0)
+        progress_var.set("Waiting for the first files to be written...")
+        if scan_plan is not None:
+            status_var.set("Scanning the installer with ClamAV first...")
+        launch_native(plan, scan_plan, None, False, memory_var.get(), detail_var.get())
+
+    def launch_native(plan, scan_plan, scan_result, allow_hit, memory_on, detail):
+        """Start the approved native run in a thread (scan, prefix creation, unpack)."""
+        from gitfurl.route import NativeControl, perform_native
+
+        control = NativeControl()
+        pending["control"], pending["proton"], pending["portable"] = control, False, False
+        pending["native"] = (plan, scan_plan, memory_on, detail)  # as approved
+        pending["notes"] = []
+        stop_btn.state(["!disabled"])
+        stop_btn.pack(side="left", padx=(0, SP["md"]), before=create_btn)
+        run_in_thread(lambda: perform_native(
+            plan, control, memory_limit=memory_on, scan_plan=scan_plan,
+            scan_result=scan_result, allow_scan_hit=allow_hit,
+            on_progress=lambda d, t, e: ui_updates.put(NativeSample(d, t, e)),
+            on_note=note_received, detailed_log=detail), results)
+        poll("native")
+
+    def native_hit_override(blocked) -> bool:
+        """After a ClamAV match on the native route: a second confirmation (default No)."""
+        plan, scan_plan, memory_on, detail = pending["native"]
+        if not messagebox.askyesno(
+                "Unpack it anyway?", f"{blocked}\n\nThis is a second confirmation. Unpack the "
+                "installer even though ClamAV matched a signature?", icon="warning",
+                default="no"):
+            return False
+        start_busy("Unpacking (ClamAV match overridden; Setup is not run)...", "native")
+        launch_native(plan, scan_plan, blocked.result, True, memory_on, detail)
+        return True
+
+    def native_finished(state, value, control):
+        if state == "error" and isinstance(value, scanmod.ScanBlocked):
+            return False  # handled with the Wine route's scan branch
+        if state == "error":
+            status_var.set(f"Failed: {value}")
+            status_label.configure(fg=w.RED)
+            pending["cleanup"] = None
+            return True
+        cleanup_line = None
+        clean = pending["cleanup"]
+        stopped = control is not None and control.cancelled
+        if clean is not None and clean.mode != "none":
+            if native_cleanup_allowed(value, stopped):
+                deleted, problems = perform_cleanup(clean, 0)
+                cleanup_line = f"Cleanup: deleted {deleted} file(s)" + (
+                    f", {len(problems)} problem(s)" if problems else "")
+            else:
+                cleanup_line = ("Cleanup skipped: you pressed Stop." if stopped
+                                else "skipped")
+        pending["cleanup"] = None
+        if value.result is not None and value.result.status == 0:
+            bar.set(100)
+            if stopped:
+                pending.setdefault("notes", []).append(
+                    "Stop came after the unpack had finished; the files are complete.")
+        text, colour = native_end_text(value, cleanup_line, pending.get("notes") or [])
+        status_var.set(text)
+        status_label.configure(fg={"ok": w.CYAN, "warn": w.AMBER}.get(colour, w.RED))
+        refresh_list()
+        return True
+
     def note_received(message):
         """A run note (scan result, memory limit change, stall advisory): shown on the
         progress line now and kept for the end text."""
@@ -1137,6 +1470,20 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     def stop_clicked():
         control = pending["control"]
         if not stop_applies(pending, control):
+            return
+        if run["kind"] == "native":
+            if not messagebox.askyesno(
+                    "Stop the unpack?", f"{NATIVE_STOP_LINE}\n\nThe run is reported as "
+                    "stopped and the log is kept.\n\nStop it?", icon="warning", default="no"):
+                return
+            if not stop_applies(pending, control):
+                return
+            stop_btn.state(["disabled"])
+            run["stopping"] = True
+            status_var.set("Stopping...")
+            refresh_plan()
+            refresh_footer()
+            threading.Thread(target=control.request_stop, daemon=True).start()
             return
         server = ("\n\nThis was a portable run: the sandbox ends with the run's process group, "
                   "so wineserver -k is not run." if pending.get("portable") else
@@ -1193,6 +1540,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         stop_btn.state(["!disabled"])
         control = pending["control"]
         pending["control"] = None
+        if kind == "native" and native_finished(state, value, control):
+            return
         if state == "ok" and kind == "install" and control is not None and control.cancelled:
             log = value[1]
             notes = "".join(f"\nNote: {n}" for n in control.notes)
@@ -1207,8 +1556,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             status_var.set(f"Not run. {value}")
             status_label.configure(fg=w.AMBER)
             hit = value.result is not None and value.result.status == scanmod.HIT
-            if hit and not (control is not None and control.cancelled) \
-                    and scan_hit_override(value):
+            override = native_hit_override if kind == "native" else scan_hit_override
+            if hit and not (control is not None and control.cancelled) and override(value):
                 return
             pending["cleanup"] = None
             return
@@ -1275,6 +1624,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     root.report_callback_exception = on_exception
     installer_var.trace_add("write", refresh_plan)
     create_var.trace_add("write", refresh_plan)
+    changes_var.trace_add("write", refresh_plan)  # a Setup-only option: it changes the route
     proton_var.trace_add("write", refresh_plan)
     refresh_env()
     show(start)
@@ -1320,6 +1670,15 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                     "scan_var": scan_var,
                     "scan_switch": scan_switch,
                     "scan_reason": scan_reason,
+                    "setup_var": setup_var,
+                    "changes_var": changes_var,
+                    "plan_checklist_rows": lambda: {k: (bool(f.winfo_manager()), m.cget("text"))
+                                                    for k, (f, _mk, m) in check_rows.items()},
+                    "run_clicked": run_clicked,
+                    "stop_clicked": stop_clicked,
+                    "status_var": status_var,
+                    "progress_var": progress_var,
+                    "pending": pending,
                 }
                 driver(root, ui)
             except BaseException:  # noqa: BLE001 - reported on stderr, the exit status says it

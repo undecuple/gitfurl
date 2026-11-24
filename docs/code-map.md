@@ -145,7 +145,7 @@ sequenceDiagram
   R-->>G: TrackedResult: status, log path, ChangeReport
 ```
 
-The window always runs Setup (the Wine/Proton route). When the command line would have chosen the native route, its route line says so; a native route in the window is not built yet.
+When the route is native, `run_clicked` hands over to `run_native_clicked`. It builds the plan with `native_plan_for` (the same stop checks as the command line, `route.native_stops`) and shows one approval. It then runs `route.perform_native` in a thread (scan, prefix creation, unpack), with `NativeControl` as Stop; the progress arrives as `NativeSample`s, and the end text comes from `native_end_text`. The "Run Setup instead" switch and the Setup-only options choose the Wine/Proton flow above.
 
 ## Data flow: from the installer to files in the prefix (native route)
 

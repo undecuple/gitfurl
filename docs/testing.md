@@ -159,6 +159,16 @@ Not tested: data formats 5.5.0 (stock), 5.5.6, 6.0.0, 6.1.0, 6.4.0.1, 6.4.2, 6.4
 
 Cross-check on 2026-11-23 inside `tools/sandbox.sh` (no network, Python 3.11, `python3 -I`, a copy of `src/`; not under Wine). 18 setups were built in the sandbox with the official Inno Setup 6.3.3, 6.7.4 and 7.1.1 compilers (downloaded from jrsoftware's GitHub releases) from 39 generated files (9.2 MB): per version, spanning with solid and non-solid LZMA2, three slices per disk with zip, no loader without and with spanning, and a single-file control. Nine of them (spanning and no loader) were also installed silently under Wine to confirm the builds; every installed file matched. gitfurl read every setup (the layout and the slice file names in the plan matched the files the compiler wrote), and `plan_inno_extract()` and `extract_inno_files()` wrote all 39 files of each, every one matching its source's sha256, with nothing extra. With one 7.1.1 spanning setup changed: a deleted slice and a slice cut by 100 bytes were refused before anything was written, naming the file; two slices swapped ended in "a data chunk could not be decompressed" with the partial file removed. Not checked: Inno Setup 5.5.x (no official 5.5.9 download was available), searching `..\DISK<n>` folders (gitfurl looks only beside the installer), files extracted under Wine.
 
+## Native route in the window (2026-11-24, UTC)
+
+- `tests/test_gui_native.py` (no display): the window's words for the command line's options, the Setup-only options, the stop texts, the checklist (Wine not needed; root refused on every route), the plan built like the command line's (with and without prefix creation), the approval text, the progress line, every end text, and the cleanup rule (only after a complete unpack nobody stopped).
+- `tests/test_gui_native_xvfb.py` drives the real window under `xvfb-run -a` with a synthetic installer (an Inno Setup header and two FreeArc archives built by the tests) and an existing prefix folder, so no Wine runs:
+  - the unpack writes the files and shows "Unpacked (Setup was not run).";
+  - Stop during the unpack (a fake unpack that waits for Stop) shows the stopped result;
+  - "Run Setup instead" takes the Wine route's approval, and that approval names the Wine route (the native approval names the native route);
+  - a declined approval starts nothing.
+- Not run: under Wine, in the sandbox, or creating a prefix from the window on this route.
+
 ## Native route pieces for the window (2026-11-24, UTC)
 
 `tests/test_native_run.py` (synthetic archives from `tests/farc_writer.py`, fakes for wineboot and the scan):
