@@ -159,6 +159,12 @@ Not tested: data formats 5.5.0 (stock), 5.5.6, 6.0.0, 6.1.0, 6.4.0.1, 6.4.2, 6.4
 
 Cross-check on 2026-11-23 inside `tools/sandbox.sh` (no network, Python 3.11, `python3 -I`, a copy of `src/`; not under Wine). 18 setups were built in the sandbox with the official Inno Setup 6.3.3, 6.7.4 and 7.1.1 compilers (downloaded from jrsoftware's GitHub releases) from 39 generated files (9.2 MB): per version, spanning with solid and non-solid LZMA2, three slices per disk with zip, no loader without and with spanning, and a single-file control. Nine of them (spanning and no loader) were also installed silently under Wine to confirm the builds; every installed file matched. gitfurl read every setup (the layout and the slice file names in the plan matched the files the compiler wrote), and `plan_inno_extract()` and `extract_inno_files()` wrote all 39 files of each, every one matching its source's sha256, with nothing extra. With one 7.1.1 spanning setup changed: a deleted slice and a slice cut by 100 bytes were refused before anything was written, naming the file; two slices swapped ended in "a data chunk could not be decompressed" with the partial file removed. Not checked: Inno Setup 5.5.x (no official 5.5.9 download was available), searching `..\DISK<n>` folders (gitfurl looks only beside the installer), files extracted under Wine.
 
+## Stop during prefix creation on both routes (2026-11-24, UTC)
+
+- `tests/test_gitfurl.py`: on the Setup route, a Stop while wineboot runs reaches wineboot's stop check; the installer is never started, the run is cancelled (status 130, not started), the prefix keeps its incomplete marker, and the run's notes say what was done (a fake wineboot; no process starts).
+- `tests/test_gui_native.py`: the native plan says the Mono and Gecko switch is not used when it is on, and says nothing when it is off.
+- Not run: the window's Stop during a real wineboot, under Wine or Xvfb.
+
 ## Stall notes name the newest window (2026-11-24, UTC)
 
 - `tests/test_crash.py`:
@@ -180,6 +186,7 @@ Cross-check on 2026-11-23 inside `tools/sandbox.sh` (no network, Python 3.11, `p
 - `tests/test_route.py`: `--wine-addons` keeps the native route and says it does not apply there.
 - `tests/test_wineboot.py` (window): the plan preview says how a new prefix is booted and names the window's switch, not the command-line option. The Create now dialog and the switch were not driven under Xvfb.
 - Not run: gitfurl's own prefix creation with the override, under Wine. The same kind of override (`WINEDLLOVERRIDES=mscoree,mshtml=d`) was used by hand with plain `wine wineboot --init` to create prefixes in the sandbox (see "Stop against a generated test installer (2026-11-16)", "Portable install (2026-11-16)" and "Unattended Inno Setup, and Wine under a memory limit (2026-11-17)"), and Wine's Mono dialog did not appear then.
+
 ## Native route in the window (2026-11-24, UTC)
 
 - `tests/test_gui_native.py` (no display): the window's words for the command line's options, the Setup-only options, the stop texts, the checklist (Wine not needed; root refused on every route), the plan built like the command line's (with and without prefix creation), the approval text, the progress line, every end text, and the cleanup rule (only after a complete unpack nobody stopped).

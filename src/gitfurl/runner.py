@@ -732,6 +732,9 @@ def run_with_prefix(plan: InstallPlan, wine: str, create_if_missing: bool,
     """Create the plan's prefix first when asked and needed, then run the installer.
 
     Returns an ExecResult (unpacks as exit status, log path). If creating the prefix fails, the installer is not run.
+    A Stop through `options.control` while wineboot runs ends wineboot's own process group
+    (prefixes.run_in_group); the result is then a cancelled run that never started, with a
+    note in control.notes, and the prefix folder is kept with its incomplete marker.
     """
     from gitfurl.prefixes import create_prefix
 
@@ -765,9 +768,19 @@ def run_with_prefix(plan: InstallPlan, wine: str, create_if_missing: bool,
             boot_scope = prepare(plan.prefix.name, os.environ if env is None else env,
                                  cgroup_root=opts.cgroup_root, meminfo=opts.meminfo,
                                  label="wineboot")
+        from gitfurl.prefixes import PrefixStopped
+
+        control = opts.control
         try:
             status = create_prefix(plan.prefix.name, wine, env, run, extra_env=extra,
-                                   wrap=boot_scope.wrap if boot_scope else None)
+                                   wrap=boot_scope.wrap if boot_scope else None,
+                                   should_stop=(lambda: control.cancelled)
+                                   if control is not None else None)
+        except PrefixStopped as exc:
+            # A Stop (the window's button) while wineboot ran: its group was ended. The run
+            # is reported as cancelled; execute() then refuses to start the installer.
+            control.notes.append(str(exc))
+            status = 0
         finally:
             boot_report = boot_scope.finish() if boot_scope else None
         if status != 0:

@@ -378,6 +378,39 @@ class CreateIfMissingTests(unittest.TestCase):
         self.assertEqual(envs[0]["WINEDLLOVERRIDES"], "mscoree,mshtml=")  # wineboot only
         self.assertNotIn("WINEDLLOVERRIDES", envs[1])  # the installer gets Wine's default
 
+    def test_stop_during_prefix_creation_cancels_before_the_installer(self):
+        # The window's Stop while wineboot runs (Wine route): wineboot's group is ended
+        # through should_stop, and the installer is never started.
+        from gitfurl.prefixes import INCOMPLETE_MARKER, PrefixStopped
+        from gitfurl.runner import RunControl, RunOptions, build_plan, run_with_prefix
+
+        control = RunControl()
+        seen = {}
+
+        def wineboot(argv, env, timeout, wine, should_stop=None):
+            control.request_stop()  # pressed while wineboot runs
+            seen["stop"] = should_stop()
+            exc = PrefixStopped("stopped while the prefix was being created")
+            exc.notes = ["wineboot's processes were stopped"]
+            raise exc
+
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as data, \
+                tempfile.TemporaryDirectory() as state:
+            f, env = self._env(d, data, state)
+            with env, mock.patch("gitfurl.prefixes.run_in_group", side_effect=wineboot), \
+                    mock.patch("subprocess.Popen") as installer:
+                plan = build_plan(f, "new")
+                res = run_with_prefix(plan, "/x/wine", True,
+                                      options=RunOptions(control=control))
+                marker = (plan.prefix / INCOMPLETE_MARKER).exists()
+        self.assertTrue(seen["stop"])
+        installer.assert_not_called()
+        self.assertEqual(res.status, 130)
+        self.assertFalse(res.started)
+        self.assertTrue(marker)
+        self.assertTrue(any("was stopped" in n and "marked incomplete" in n
+                            for n in control.notes), control.notes)
+
     def test_installer_not_run_if_prefix_creation_fails(self):
         done = subprocess.CompletedProcess([], 5)
         with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as data, \
