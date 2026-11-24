@@ -71,6 +71,8 @@ class ExtractRefused(ValueError):
         super().__init__(message)
         self.created = [Path(p) for p in created]
 
+    stopped = False  # True for ExtractStopped
+
     def outcome(self) -> str:
         if not self.created:
             return "Nothing was written."
@@ -511,6 +513,12 @@ def _decode(top, size: int, stop):
         yield out
 
 
+class ExtractStopped(ExtractRefused):
+    """Stop was asked for before the destination was created. No file or folder was written."""
+
+    stopped = True
+
+
 def extract(plan: ExtractPlan, cancel: threading.Event | None = None,
             on_progress=None) -> ExtractResult:
     """Write the planned files. Raises ExtractRefused before anything is written; once the
@@ -537,6 +545,8 @@ def extract(plan: ExtractPlan, cancel: threading.Event | None = None,
                     (ap.archive.size, ap.archive.blocks, ap.archive.entries):
                 raise ExtractRefused(f"{clean(ap.path.name, 80)} changed after the plan was "
                                      "made; make the plan again")
+        if cancel is not None and cancel.is_set():
+            raise ExtractStopped("stopped before the unpack started")
         root = _make_dest(plan)
         return _write_all(plan, opened, root, cancel, on_progress)
     finally:

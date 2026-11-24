@@ -28,6 +28,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 - The plan no longer says "native extraction is not available in this version"; the route line gives the real choice.
 
 ### Changed
+- **Native route internals, for the window.** The checks that stop a native run before it starts are one function (`route.native_stops`) used by `gitfurl cli install`, whose output and exit codes are unchanged. New: `route.perform_native` (one approved native run on a worker thread), `route.NativeControl` (Stop for it), progress numbers from `run_native`, and a Stop for prefix creation from another thread (`prefixes.run_in_group(should_stop=...)`; the stopped prefix keeps its incomplete marker). The window does not use them yet. Tested with unit tests on synthetic archives and fakes, and a real process group for the stop.
 - **FreeArc extraction removes a file that fails its CRC-32 check** and names it, as `extract-inno` already does with its checksums, so no damaged file is left in the prefix looking complete. If it cannot be removed, the result names it as damaged and still there. A file cut short by Stop is still kept and named as incomplete.
 - FreeArc names: `\` now counts as a folder separator, like `/`, so names from an archive made on Windows are no longer counted as unsafe for that alone.
 

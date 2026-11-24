@@ -457,9 +457,10 @@ class NativeCliTests(Base):
     def test_create_prefix_runs_wineboot_once_then_unpacks(self):
         calls = []
 
-        def fake_create(name, wine, env=None, run=None, extra_env=None, wrap=None):
+        def fake_create(name, wine, env=None, run=None, extra_env=None, wrap=None, should_stop=None):
             calls.append((name, wine))
             self.assertEqual(extra_env, NATIVE_WINEBOOT_ENV)
+            self.assertIsNone(should_stop)  # the command line stops wineboot with Ctrl-C
             (self.prefix / "drive_c").mkdir(parents=True)
             return 0
 
