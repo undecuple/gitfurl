@@ -20,6 +20,8 @@ from gitfurl.prefixes import (
     plan_create,
     prefixes_root,
     validate_prefix_name,
+    wineboot_env,
+    wineboot_line,
 )
 from gitfurl.preflight import measure
 from gitfurl.route import ROUTE_CHOICES, ROUTE_NATIVE, choose_route
@@ -57,6 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
     inst.add_argument("--dry-run", action="store_true", help="show the plan and change nothing")
     inst.add_argument("--create-prefix", action="store_true",
                       help="create the prefix first if it does not exist")
+    inst.add_argument("--wine-addons", action="store_true",
+                      help="when gitfurl creates the prefix, let Wine show its Mono and Gecko install "
+                           "dialogs (answering Install makes Wine download them); default: off, "
+                           "wineboot runs with WINEDLLOVERRIDES=mscoree,mshtml=")
     inst.add_argument("--runtime", choices=RUNTIMES, default="wine",
                       help="wine (default) or proton, through umu-run")
     inst.add_argument("--proton-path", metavar="DIR",
@@ -132,6 +138,10 @@ def build_parser() -> argparse.ArgumentParser:
     create = pre_sub.add_parser("create", help="create a dedicated prefix")
     create.add_argument("name")
     create.add_argument("--yes", action="store_true", help="approve without prompting")
+    create.add_argument("--wine-addons", action="store_true",
+                        help="when gitfurl creates the prefix, let Wine show its Mono and Gecko install "
+                           "dialogs (answering Install makes Wine download them); default: off, "
+                           "wineboot runs with WINEDLLOVERRIDES=mscoree,mshtml=")
     pre_sub.add_parser("list", help="list dedicated prefixes")
     return p
 
@@ -165,7 +175,8 @@ def main(argv: list[str] | None = None) -> int:
                           proton_path=args.proton_path, portable=args.portable, scan=scan_plan,
                           memory_limit=not args.no_memory_limit,
                           unattended=_unattended_plan(args, args.prefix or DEFAULT_PREFIX,
-                                                      det))
+                                                      det),
+                          wine_addons=args.wine_addons)
         portable_lines = _portable_lines(plan, installer, shutil.which("wine") or "wine",
                                          full=True) if args.portable else []
     except ValueError as exc:
@@ -174,6 +185,9 @@ def main(argv: list[str] | None = None) -> int:
     print("DRY RUN: nothing was executed, created or changed.")
     print(f"command:     {plan.preview()}")
     print(f"prefix:      {plan.prefix}")
+    boot = wineboot_line(plan.runtime, plan.wine_addons)
+    if boot and not plan.prefix.is_dir():
+        print(f"if created:  {boot}")
     print(f"working dir: {plan.cwd}")
     for k, v in plan.env_overrides.items():
         print(f"env:         {k}={v}")
@@ -292,9 +306,11 @@ def _prefix_command(args) -> int:
         print("error: wine not found on PATH; run 'gitfurl doctor'. Nothing was changed.",
               file=sys.stderr)
         return 1
-    plan = plan_create(args.name, wine)
+    extra = wineboot_env("wine", args.wine_addons)
+    plan = plan_create(args.name, wine, extra_env=extra)
     print(f"This will create a new dedicated prefix at {plan['path']}")
     print(f"command: {' '.join(plan['argv'])}  (with WINEPREFIX set for that command only)")
+    print(wineboot_line("wine", args.wine_addons))
     print("Your existing ~/.wine is not used or changed.")
     if not args.yes:
         if not sys.stdin.isatty():
@@ -304,7 +320,7 @@ def _prefix_command(args) -> int:
             print("Not approved. Nothing was changed.")
             return 2
     try:
-        status = create_prefix(args.name, wine)
+        status = create_prefix(args.name, wine, extra_env=extra)
     except FileExistsError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -424,7 +440,8 @@ def _real_install(args, det, choice) -> int:
         plan = build_plan(installer, args.prefix, runtime=args.runtime,
                           proton_path=args.proton_path, portable=args.portable, scan=scan_plan,
                           memory_limit=not args.no_memory_limit,
-                          unattended=_unattended_plan(args, args.prefix, det))
+                          unattended=_unattended_plan(args, args.prefix, det),
+                          wine_addons=args.wine_addons)
         if args.portable and args.runtime != "wine":
             raise ValueError("portable install is only supported with the wine runtime")
     except ValueError as exc:
@@ -471,6 +488,9 @@ def _real_install(args, det, choice) -> int:
         return 2
     print(f"About to run: {plan.preview()}")
     print(f"prefix: {plan.prefix}" + (" (will be created first)" if missing else ""))
+    boot = wineboot_line(plan.runtime, plan.wine_addons) if missing else None
+    if boot:
+        print(boot)
     if args.portable:
         for line in portable_lines:
             print(line)
@@ -664,6 +684,9 @@ def _native_install(args, installer, det, choice) -> int:
         print("DRY RUN: nothing was executed, created or changed.")
     for line in plan.describe():
         print(line)
+    if args.wine_addons:
+        print("--wine-addons does not apply to the native route: its wineboot always runs "
+              "without Wine's Mono and Gecko dialogs (the unpack needs neither)")
     for line in memory_lines:
         print(line)
     for line in describe_detection(det, choice).splitlines():

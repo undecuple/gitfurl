@@ -210,7 +210,21 @@ class PrefixCreateTests(unittest.TestCase):
         argv = run.call_args.args[0]
         self.assertEqual(argv, ["/x/wine", "wineboot", "--init"])
         self.assertEqual(run.call_args.kwargs["env"]["WINEPREFIX"], str(target))
+        self.assertEqual(run.call_args.kwargs["env"]["WINEDLLOVERRIDES"], "mscoree,mshtml=")
         self.assertNotIn("shell", run.call_args.kwargs)
+
+    def test_create_with_wine_addons_keeps_wines_dialogs(self):
+        done = subprocess.CompletedProcess([], 0)
+        with tempfile.TemporaryDirectory() as data, mock.patch.dict(
+            "os.environ", {"XDG_DATA_HOME": data, "WINEDLLOVERRIDES": "from-shell"}
+        ), mock.patch("shutil.which", return_value="/x/wine"), mock.patch(
+            "gitfurl.prefixes.run_in_group", return_value=done
+        ) as run:
+            code, out, _ = run_cli("prefix", "create", "abc", "--yes", "--wine-addons")
+        self.assertEqual(code, 0)
+        self.assertIn("may show its Mono and Gecko install dialogs", out)
+        # Not set by gitfurl, and the shell's value is not passed on either.
+        self.assertNotIn("WINEDLLOVERRIDES", run.call_args.kwargs["env"])
 
     def test_ctrl_c_during_prefix_creation_is_a_message_and_status_130(self):
         with tempfile.TemporaryDirectory() as data, mock.patch.dict(
@@ -356,9 +370,13 @@ class CreateIfMissingTests(unittest.TestCase):
             self.assertTrue((Path(data) / "gitfurl" / "prefixes" / "new").is_dir())
         self.assertEqual(code, 0)
         self.assertIn("will be created first", out)
+        self.assertIn("wineboot: WINEDLLOVERRIDES=mscoree,mshtml= for that command only", out)
         argvs = [c.args[0] for c in run.call_args_list]
         self.assertEqual(argvs[0], ["/x/wine", "wineboot", "--init"])
         self.assertEqual(argvs[1], ["/x/wine", str(f.resolve())])
+        envs = [c.kwargs["env"] for c in run.call_args_list]
+        self.assertEqual(envs[0]["WINEDLLOVERRIDES"], "mscoree,mshtml=")  # wineboot only
+        self.assertNotIn("WINEDLLOVERRIDES", envs[1])  # the installer gets Wine's default
 
     def test_installer_not_run_if_prefix_creation_fails(self):
         done = subprocess.CompletedProcess([], 5)

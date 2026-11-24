@@ -61,6 +61,48 @@ def list_prefixes(env: dict[str, str] | None = None) -> list[str]:
     return sorted(p.name for p in root.iterdir() if p.is_dir())
 
 
+# For wineboot only: Wine's Mono and Gecko install dialogs stay off, so creating a prefix
+# needs no answer and Wine downloads nothing. The prefix then has no Mono (.NET) or Gecko
+# (Internet Explorer parts); most installers need neither.
+QUIET_WINEBOOT_ENV = {"WINEDLLOVERRIDES": "mscoree,mshtml="}
+
+WINE_ADDONS_OPTION = "--wine-addons"
+
+
+def wineboot_env(runtime: str = "wine", addon_prompts: bool = False) -> dict[str, str]:
+    """The environment wineboot gets besides the runtime's own: QUIET_WINEBOOT_ENV for the
+    wine runtime unless the user wants Wine's Mono and Gecko prompts. Proton (umu-run) sets
+    up its own prefix and ships these parts itself, so it gets nothing."""
+    return dict(QUIET_WINEBOOT_ENV) if runtime == "wine" and not addon_prompts else {}
+
+
+def with_wineboot_env(base: dict[str, str], runtime: str = "wine",
+                      addon_prompts: bool = False) -> dict[str, str]:
+    """`base` plus wineboot_env(...), with WINEDLLOVERRIDES joined (';') rather than
+    replaced, so an override already in the plan (a portable run's menu-builder override)
+    is kept for wineboot too."""
+    out = dict(base)
+    for key, value in wineboot_env(runtime, addon_prompts).items():
+        out[key] = f"{out[key]};{value}" if key == "WINEDLLOVERRIDES" and out.get(key) \
+            else value
+    return out
+
+
+def wineboot_line(runtime: str = "wine", addon_prompts: bool = False,
+                  option: str = WINE_ADDONS_OPTION) -> str | None:
+    """One plan line saying how wineboot treats Wine's Mono and Gecko prompts, or None."""
+    if runtime != "wine":
+        return None
+    if addon_prompts:
+        return ("wineboot: Wine may show its Mono and Gecko install dialogs; answering Install "
+                "makes Wine download them (a network download that gitfurl does not make)")
+    env = " ".join(f"{k}={v}" for k, v in QUIET_WINEBOOT_ENV.items())
+    return (f"wineboot: {env} for that command only, so Wine's Mono and Gecko install dialogs "
+            "do not appear and Wine downloads nothing; the prefix then has no Mono (.NET) or "
+            "Gecko (Internet Explorer parts), which most installers do not need. To have "
+            f"Wine offer them, use {option}")
+
+
 def plan_create(name: str, wine: str, env: dict[str, str] | None = None,
                 extra_env: dict[str, str] | None = None) -> dict:
     """Describe what creating a prefix would do. Has no side effects."""

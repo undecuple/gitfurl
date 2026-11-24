@@ -38,6 +38,7 @@ from datetime import datetime
 from pathlib import Path
 
 from gitfurl import farc
+from gitfurl.prefixes import QUIET_WINEBOOT_ENV
 from gitfurl.detect import (
     CONF_LIKELY,
     ROUTE_NATIVE,
@@ -73,7 +74,7 @@ MAX_LISTED = 20
 # Only for a prefix gitfurl creates on the native route: Wine's Mono and Gecko install dialogs
 # are turned off for wineboot, so creating the prefix needs no answer. The unpack runs no
 # Windows program, so it needs neither.
-NATIVE_WINEBOOT_ENV = {"WINEDLLOVERRIDES": "mscoree,mshtml="}
+NATIVE_WINEBOOT_ENV = QUIET_WINEBOOT_ENV
 # Free space kept for a prefix that is still to be created (new prefixes took about 300 to
 # 570 MB in our runs).
 PREFIX_ALLOWANCE = 768 * 1024 * 1024

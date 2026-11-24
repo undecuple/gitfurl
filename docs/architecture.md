@@ -5,7 +5,7 @@ A diagram overview (layers, module imports, the install flows, entry points, tes
 One shared core, thin interfaces. The graphical app (`gui.py`, tkinter) is the default and is started by `app.py`. The command line (`cli.py`) is opt-in through `gitfurl cli`. Both use the same core and safety checks. A TUI may follow.
 
 - `doctor.py`: read-only probes with a timeout.
-- `prefixes.py`: name validation and per-user location. Creates nothing.
+- `prefixes.py`: name validation and per-user location; `create_prefix()` runs `wineboot`. `wineboot_env()` gives `QUIET_WINEBOOT_ENV` (`WINEDLLOVERRIDES=mscoree,mshtml=`, no Mono or Gecko dialogs) to every Wine-runtime prefix gitfurl creates, unless the user asks for Wine's dialogs (`--wine-addons`); `wineboot_line()` is the plan's line for it.
 - `runner.py`: builds an execution plan (argument list, prefix, working dir, child-only environment). `execute` runs it only after approval and writes output to a local log (mode 0600), never the environment.
 - `cli.py`: argparse front end. Real actions need an explicit prefix and approval (a typed yes, or --yes). Without a terminal and without --yes they exit with status 2 and change nothing.
 

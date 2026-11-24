@@ -386,6 +386,15 @@ class NativeCliTests(Base):
         self.assertIn("options that do not apply to the native route", out)
         self.assertIn("--unattended", out)
 
+    def test_wine_addons_stays_native_and_says_it_does_not_apply(self):
+        self.make_prefix()
+        with no_process():
+            code, out, _ = run_cli("install", str(self.setup), "--prefix", "p1", "--dry-run",
+                                   "--wine-addons")
+        self.assertEqual(code, 0)
+        self.assertIn("route: native (chosen by gitfurl)", out)
+        self.assertIn("--wine-addons does not apply to the native route", out)
+
     def test_setup_only_options_on_auto_take_the_wine_route(self):
         self.make_prefix()
         before = snapshot(self.base)
