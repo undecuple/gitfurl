@@ -226,6 +226,56 @@ class PrefixCreateTests(unittest.TestCase):
         # Not set by gitfurl, and the shell's value is not passed on either.
         self.assertNotIn("WINEDLLOVERRIDES", run.call_args.kwargs["env"])
 
+    def test_create_with_proton_runs_umu_run_with_the_proton_folder(self):
+        done = subprocess.CompletedProcess([], 0)
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as proton, \
+                mock.patch.dict("os.environ", {"XDG_DATA_HOME": data}), \
+                mock.patch("shutil.which", return_value="/x/umu-run") as which, \
+                mock.patch("gitfurl.prefixes.run_in_group", return_value=done) as run:
+            (Path(proton) / "proton").write_text("")
+            code, out, _ = run_cli("prefix", "create", "abc", "--yes", "--runtime", "proton",
+                                   "--proton-path", proton)
+            target = Path(data) / "gitfurl" / "prefixes" / "abc"
+        self.assertEqual(code, 0)
+        which.assert_called_with("umu-run")
+        self.assertEqual(run.call_args.args[0], ["/x/umu-run", "wineboot", "--init"])
+        env = run.call_args.kwargs["env"]
+        self.assertEqual(env["WINEPREFIX"], str(target))
+        self.assertEqual(env["PROTONPATH"], str(Path(proton).resolve()))
+        self.assertEqual(env["GAMEID"], "umu-0")
+        self.assertNotIn("WINEDLLOVERRIDES", env)  # Proton sets up its own prefix
+        self.assertIn("Steam Linux Runtime", out)
+        self.assertIn("PROTONPATH=", out)
+        self.assertNotIn("mscoree", out)
+        self.assertIn("umu-run exited with status 0", out)
+
+    def test_proton_without_a_proton_folder_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as data, mock.patch.dict(
+            "os.environ", {"XDG_DATA_HOME": data}
+        ), mock.patch("shutil.which", return_value="/x/umu-run"), mock.patch(
+            "gitfurl.prefixes.run_in_group"
+        ) as run:
+            code, _, err = run_cli("prefix", "create", "abc", "--yes", "--runtime", "proton",
+                                   "--proton-path", str(Path(data) / "none"))
+            code2, _, err2 = run_cli("prefix", "create", "abc", "--yes", "--runtime", "proton",
+                                     "--wine-addons", "--proton-path", data)
+            self.assertEqual(list(Path(data).iterdir()), [])
+        self.assertEqual((code, code2), (1, 1))
+        self.assertIn("not a Proton folder", err)
+        self.assertIn("--wine-addons applies only to the wine runtime", err2)
+        run.assert_not_called()
+
+    def test_proton_without_umu_run_changes_nothing(self):
+        with tempfile.TemporaryDirectory() as data, tempfile.TemporaryDirectory() as proton, \
+                mock.patch.dict("os.environ", {"XDG_DATA_HOME": data}), \
+                mock.patch("shutil.which", return_value=None):
+            (Path(proton) / "proton").write_text("")
+            code, _, err = run_cli("prefix", "create", "abc", "--yes", "--runtime", "proton",
+                                   "--proton-path", proton)
+            self.assertEqual(list(Path(data).iterdir()), [])
+        self.assertEqual(code, 1)
+        self.assertIn("umu-run not found", err)
+
     def test_ctrl_c_during_prefix_creation_is_a_message_and_status_130(self):
         with tempfile.TemporaryDirectory() as data, mock.patch.dict(
             "os.environ", {"XDG_DATA_HOME": data}

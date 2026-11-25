@@ -149,12 +149,14 @@ The graphical app is the default. The command line is opt-in and uses the same c
 
     gitfurl cli doctor
     gitfurl cli install /path/to/setup.exe --dry-run --prefix NAME
-    gitfurl cli prefix create NAME
+    gitfurl cli prefix create NAME [--runtime wine|proton] [--proton-path DIR] [--wine-addons] [--yes]
     gitfurl cli prefix list
     gitfurl cli install /path/to/setup.exe --prefix NAME [options]
     gitfurl cli extract /path/to/setup.exe --prefix NAME [--dry-run] [--yes]
     gitfurl cli extract-inno /path/to/setup.exe --prefix NAME [--dry-run] [--yes]
     gitfurl cli desktop-entry [--remove] [--dry-run] [--yes]
+
+`prefix create` boots a new prefix with the runtime you name (default `wine`); create a prefix with the runtime its installs will use. With `--runtime proton` it runs `umu-run wineboot --init` with your Proton folder (`--proton-path DIR` or `PROTONPATH`), and the plan says that umu-run downloads the Steam Linux Runtime on its first run unless it is already present. `--wine-addons` applies to the Wine runtime only.
 
 Options for `install`:
 
