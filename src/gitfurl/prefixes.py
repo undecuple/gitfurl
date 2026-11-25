@@ -159,11 +159,19 @@ def _cleanup_group(proc, env: dict[str, str], wine: str, grace_s: float, guard) 
             notes.append("no process it started was still running")
     except Exception as exc:  # noqa: BLE001 - cleanup must go on to the next step
         notes.append(f"stopping the processes failed: {exc}")
-    server = wineserver_for(wine)
-    if not server:
-        notes.append("wineserver was not found, so this prefix's Wine server was not asked to "
-                     "exit")
+    if os.path.basename(wine) == "umu-run":
+        # Proton's Wine server runs inside the runtime's container, from Proton's own build; a
+        # host wineserver of another version is not a safe way to reach it (the install's
+        # Stop skips it for Proton too).
+        notes.append("with Proton, its own Wine server was not asked to exit (it runs inside "
+                     "the runtime's container); it may keep running")
+        server = None
     else:
+        server = wineserver_for(wine)
+        if not server:
+            notes.append("wineserver was not found, so this prefix's Wine server was not "
+                         "asked to exit")
+    if server:
         try:
             done = subprocess.run([server, "-k"], env=env, timeout=30, check=False,
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

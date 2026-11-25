@@ -747,6 +747,15 @@ def run_with_prefix(plan: InstallPlan, wine: str, create_if_missing: bool,
 
         base = os.environ if env is None else env
         check_portable_supported(plan, find_bwrap(base), dict(base), plan.installer)
+    if plan.prefix.is_dir():  # a folder whose creation stopped, timed out or failed
+        from gitfurl.prefixes import incomplete_marker
+
+        marker = incomplete_marker(plan.prefix)
+        if marker is not None:
+            raise RuntimeError(
+                f"the prefix was not completely created ({marker} is still there: creating "
+                "it stopped, timed out or failed), so the installer was not run. Use a new "
+                "prefix name, or delete that folder yourself")
     opts = options or RunOptions()
     if plan.memory_limit:  # refuse before a prefix is created for a run that cannot happen
         from gitfurl.memlimit import prepare

@@ -60,6 +60,15 @@ class GuiStopTests(unittest.TestCase):
     def test_run_ending_while_dialog_is_open(self):
         self.run_scenario("ended_while_open")
 
+    def test_stop_during_prefix_creation(self):
+        self.run_scenario("create_yes")
+
+    def test_no_keeps_prefix_creation_running(self):
+        self.run_scenario("create_no")
+
+    def test_prefix_creation_ending_while_dialog_is_open(self):
+        self.run_scenario("create_ended_while_open")
+
 
 if __name__ == "__main__":
     unittest.main()

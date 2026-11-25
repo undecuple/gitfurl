@@ -22,7 +22,9 @@ from gitfurl.doctor import run_doctor
 from gitfurl.memlimit import availability as memory_availability
 from gitfurl.memlimit import describe as describe_memory
 from gitfurl.prefixes import (
+    PrefixStopped,
     create_prefix,
+    incomplete_marker,
     list_prefixes,
     plan_create,
     prefixes_root,
@@ -262,6 +264,19 @@ def window_route_text(installer, prefix: str, env=None, *, setup_instead: bool =
         return describe_detection(det) + f"\nroute: not chosen ({error})."
     return window_words(describe_detection(det, choice))
 
+
+PREFIX_STOP_TEXT = ("Stop ends the prefix creation: its own process group (a polite stop, then a "
+                    "forced one after 5 seconds), then gitfurl asks this prefix's own Wine "
+                    "server to exit. The new "
+                    "folder is kept and marked incomplete, so gitfurl will not use it; delete "
+                    "it yourself before using that name again. Nothing else is deleted.")
+
+PREFIX_STOP_TEXT_PROTON = ("Stop ends the prefix creation: its own process group (a polite stop, "
+                           "then a forced one after 5 seconds). With Proton, Proton's own Wine "
+                           "server and the runtime's container may keep running; this is not "
+                           "guaranteed to end everything. The new folder is kept and marked "
+                           "incomplete, so gitfurl will not use it; delete it yourself before "
+                           "using that name again. Nothing else is deleted.")
 
 NATIVE_STOP_LINE = ("Stop ends the ClamAV scan, the prefix creation (its own process group, then "
                     "this prefix's wineserver -k) or the unpack between files or 1 MiB chunks. "
@@ -830,8 +845,10 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             r.pack(fill="x")
             w.Tile(r, n[:1] or "g", w.ACCENTS[i % 4]).pack(side="left")
             ready = n in existing
-            label(r, "ready" if ready else "not created yet", T["caption"], True,
-                  w.CYAN if ready else w.AMBER, w.PANEL).pack(side="right", padx=6)
+            broken = ready and incomplete_marker(prefixes_root() / n) is not None
+            label(r, "incomplete" if broken else "ready" if ready else "not created yet",
+                  T["caption"], True, w.CYAN if ready and not broken else w.AMBER,
+                  w.PANEL).pack(side="right", padx=6)
             mid = tk.Frame(r, bg=w.PANEL)
             mid.pack(side="left", padx=SP["md"], fill="x", expand=True)
             label(mid, n, T["lead"], True, FG, w.PANEL).pack(anchor="w")
@@ -1124,7 +1141,11 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         try:
             path = prefixes_root() / validate_prefix_name(name)
             exists, prefix_error = path.is_dir(), None
-            sub_var.set(f"{short_path(path)}   {'ready' if exists else 'not created yet'}")
+            if exists and incomplete_marker(path) is not None:
+                prefix_error = ("Prefix was not completely created (its creation stopped, "
+                                "timed out or failed): use a new name, or delete the folder")
+            sub_var.set(f"{short_path(path)}   "
+                        f"{'incomplete' if prefix_error else 'ready' if exists else 'not created yet'}")
         except ValueError as exc:
             exists, prefix_error = False, ("Choose or create a prefix." if not name.strip()
                                            else str(exc))
@@ -1277,8 +1298,16 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             default="no",
         ):
             return
+        from gitfurl.route import NativeControl
+
+        control = NativeControl()  # a flag: wineboot's own loop checks it (run_in_group)
+        pending["control"], pending["portable"] = control, False
+        pending["proton"] = runtime_var.get() == "proton"
         start_busy("Creating prefix (this can take a minute)...", "prefix")
-        run_in_thread(lambda: create_prefix(name, tool, extra_env=extra_env), results)
+        stop_btn.state(["!disabled"])
+        stop_btn.pack(side="left", padx=(0, SP["md"]), before=create_btn)
+        run_in_thread(lambda: create_prefix(name, tool, extra_env=extra_env,
+                                            should_stop=lambda: control.cancelled), results)
         poll("prefix")
 
     def run_clicked():
@@ -1525,6 +1554,22 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         control = pending["control"]
         if not stop_applies(pending, control):
             return
+        if run["kind"] == "prefix":
+            if not messagebox.askyesno(
+                    "Stop creating the prefix?",
+                    f"{PREFIX_STOP_TEXT_PROTON if pending['proton'] else PREFIX_STOP_TEXT}"
+                    "\n\nStop it?",
+                    icon="warning", default="no"):
+                return
+            if not stop_applies(pending, control):  # wineboot ended while the dialog was open
+                return
+            stop_btn.state(["disabled"])
+            run["stopping"] = True
+            status_var.set("Stopping the prefix creation...")
+            refresh_plan()
+            refresh_footer()
+            control.request_stop()  # sets the flag; wineboot's loop ends its group
+            return
         if run["kind"] == "native":
             if not messagebox.askyesno(
                     "Stop the unpack?", f"{NATIVE_STOP_LINE}\n\nThe run is reported as "
@@ -1617,6 +1662,11 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             if hit and not (control is not None and control.cancelled) and override(value):
                 return
             pending["cleanup"] = None
+            return
+        if state == "error" and kind == "prefix" and isinstance(value, PrefixStopped):
+            status_var.set(f"Stopped: {value}")
+            status_label.configure(fg=w.AMBER)
+            refresh_list()
             return
         if state == "error":
             status_var.set(f"Failed: {value}")

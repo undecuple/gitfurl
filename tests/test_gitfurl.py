@@ -172,6 +172,26 @@ class InstallRunTests(unittest.TestCase):
         self.assertEqual(kw["env"]["WINEPREFIX"].rsplit("/", 1)[-1], "p1")
 
 
+class IncompletePrefixTests(unittest.TestCase):
+    def test_setup_route_refuses_a_prefix_whose_creation_did_not_finish(self):
+        from gitfurl.prefixes import INCOMPLETE_MARKER
+        from gitfurl.runner import build_plan, run_with_prefix
+
+        with tempfile.TemporaryDirectory() as data, mock.patch.dict(
+            "os.environ", {"XDG_DATA_HOME": data}
+        ):
+            installer = Path(data) / "setup.exe"
+            installer.write_bytes(b"MZ")
+            plan = build_plan(installer, "half")
+            plan.prefix.mkdir(parents=True)
+            (plan.prefix / INCOMPLETE_MARKER).write_text("")
+            run = mock.Mock()
+            with self.assertRaises(RuntimeError) as ctx:
+                run_with_prefix(plan, "/x/wine", True, run=run)
+        self.assertIn("not completely created", str(ctx.exception))
+        run.assert_not_called()
+
+
 class PrefixCreateTests(unittest.TestCase):
     def test_no_wine_changes_nothing(self):
         with tempfile.TemporaryDirectory() as data, mock.patch.dict(
@@ -1737,6 +1757,40 @@ class PrefixGroupTests(unittest.TestCase):
         th.join(30)
         self.assertIn("exc", box)
         self.assertIn("asked this prefix's Wine server to exit", "; ".join(box["exc"].notes))
+        for pid in pids:
+            end = time.monotonic() + 5
+            while pid_alive(pid) and time.monotonic() < end:
+                time.sleep(0.05)
+            self.assertFalse(pid_alive(pid), pid)
+
+    def test_umu_run_is_not_followed_by_a_host_wineserver(self):
+        # Proton: the group is still ended, but no host wineserver -k is run against the
+        # Proton prefix (its server is Proton's own, inside the runtime's container).
+        import threading
+        import time
+
+        from gitfurl.prefixes import PrefixStopped, run_in_group
+
+        t = Path(self.tmp.name)
+        (t / "umu-run").write_text("#!/bin/sh\nexit 0\n")
+        (t / "umu-run").chmod(0o755)
+        box, stop = {}, threading.Event()
+
+        def work():
+            try:
+                run_in_group(self.argv, {**self.env, "PATH": str(t)}, 60, str(t / "umu-run"),
+                             grace_s=2, should_stop=stop.is_set)
+            except PrefixStopped as exc:
+                box["exc"] = exc
+
+        th = threading.Thread(target=work)
+        th.start()
+        pids = self._pids()
+        stop.set()
+        th.join(30)
+        notes = "; ".join(box["exc"].notes)
+        self.assertIn("with Proton, its own Wine server was not asked to exit", notes)
+        self.assertFalse((t / "server.txt").exists())  # the wineserver beside it was not run
         for pid in pids:
             end = time.monotonic() + 5
             while pid_alive(pid) and time.monotonic() < end:
