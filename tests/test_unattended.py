@@ -4,6 +4,7 @@ import contextlib
 import io
 import subprocess
 import tempfile
+import threading
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime
@@ -153,10 +154,19 @@ class ReportTests(unittest.TestCase):
 
     def test_only_the_end_of_a_huge_log_is_read(self):
         self.write_log("x" * (LOG_READ_LIMIT + 10) + "\nInstallation process succeeded.\n")
-        with mock.patch("builtins.open", wraps=open) as op:
+        # builtins.open is patched for the whole process, and a thread left from another test
+        # may open files meanwhile, so count only the opens made on this test's thread
+        me, opened, real_open = threading.get_ident(), [], open
+
+        def counting_open(*args, **kwargs):
+            if threading.get_ident() == me:
+                opened.append(args[0])
+            return real_open(*args, **kwargs)
+
+        with mock.patch("builtins.open", counting_open):
             rep = read_report(self.up, self.prefix, 0)
         self.assertTrue(rep.succeeded)
-        self.assertEqual(op.call_count, 1)
+        self.assertEqual(opened, [self.up.log_path(self.prefix)])  # one file, read once
 
     def test_invalid_utf8_does_not_raise(self):
         self.up.log_path(self.prefix).write_bytes(b"\xff\xfe Error \x80\nInstallation process succeeded.\n")
