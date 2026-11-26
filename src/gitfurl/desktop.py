@@ -89,6 +89,7 @@ def entry_text(argv: list[str], workdir: str | None = None) -> str:
         lines.append("Path=" + _path_value(workdir))
     lines += [
         "Icon=gitfurl",
+        "StartupWMClass=Gitfurl",
         "Terminal=false",
         "Categories=Utility;",
         MARKER,
