@@ -56,6 +56,9 @@ def width_cells(word, font):
     return cells(word, font)[1]
 
 
+LOOP = 15  # seconds between the banner's builds
+
+
 def _mix(colour, other, t):
     """colour moved a fraction t of the way towards other (both #RRGGBB)."""
     a = [int(colour[i:i + 2], 16) for i in (1, 3, 5)]
@@ -75,8 +78,9 @@ def _brick(id_, colour, s):
 
 
 def banner():
-    """The word as bricks that drop into place once (CSS only, no script), letter by letter,
-    bottom row first; the dithered shadow fades in last. With reduced motion it is still."""
+    """The word as bricks that drop into place (CSS only, no script), letter by letter, bottom
+    row first; the dithered shadow fades in last. It builds again every LOOP seconds. With
+    reduced motion it is still."""
     w, h, cell = 671, 158, 11
     word = "gitfurl"
     n = width_cells(word, BIG)
@@ -97,11 +101,15 @@ def banner():
             t += 0.32
             i += 1
         x += len(BIG[ch][0]) + 1
-    style = ("<style>.b{animation:drop .5s cubic-bezier(.3,1.45,.55,1) both}"
-             f".s{{animation:fade .5s {t + 0.5:.2f}s both}}"
-             "@keyframes drop{0%{transform:translateY(-70px);opacity:0}40%{opacity:1}"
-             "100%{transform:none;opacity:1}}"
-             "@keyframes fade{from{opacity:0}to{opacity:1}}"
+    # One 15 s cycle per brick: drop in (0.5 s, with a bounce), stay, fade out near the end,
+    # start again. Each brick keeps its own delay, so every cycle builds in the same order.
+    style = (f"<style>.b{{animation:drop {LOOP}s linear infinite both}}"
+             f".s{{animation:fade {LOOP}s linear {t + 0.5:.2f}s infinite both}}"
+             "@keyframes drop{0%{transform:translateY(-70px);opacity:0;"
+             "animation-timing-function:cubic-bezier(.3,1.45,.55,1)}"
+             "3.33%{transform:none;opacity:1}88%{transform:none;opacity:1}"
+             "92%,100%{transform:translateY(0);opacity:0}}"
+             "@keyframes fade{0%{opacity:0}3.33%,72%{opacity:1}76%,100%{opacity:0}}"
              "@media (prefers-reduced-motion:reduce){.b,.s{animation:none}}</style>")
     body = frame(w, h) + DEFS.replace("</defs>", bricks + "</defs>") + style + shadow + "".join(uses)
     return (f'<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" '
