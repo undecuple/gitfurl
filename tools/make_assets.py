@@ -56,11 +56,54 @@ def width_cells(word, font):
     return cells(word, font)[1]
 
 
+def _mix(colour, other, t):
+    """colour moved a fraction t of the way towards other (both #RRGGBB)."""
+    a = [int(colour[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(other[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(x + (y - x) * t):02X}" for x, y in zip(a, b))
+
+
+def _brick(id_, colour, s):
+    """One brick seen from above: shaded and lit edges, the face, and one stud."""
+    hi, lo = _mix(colour, "#FFFFFF", 0.35), _mix(colour, "#000000", 0.35)
+    r, c = s * 0.29, s / 2
+    return (f'<g id="{id_}"><rect width="{s}" height="{s}" fill="{lo}"/>'
+            f'<rect width="{s - 1}" height="{s - 1}" fill="{hi}"/>'
+            f'<rect x="1" y="1" width="{s - 2}" height="{s - 2}" fill="{colour}"/>'
+            f'<circle cx="{c + 0.6}" cy="{c + 0.6}" r="{r}" fill="{lo}"/>'
+            f'<circle cx="{c}" cy="{c}" r="{r}" fill="{colour}" stroke="{hi}" stroke-width=".7"/></g>')
+
+
 def banner():
+    """The word as bricks that drop into place once (CSS only, no script), letter by letter,
+    bottom row first; the dithered shadow fades in last. With reduced motion it is still."""
     w, h, cell = 671, 158, 11
-    n = width_cells("gitfurl", BIG)
-    ox = (w - n * cell) // 2
-    body = frame(w, h) + DEFS + word_svg("gitfurl", BIG, cell, ox, 46)
+    word = "gitfurl"
+    n = width_cells(word, BIG)
+    ox, oy = (w - n * cell) // 2, 46
+    rows = len(BIG[word[0]])
+    bricks = "".join(_brick(f"k{i}", c, cell) for i, c in enumerate(ACCENTS))
+    cs, _ = cells(word, BIG)
+    shadow = (f'<path class="s" d="{block_path(cs, cell, ox + cell, oy + cell)}" '
+              f'fill="url(#d)" shape-rendering="crispEdges"/>')
+    uses, x, i, t = [], 0, 0, 0.0
+    for ch in word:
+        if ch != " ":
+            mine = sorted(cells(ch, BIG)[0], key=lambda p: (-p[1], p[0]))
+            for c, r, _ in mine:
+                delay = t + (rows - 1 - r) * 0.07 + c * 0.025
+                uses.append(f'<use href="#k{i % len(ACCENTS)}" x="{ox + (x + c) * cell}" '
+                            f'y="{oy + r * cell}" class="b" style="animation-delay:{delay:.3f}s"/>')
+            t += 0.32
+            i += 1
+        x += len(BIG[ch][0]) + 1
+    style = ("<style>.b{animation:drop .5s cubic-bezier(.3,1.45,.55,1) both}"
+             f".s{{animation:fade .5s {t + 0.5:.2f}s both}}"
+             "@keyframes drop{0%{transform:translateY(-70px);opacity:0}40%{opacity:1}"
+             "100%{transform:none;opacity:1}}"
+             "@keyframes fade{from{opacity:0}to{opacity:1}}"
+             "@media (prefers-reduced-motion:reduce){.b,.s{animation:none}}</style>")
+    body = frame(w, h) + DEFS.replace("</defs>", bricks + "</defs>") + style + shadow + "".join(uses)
     return (f'<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" '
             f'viewBox="0 0 {w} {h}" width="{w * 2}" height="{h * 2}" role="img" aria-labelledby="t">'
             f'<title id="t">gitfurl</title>{body}</svg>\n')
