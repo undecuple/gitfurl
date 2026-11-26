@@ -602,7 +602,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         return tk.Label(parent, text=text, bg=bg, fg=fg, font=F(size, bold), **kw)
 
     def text_box(parent, height):
-        return tk.Text(parent, height=height, bg=w.BG, fg=FG, relief="flat", wrap="word",
+        return tk.Text(parent, height=height, bg=w.BG, fg=FG, relief="sunken", bd=2, wrap="word",
                        highlightthickness=1, highlightbackground=w.LINE, state="disabled",
                        font=("monospace", T["body"]), padx=10, pady=SP["sm"])
 
@@ -613,7 +613,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         box.configure(state="disabled")
 
     def entry(parent, var):
-        return tk.Entry(parent, textvariable=var, bg=w.BG, fg=FG, insertbackground=FG, relief="flat",
+        return tk.Entry(parent, textvariable=var, bg=w.BG, fg=FG, insertbackground=FG, relief="sunken", bd=2,
                         highlightthickness=1, highlightbackground=w.LINE, highlightcolor=w.ORANGE,
                         font=F(T["body"]))
 
@@ -678,7 +678,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     nav.pack(fill="x", pady=(SP["xl"], 0), padx=10)
 
     def nav_item(key, text):
-        c = tk.Canvas(nav, height=38, bg=SIDE, highlightthickness=0, bd=0, cursor="hand2")
+        top = w.STUD_H  # room for the selected item's studs
+        c = tk.Canvas(nav, height=38 + top, bg=SIDE, highlightthickness=0, bd=0, cursor="hand2")
         c.pack(fill="x", pady=2)
 
         def go():
@@ -690,11 +691,11 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             width = c.winfo_width()
             on = nav_state["page"] == key or (key == "library" and nav_state["page"] == "details")
             if on:
-                w.rounded(c, 0, 0, width, 38, RADIUS, fill=w.LINE, outline=w.LINE)
-            c.create_rectangle(14, 15, 22, 23, fill=w.ORANGE if on else w.LINE, outline="")
-            c.create_text(36, 19, text=text, anchor="w", fill=FG if on else w.MUTED,
+                w.brick(c, 0, top, width, 38 + top, w.LINE)
+            w.top_brick(c, 12, top + 12, 14, w.ORANGE if on else w.LINE)
+            c.create_text(36, top + 18, text=text, anchor="w", fill=FG if on else w.MUTED,
                           font=F(T["body"], on))
-            w.focus_ring(c, width, 38, RADIUS)
+            w.focus_ring(c, width, 38 + top, RADIUS, top=top)
 
         c.bind("<Configure>", draw)
         c.bind("<Button-1>", lambda _e: go())

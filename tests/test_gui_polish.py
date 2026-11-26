@@ -32,6 +32,16 @@ SRC = str(Path(__file__).resolve().parent.parent / "src")
 
 
 class ContrastTests(unittest.TestCase):
+    def test_brick_edges(self):
+        self.assertEqual(theme.mix("#000000", "#FFFFFF", 0.5), "#808080")
+        self.assertEqual(theme.mix(theme.ORANGE, "#123456", 0), theme.ORANGE)
+        for c in (theme.ORANGE, theme.LINE, theme.PANEL):
+            # the lit edge is lighter and the shaded edge darker than the brick itself
+            self.assertGreater(theme.luminance(theme.lit(c)), theme.luminance(c))
+            self.assertLess(theme.luminance(theme.shade(c)), theme.luminance(c))
+        self.assertEqual(theme.RADIUS, 0)
+        self.assertGreater(theme.STUD_H, 0)
+
     def test_known_ratios(self):
         self.assertAlmostEqual(theme.contrast_ratio("#000000", "#FFFFFF"), 21.0, places=6)
         self.assertAlmostEqual(theme.contrast_ratio("#777777", "#777777"), 1.0, places=6)
