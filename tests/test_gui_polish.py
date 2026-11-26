@@ -453,6 +453,7 @@ class WindowPolishTests(unittest.TestCase):
             ui["wine_path"].update(value=None, umu=None)
             ui["set_banners"](True)
             result["minsize"] = list(root.minsize())
+            result["class"] = root.winfo_class()
             result["resizable"] = list(root.resizable())
             root.geometry("900x620")
             ui["show"]("details")
@@ -482,12 +483,39 @@ class WindowPolishTests(unittest.TestCase):
             result["clipped"] = clipped
             ui["show"]("details")
             settle(root, 20)
+            import time
+
+            def wait_until(cond, secs=2.0):
+                # the wheel glides on a timer, so wait on the clock, not a count of updates
+                end = time.monotonic() + secs
+                while time.monotonic() < end:
+                    root.update()
+                    if cond():
+                        return True
+                    time.sleep(0.005)
+                return False
+
             cv.yview_moveto(0)
             cv.event_generate("<Button-5>", x=20, y=20)
-            result["wheel_down"] = pump_until(root, lambda: cv.yview()[0] > 0)
+            result["wheel_down"] = wait_until(lambda: cv.yview()[0] > 0)
             cv.event_generate("<Button-4>", x=20, y=20)
             cv.event_generate("<Button-4>", x=20, y=20)
-            result["wheel_up"] = pump_until(root, lambda: cv.yview()[0] == 0)
+            result["wheel_up"] = wait_until(lambda: cv.yview()[0] == 0)
+            # one notch glides the page 80 pixels over several frames, not in one jump
+            cv.yview_moveto(0)
+            settle(root, 5)
+            cv.event_generate("<Button-5>", x=20, y=20)
+            seen = []
+            end = time.monotonic() + 1.5
+            while time.monotonic() < end:
+                root.update()
+                y = cv.canvasy(0)
+                if not seen or seen[-1] != y:
+                    seen.append(y)
+                time.sleep(0.002)
+            result["glide"] = seen
+            cv.yview_moveto(0)
+            settle(root, 5)
             # Tab to a control far down the page scrolls it into view
             deep = [x for x in descendants(inner) if isinstance(x, w.PillButton)
                     and x.winfo_rooty() - inner.winfo_rooty() > cv.winfo_height()][-1]
@@ -503,6 +531,8 @@ class WindowPolishTests(unittest.TestCase):
         ''', start="details")
         self.assertEqual(r["minsize"], [900, 620])
         self.assertEqual(r["resizable"], [True, True])
+        # WM_CLASS "gitfurl", "Gitfurl" (not Tk's default "Tk"), matched by StartupWMClass
+        self.assertEqual(r["class"], "Gitfurl")
         self.assertTrue(r["taller"])
         self.assertTrue(r["bar_visible"])
         self.assertTrue(r["run_visible"])
@@ -510,6 +540,9 @@ class WindowPolishTests(unittest.TestCase):
         self.assertEqual(r["clipped"], [])
         self.assertTrue(r["wheel_down"])
         self.assertTrue(r["wheel_up"])
+        seen = r["glide"]
+        self.assertEqual(seen[-1], 80)
+        self.assertGreater(len([y for y in seen if 0 < y < 80]), 2, seen)  # glided, not jumped
         self.assertTrue(r["revealed"])
         self.assertTrue(r["fills"])
 

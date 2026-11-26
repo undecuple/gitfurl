@@ -48,6 +48,8 @@ from gitfurl.runner import (
 )
 from gitfurl.theme import FG, MUTED, RADIUS, SIDE, SPACE, TYPE  # noqa: F401
 
+APP_CLASS = "gitfurl"  # the window class; desktop entries use StartupWMClass=Gitfurl
+
 WARNING = (
     "A Wine prefix is not a sandbox: the installer can reach files your user can reach.\n"
     "Only run installers you are authorised to use and have chosen to trust."
@@ -545,7 +547,9 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     from gitfurl import widgets as w
 
     try:
-        root = tk.Tk()
+        # The class names the window to the desktop: WM_CLASS becomes "gitfurl", "Gitfurl"
+        # (Tk's default is "Tk"), which docks and task bars match to gitfurl.desktop and its icon.
+        root = tk.Tk(className=APP_CLASS)
         w.pick_font(root)  # also fails early when no usable font is installed
     except tk.TclError as exc:
         print(
@@ -712,7 +716,44 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     canvases: dict[str, tk.Canvas] = {}
     inners: dict[str, tk.Frame] = {}
 
-    def wheel(direction):
+    # The wheel glides the page: each notch adds WHEEL_STEP pixels to a distance still to
+    # travel, and every GLIDE_MS the page moves part of what is left, so the motion eases
+    # out instead of jumping a third of the page at a time.
+    WHEEL_STEP, GLIDE_MS, GLIDE_PART, GLIDE_MAX = 80, 8, 0.3, 1600
+    glide: dict = {"cv": None, "left": 0.0, "job": None}
+
+    def glide_stop():
+        glide["left"] = 0.0
+        if glide["job"] is not None:
+            root.after_cancel(glide["job"])
+            glide["job"] = None
+
+    def glide_step():
+        glide["job"] = None
+        cv, left = glide["cv"], glide["left"]
+        if cv is None or not cv.winfo_exists() or abs(left) < 1:
+            glide["left"] = 0.0
+            return
+        move = int(left * GLIDE_PART) or (1 if left > 0 else -1)
+        before = cv.yview()
+        cv.yview_scroll(move, "units")  # one unit is one pixel (yscrollincrement=1)
+        if cv.yview() == before:
+            glide["left"] = 0.0  # at the top or bottom: nothing more to travel
+            return
+        glide["left"] = left - move
+        glide["job"] = root.after(GLIDE_MS, glide_step)
+
+    def glide_by(cv, pixels):
+        if glide["cv"] is not cv:
+            glide_stop()
+            glide["cv"] = cv
+        if glide["left"] and (glide["left"] > 0) != (pixels > 0):
+            glide["left"] = 0.0  # a turn of the wheel the other way stops the glide first
+        glide["left"] = max(-GLIDE_MAX, min(GLIDE_MAX, glide["left"] + pixels))
+        if glide["job"] is None:
+            glide_step()
+
+    def wheel(notches):
         def handler(e):
             if not isinstance(e.widget, tk.Misc) or e.widget.winfo_toplevel() is not root:
                 return
@@ -720,12 +761,14 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                 return  # a text box with its own scroll keeps the wheel
             cv = canvases.get(nav_state["page"])
             if cv is not None:
-                cv.yview_scroll(direction * 3, "units")
+                glide_by(cv, notches(e) * WHEEL_STEP)
         return handler
 
-    root.bind_all("<Button-4>", wheel(-1))  # X11 wheel up
-    root.bind_all("<Button-5>", wheel(1))
-    root.bind_all("<MouseWheel>", lambda e: wheel(-1 if e.delta > 0 else 1)(e))
+    root.bind_all("<Button-4>", wheel(lambda _e: -1))  # X11 wheel up
+    root.bind_all("<Button-5>", wheel(lambda _e: 1))
+    # Windows and macOS: delta is 120 a notch on Windows, smaller steps on macOS
+    root.bind_all("<MouseWheel>", wheel(lambda e: -e.delta / 120 if abs(e.delta) >= 120
+                                        else (-1 if e.delta > 0 else 1) * 0.25))
 
     def reveal(e):
         """Keyboard focus moved: scroll the page so the focused widget is on screen."""
@@ -739,6 +782,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         bottom = top + wd.winfo_height()
         view_top, view_h = cv.canvasy(0), cv.winfo_height()
         total = max(1, inner.winfo_height())
+        if top < view_top + margin or bottom > view_top + view_h - margin:
+            glide_stop()  # the keyboard decides where the page goes
         if top < view_top + margin:
             cv.yview_moveto(max(0, top - margin) / total)
         elif bottom > view_top + view_h - margin:
@@ -751,7 +796,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         outer = tk.Frame(content, bg=w.BG)
         outer.grid_rowconfigure(0, weight=1)
         outer.grid_columnconfigure(0, weight=1)
-        cv = tk.Canvas(outer, bg=w.BG, highlightthickness=0, bd=0)
+        cv = tk.Canvas(outer, bg=w.BG, highlightthickness=0, bd=0, yscrollincrement=1)
         cv.grid(row=0, column=0, sticky="nsew")
         inner = tk.Frame(cv, bg=w.BG)
         win = cv.create_window(0, 0, window=inner, anchor="nw")

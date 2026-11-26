@@ -121,6 +121,8 @@ class DesktopEntryTests(unittest.TestCase):
         self.assertTrue(Path(argv[0]).is_absolute())
         self.assertTrue((Path(workdir) / "gitfurl" / "__init__.py").is_file())  # a checkout
         self.assertIn("Path=" + workdir, desktop.entry_text(argv, workdir))
+        # the window's class (gui.APP_CLASS, capitalised by Tk) ties the window to this entry
+        self.assertIn("\nStartupWMClass=Gitfurl\n", desktop.entry_text(argv, workdir))
 
     def test_a_venv_python_link_is_kept(self):
         venv = self.base / "venv" / "bin"
