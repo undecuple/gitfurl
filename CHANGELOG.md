@@ -4,6 +4,9 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-26
+A native route: when an installer's payload is FreeArc archives gitfurl can read, gitfurl unpacks them itself instead of running Setup, chooses that route on its own and says why, on the command line and in the window. Also an Inno Setup reader for the plan, `gitfurl cli extract-inno`, Stop for the window's Create now, `prefix create --runtime proton` and an optional menu entry. Tested with unit tests, synthetic installers, and archives and setups built in the sandbox; compatibility with any particular third-party installer is still unverified.
+
 ### Added
 - **Stop for the window's Create now.** While Create now builds a prefix, Stop is shown and, after its own confirmation, ends wineboot's process group and, with Wine, asks that prefix's Wine server to exit (with Proton the dialog says Proton's own server and container may keep running); the folder is kept and marked incomplete, and the prefix list shows it as "incomplete". Tested by driving the real buttons under Xvfb with a stand-in for wineboot; not run with a real Wine or Proton.
 - **`prefix create --runtime proton`.** `gitfurl cli prefix create` takes `--runtime` and `--proton-path` like `install`, so a prefix for Proton installs can be created on its own: it runs `umu-run wineboot --init` with `PROTONPATH` and `GAMEID=umu-0`, and the plan names the Steam Linux Runtime download umu-run may make on its first run. `--wine-addons` with Proton is refused. Tested with unit tests (fake `umu-run`); not run with a real Proton.

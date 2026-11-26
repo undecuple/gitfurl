@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gitfurl"
-version = "1.3.0"
+version = "1.4.0"
 description = "Helper for running user-supplied Windows installers on Linux through Wine."
 readme = "README.md"
 requires-python = ">=3.11"

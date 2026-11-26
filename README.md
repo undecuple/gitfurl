@@ -25,7 +25,7 @@ gitfurl is a graphical app (with an optional command line) for running a Windows
   <img src="docs/project-facts.svg" alt="Project Facts: what gitfurl does, its limits and how to use it" width="420">
 </p>
 
-> **Version 1.3.0, released 2026-11-18.** The app, the command line and the safety checks are complete for the scope in [docs/scope.md](docs/scope.md). That does **not** mean any particular installer works: compatibility is unverified, a complete install has been tested only with an installer built for the test, and the code has not been audited. Details: [docs/status.md](docs/status.md).
+> **Version 1.4.0, released 2026-11-26.** The app, the command line and the safety checks are complete for the scope in [docs/scope.md](docs/scope.md). That does **not** mean any particular installer works: compatibility is unverified, a complete install has been tested only with an installer built for the test, and the code has not been audited. Details: [docs/status.md](docs/status.md).
 
 ![The Library page: a list of Wine prefixes](docs/screenshot.png)
 
