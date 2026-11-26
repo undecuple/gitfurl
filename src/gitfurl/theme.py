@@ -11,10 +11,11 @@ HOVER, ACCENTS = "#5a6a92", [ORANGE, AMBER, YELLOW, CYAN]
 DISABLED_FILL = "#2b3350"       # a disabled plain button
 DISABLED_ACCENT = "#5a3a22"     # a disabled accent button
 
-# One spacing scale (pixels), one type scale (points), one corner radius.
+# One spacing scale (pixels), one type scale (points), one corner radius (0: bricks are square).
 SPACE = {"xs": 4, "sm": 8, "md": 12, "lg": 16, "xl": 24}
 TYPE = {"caption": 9, "body": 10, "lead": 12, "title": 22}
-RADIUS = 10
+RADIUS = 0
+STUD_H = 4  # how far a brick's studs stand above its top edge (pixels)
 FOCUS_WIDTH = 2
 
 # Every text colour on every background it is drawn on: (name, text, background).
@@ -58,3 +59,20 @@ def contrast_ratio(a: str, b: str) -> float:
     """WCAG contrast ratio between two '#rrggbb' colours, 1.0 to 21.0."""
     hi, lo = sorted((luminance(a), luminance(b)), reverse=True)
     return (hi + 0.05) / (lo + 0.05)
+
+
+def mix(colour: str, other: str, t: float) -> str:
+    """'#rrggbb' moved a fraction t (0 to 1) of the way towards other."""
+    a = [int(colour[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(other[i:i + 2], 16) for i in (1, 3, 5)]
+    return "#" + "".join(f"{round(x + (y - x) * t):02X}" for x, y in zip(a, b))
+
+
+def lit(colour: str) -> str:
+    """The lit edge of a brick of this colour."""
+    return mix(colour, "#FFFFFF", 0.3)
+
+
+def shade(colour: str) -> str:
+    """The shaded edge of a brick of this colour."""
+    return mix(colour, "#000000", 0.4)
