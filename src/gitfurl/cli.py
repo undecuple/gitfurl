@@ -150,6 +150,11 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--accept-bad-index-crc", action="store_true",
                              help="read FreeArc indexes with a bad index or footer CRC, with "
                                   "a warning; each file's CRC is still checked. Default: off")
+        command.add_argument("--keep-bad-file-crc", action="store_true",
+                             help="keep (and list) a file whose decoded CRC-32 does not match "
+                                  "the archive instead of removing it; its size must still "
+                                  "match, and nothing is overwritten. Only for an installer "
+                                  "you trust. This run only. Default: off")
     ixt = sub.add_parser(
         "extract-inno", help="extract the files an Inno Setup installer holds for its program "
                              "folder into a prefix, without running the installer")
@@ -218,12 +223,16 @@ def main(argv: list[str] | None = None) -> int:
         links = propose_for(installer) if args.link_names else None
         choice = choose_route(installer, args.prefix or DEFAULT_PREFIX, det, args.route,
                               setup_options=_native_unused(args), links=links,
-                              accept_bad_index_crc=args.accept_bad_index_crc)
+                              accept_bad_index_crc=args.accept_bad_index_crc,
+                              keep_bad_file_crc=args.keep_bad_file_crc)
     except ValueError as exc:
         print(f"error: {exc}. Nothing was run.", file=sys.stderr)
         return 1
     if choice.route == ROUTE_NATIVE:
         return _native_install(args, installer, det, choice, links)
+    if args.keep_bad_file_crc:
+        print("--keep-bad-file-crc does not apply to the Wine/Proton route: Setup runs and "
+              "checks its own files")
     if args.apply_setup_entries:
         print("--apply-setup-entries does not apply to the Wine/Proton route: Setup runs and "
               "writes its own registry entries and shortcuts")
@@ -527,7 +536,8 @@ def _extract_command(args) -> int:
     try:
         installer = validate_installer(args.installer)
         plan = plan_extract(installer, args.prefix,
-                            accept_bad_index_crc=args.accept_bad_index_crc)
+                            accept_bad_index_crc=args.accept_bad_index_crc,
+                            keep_bad_file_crc=args.keep_bad_file_crc)
     except ValueError as exc:  # ExtractRefused is a ValueError
         print(f"error: {exc}. Nothing was written.", file=sys.stderr)
         return 1
@@ -550,7 +560,7 @@ def _extract_command(args) -> int:
         if refused is not None:
             return refused
     try:
-        if plan.warnings:
+        if plan.warnings or plan.keep_bad_file_crc:  # logged, with a timeline
             from gitfurl.route import NativeInstallPlan, RouteChoice, run_native
             from gitfurl.timeline import Timeline, approval_entry, archive_warning_entries
 
@@ -561,7 +571,10 @@ def _extract_command(args) -> int:
             native = NativeInstallPlan(installer, args.prefix, plan.prefix, choice, False)
             try:
                 run = run_native(native, timeline=tl)
-                tl.end("Extraction ended", "complete" if run.status == 0 else
+                kept = len(run.result.crc_kept) if run.result is not None else 0
+                tl.end("Extraction ended",
+                       f"complete; {kept} files kept with a CRC-32 mismatch" if kept and
+                       run.status == 0 else "complete" if run.status == 0 else
                        "stopped" if run.status == 130 else "see the log for errors")
             finally:
                 tl.close()
@@ -1046,7 +1059,11 @@ def _native_steps(args, plan, xplan, scan_plan, clean, create, tl) -> int:
     for line in res.lines:
         print(line)
     if args.cleanup != "none":
-        if res.status == 0:
+        if res.status == 0 and res.result.crc_kept:
+            print("cleanup: skipped, files whose CRC-32 does not match were kept")
+            tl.add("cleanup", "Cleanup skipped", "files whose CRC-32 does not match were kept "
+                   "(--keep-bad-file-crc), so the installer stays")
+        elif res.status == 0:
             deleted, problems = perform_cleanup(clean, 0)
             print(f"cleanup: deleted {deleted} file(s)")
             for item in problems:

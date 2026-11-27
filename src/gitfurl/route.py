@@ -199,7 +199,8 @@ def _linked_text(linked: str, links) -> str:
 def choose_route(installer: Path, prefix_name: str, det: Detection, requested: str = "auto",
                  env: dict[str, str] | None = None,
                  setup_options: tuple[str, ...] | list[str] = (), links=None, *,
-                 accept_bad_index_crc: bool = False) -> RouteChoice:
+                 accept_bad_index_crc: bool = False,
+                 keep_bad_file_crc: bool = False) -> RouteChoice:
     """Pick the route. Writes nothing and runs nothing.
 
     `setup_options` are the options the user gave that only a Setup run uses (for example
@@ -254,7 +255,8 @@ def choose_route(installer: Path, prefix_name: str, det: Detection, requested: s
                     "file data")
     try:
         plan = plan_extract(installer, prefix_name, env,
-                            accept_bad_index_crc=accept_bad_index_crc)
+                            accept_bad_index_crc=accept_bad_index_crc,
+                            keep_bad_file_crc=keep_bad_file_crc)
     except ExtractRefused as exc:
         reasons = [f"the archives cannot be unpacked by gitfurl: {exc}"]
         if inno:
@@ -332,6 +334,10 @@ class NativeInstallPlan:
 
     def describe(self) -> list[str]:
         lines = [self.choice.line(), self.skipped()]
+        if self.extract.keep_bad_file_crc:
+            from gitfurl.extract import KEEP_BAD_CRC_WARNING
+
+            lines.insert(0, KEEP_BAD_CRC_WARNING)
         n = 0
 
         def step(text: str) -> None:
@@ -369,7 +375,8 @@ class NativeInstallPlan:
                  "redistributables and [Run] entries are not run):")
             lines.extend(f"  {ln}" for ln in self.setup_entries.describe())
         if self.cleanup_text is not None:
-            step("only after a complete unpack (every file written, every CRC-32 matching): "
+            step("only after a complete unpack (every file written, every CRC-32 matching; "
+                 "skipped when a file was kept with a CRC-32 mismatch): "
                  + self.cleanup_text.replace("\n", "\n  "))
         lines.append("memory: the unpack runs inside gitfurl and is not put in a systemd "
                      "scope; the decoders' memory is capped per data block"
@@ -572,9 +579,15 @@ def run_native(plan: NativeInstallPlan, cancel=None, on_line=None, detailed_log:
                     exc.unpack_started = started
                 raise
 
+            for name, stored, computed, what in result.crc_details:
+                log.write(f"CRC-32 mismatch: {name}: stored {stored:08X}, computed "
+                          f"{computed:08X}; {what}\n")
+            log.flush()
+
             def data():
                 return {"files": result.files, "bytes_written": result.bytes_written,
                         "crc_errors": len(result.crc_errors),
+                        "crc_kept": len(result.crc_kept),
                         "seconds": round(clock() - t0, 1)}
 
             try:
@@ -688,11 +701,25 @@ def _tl_unpack_end(tl, xplan, result) -> None:
 
     tl.add("files", f"{result.files} files written ({size_text(result.bytes_written)}), "
            "each one CRC-32 checked",
-           "every CRC-32 matched the archive's index" if not result.crc_errors else
-           "the files that did not match were removed again")
+           "the files that did not match were removed again" if result.crc_errors else
+           "the files that did not match were kept, as you chose" if result.crc_kept else
+           "every CRC-32 matched the archive's index")
+    if result.crc_kept:
+        tl.add("note", f"Warning: {len(result.crc_kept)} files kept although their CRC-32 "
+               "does not match the archive",
+               "you chose --keep-bad-file-crc for this run; gitfurl cannot tell a damaged "
+               "file from an archive with wrong checksums; the log lists each one with its "
+               "stored and computed CRC-32")
     if result.crc_errors:
         tl.add("skip", f"{len(result.crc_errors)} files removed again",
                "their CRC-32 did not match the archive's index")
+    for name, count in result.all_failed:
+        tl.add("note", f"Every file of {name} failed its CRC-32 check",
+               f"{count} file{'s' if count != 1 else ''}, every one checked")
+    if result.crc_errors and not result.keep_bad_file_crc:
+        tl.add("note", f"Suggestion: {len(result.crc_errors)} files failed the CRC-32 check",
+               "if you trust this installer, run it again with --keep-bad-file-crc to keep "
+               "them (into a new folder); it was off for this run")
     if result.not_removed:
         tl.add("skip", f"{len(result.not_removed)} damaged files could not be removed",
                "they failed the CRC-32 check; see the log")

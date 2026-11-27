@@ -238,6 +238,23 @@ def boot_line(runtime: str, addons: bool) -> str | None:
     return wineboot_line(runtime, addons, option=f"'{WINE_ADDONS_TITLE}'")
 
 
+BAD_INDEX_CRC_TITLE = "Read archives with a bad index or footer CRC (native route)"
+BAD_INDEX_CRC_NOTE = ("Off by default, for this installer only. Warns before reading; each file's "
+                      "own CRC is still checked, and a file that fails is not kept unless the "
+                      "next switch is on.")
+KEEP_BAD_CRC_TITLE = "Keep files whose CRC-32 does not match (native route)"
+KEEP_BAD_CRC_NOTE = ("Off by default, for this installer only. A file whose CRC-32 does not match "
+                     "the archive is kept and listed instead of removed. gitfurl cannot tell a "
+                     "damaged file from an archive with wrong checksums: only for an installer "
+                     "you trust. Sizes must still match; nothing is overwritten.")
+
+
+def crc_switches_reset(previous, current) -> bool:
+    """True when the CRC switches must go back to off: another installer was chosen. They
+    apply to one installer's run only and are never remembered."""
+    return previous is not None and str(previous).strip() != str(current).strip()
+
+
 SETUP_INSTEAD_TITLE = "Run Setup instead (Wine/Proton route)"
 SETUP_INSTEAD_NOTE = ("Off by default: when the installer's payload is FreeArc archives gitfurl "
                       "can read, gitfurl unpacks them itself and Setup is not run (the plan says "
@@ -259,6 +276,11 @@ WINDOW_WORDS = (
      "offer this)"),
     ("--route wine", f"the '{SETUP_INSTEAD_TITLE}' switch"),
     ("--no-memory-limit", f"turning off '{MEMORY_TITLE}'"),
+    ("use --accept-bad-index-crc to read it anyway",
+     f"turn on '{BAD_INDEX_CRC_TITLE}' in Options to read it anyway"),
+    ("run it again with --keep-bad-file-crc",
+     f"run it again with '{KEEP_BAD_CRC_TITLE}' turned on in Options"),
+    ("--keep-bad-file-crc", f"the '{KEEP_BAD_CRC_TITLE}' switch"),
     ("Create it first with 'gitfurl cli prefix create ", "Create it first (Create now) for '"),
     ("to have gitfurl unpack the archives itself instead, use --route native (these options "
      "then do not apply)", "to have gitfurl unpack the archives itself instead, turn those "
@@ -284,7 +306,7 @@ def window_setup_options(portable: bool, unattended: bool, runtime: str,
 
 def window_route(installer, prefix: str, *, setup_instead: bool = False,
                  setup_options=(), env=None, link_names: bool = False,
-                 accept_bad_index_crc: bool = False):
+                 accept_bad_index_crc: bool = False, keep_bad_file_crc: bool = False):
     """(detection, RouteChoice or None, error text or None). Reads headers and archive
     indexes only. The route is chosen as the command line's automatic choice; the 'Run Setup
     instead' switch asks for the Wine/Proton route; link_names is the link switch (as
@@ -296,7 +318,8 @@ def window_route(installer, prefix: str, *, setup_instead: bool = False,
     try:
         choice = choose_route(installer, prefix, det, "wine" if setup_instead else "auto", env,
                               setup_options=list(setup_options), links=links,
-                              accept_bad_index_crc=accept_bad_index_crc)
+                              accept_bad_index_crc=accept_bad_index_crc,
+                              keep_bad_file_crc=keep_bad_file_crc)
     except ValueError as exc:
         return det, None, str(exc)
     return det, choice, None
@@ -304,12 +327,14 @@ def window_route(installer, prefix: str, *, setup_instead: bool = False,
 
 def window_route_text(installer, prefix: str, env=None, *, setup_instead: bool = False,
                       setup_options=(), link_names: bool = False,
-                      accept_bad_index_crc: bool = False) -> str:
+                      accept_bad_index_crc: bool = False,
+                      keep_bad_file_crc: bool = False) -> str:
     """The detection text with the route line the window will take."""
     det, choice, error = window_route(installer, prefix, setup_instead=setup_instead,
                                       setup_options=setup_options, env=env,
                                       link_names=link_names,
-                                      accept_bad_index_crc=accept_bad_index_crc)
+                                      accept_bad_index_crc=accept_bad_index_crc,
+                                      keep_bad_file_crc=keep_bad_file_crc)
     if choice is None:
         return describe_detection(det) + f"\nroute: not chosen ({error})."
     return window_words(describe_detection(det, choice))
@@ -421,7 +446,14 @@ def native_cleanup_allowed(outcome, stopped: bool) -> bool:
     """Cleanup only after a complete unpack (status 0) that nobody asked to stop. A Stop that
     lands after the unpack has returned (during the listings) still skips the cleanup, since
     the Stop dialog says nothing is deleted."""
-    return not stopped and outcome.result is not None and outcome.result.status == 0
+    return not stopped and outcome.result is not None and outcome.result.status == 0 \
+        and not kept_bad_crc(outcome)
+
+
+def kept_bad_crc(outcome) -> int:
+    """Files a native run kept although their CRC-32 does not match (the opt-in)."""
+    kept = getattr(getattr(outcome.result, "result", None), "crc_kept", None)
+    return len(kept) if isinstance(kept, list) else 0
 
 
 def native_end_text(outcome, cleanup_line: str | None, notes) -> tuple[str, str]:
@@ -435,7 +467,12 @@ def native_end_text(outcome, cleanup_line: str | None, notes) -> tuple[str, str]
         head = "Stopped. " if outcome.status == 130 else "Not unpacked. "
         return (head + window_words(outcome.message or "") + tail,
                 "warn" if outcome.status == 130 else "error")
-    if res.status == 0:
+    if res.status == 0 and kept_bad_crc(outcome):
+        head, colour = ("Unpacked (Setup was not run), with files kept whose CRC-32 does not "
+                        "match."), "warn"
+        clean = ("\nCleanup skipped: files whose CRC-32 does not match were kept."
+                 if cleanup_line else "")
+    elif res.status == 0:
         head, colour = "Unpacked (Setup was not run).", "ok"
         clean = f"\n{cleanup_line}" if cleanup_line and cleanup_line != "skipped" else ""
     elif res.status == 130:
@@ -715,7 +752,9 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     addons_var = tk.BooleanVar(value=False)  # Wine's Mono and Gecko dialogs: off
     setup_var = tk.BooleanVar(value=False)  # "Run Setup instead": off, so the route is automatic
     link_var = tk.BooleanVar(value=False)  # link the archives under the expected names: off
-    bad_index_crc_var = tk.BooleanVar(value=False)
+    bad_index_crc_var = tk.BooleanVar(value=False)  # this installer only; never remembered
+    keep_bad_crc_var = tk.BooleanVar(value=False)  # this installer only; never remembered
+    crc_for = {"installer": None}  # the installer the CRC switches were last seen with
     entries_var = tk.BooleanVar(value=False)  # the setup's registry entries and shortcuts: off
     route_cache: dict = {}
     progress_var = tk.StringVar(value="Shown while an installer runs: payload read, rate, rough ETA.")
@@ -1176,10 +1215,10 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         lambda p: w.Switch(p, setup_var, command=lambda: refresh_plan()))
     row(c, LINK_NAMES_TITLE, LINK_NAMES_NOTE,
         lambda p: w.Switch(p, link_var, command=lambda: refresh_plan()))
-    row(c, "Read archives with a bad index or footer CRC (native route)",
-        "Off by default. Warns before reading; each file's own CRC is still checked, "
-        "and a file that fails is not kept.",
+    row(c, BAD_INDEX_CRC_TITLE, BAD_INDEX_CRC_NOTE,
         lambda p: w.Switch(p, bad_index_crc_var, command=lambda: refresh_plan()))
+    row(c, KEEP_BAD_CRC_TITLE, KEEP_BAD_CRC_NOTE,
+        lambda p: w.Switch(p, keep_bad_crc_var, command=lambda: refresh_plan()))
     row(c, SETUP_ENTRIES_TITLE, SETUP_ENTRIES_NOTE,
         lambda p: w.Switch(p, entries_var, command=lambda: refresh_plan()))
     row(c, UNATTENDED_TITLE, UNATTENDED_NOTE,
@@ -1663,12 +1702,13 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         options = tuple(window_setup_options(portable_var.get(), unattended_var.get(),
                                              runtime_var.get(), changes_var.get()))
         key = (str(installer), st.st_mtime_ns, st.st_size, selected_prefix(), setup_var.get(),
-               options, link_var.get(), bad_index_crc_var.get())
+               options, link_var.get(), bad_index_crc_var.get(), keep_bad_crc_var.get())
         if route_cache.get("key") != key:
             route_cache.clear()  # a failed choice must not leave the old value under a new key
             value = window_route(installer, selected_prefix(), setup_instead=setup_var.get(),
                                  setup_options=options, link_names=link_var.get(),
-                                 accept_bad_index_crc=bad_index_crc_var.get())
+                                 accept_bad_index_crc=bad_index_crc_var.get(),
+                                 keep_bad_file_crc=keep_bad_crc_var.get())
             route_cache["key"], route_cache["value"] = key, value
         return route_cache["value"]
 
@@ -1686,6 +1726,11 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         return choice if choice is not None and choice.route == "native" else None
 
     def refresh_plan(*_):
+        now = installer_var.get()
+        if crc_switches_reset(crc_for["installer"], now):  # another installer: back to off
+            bad_index_crc_var.set(False)
+            keep_bad_crc_var.set(False)
+        crc_for["installer"] = now
         name = selected_prefix()
         title_var.set(name or "No prefix")
         try:
@@ -2423,6 +2468,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                     "setup_var": setup_var,
                     "entries_var": entries_var,
                     "bad_index_crc_var": bad_index_crc_var,
+                    "keep_bad_crc_var": keep_bad_crc_var,
                     "addons_var": addons_var,
                     "changes_var": changes_var,
                     "plan_checklist_rows": lambda: {k: (bool(f.winfo_manager()), m.cget("text"))

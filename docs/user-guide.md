@@ -348,9 +348,28 @@ gitfurl then starts the installer with Inno Setup's own documented switches inst
     gitfurl cli extract setup.exe --prefix NAME --dry-run
     gitfurl cli extract setup.exe --prefix NAME
 
-By default, a bad index or footer CRC stops the native reader. To read it anyway, add `--accept-bad-index-crc` to `cli extract` or `cli install`. In the window, use Options → "Read archives with a bad index or footer CRC (native route)". It starts off and is not saved between app sessions. This only relaxes those CRC comparisons. Lengths, offsets, counts, names and decoding checks still apply. The footer scan still prefers the last CRC-valid descriptor; if none exists, it uses the last descriptor whose complete fields parse, and refuses if its blocks cannot be read.
+### Two CRC opt-ins, for an installer you trust
 
-The plan and approval show each failed CRC with its stored and computed values. The log and timeline keep the same warning. Each file is still checked against its own CRC after decoding. A file that fails is removed and the run reports an error. `cli extract` writes a local log and timeline (mode 0600) when it accepts a failed index or footer CRC. A dry run or declined approval writes neither.
+Some archives decode correctly but carry wrong CRC-32 values. gitfurl cannot tell a damaged file from an archive with wrong checksums, so by default it refuses or removes what fails. Two opt-ins relax this, one step each. Both are off by default, apply to one run only, and are never saved. In the window they are switches in Options, and they go back to off when you choose another installer.
+
+| Opt-in | Command line | Window (Options) | What it relaxes |
+| --- | --- | --- | --- |
+| Bad index CRC | `--accept-bad-index-crc` | "Read archives with a bad index or footer CRC (native route)" | The CRC-32 of the archive's index and footer descriptor. Without it, the plan is refused. |
+| Bad file CRC | `--keep-bad-file-crc` | "Keep files whose CRC-32 does not match (native route)" | The CRC-32 of each decoded file. Without it, a file that fails is removed again and the run ends with an error. |
+
+Both work with `cli extract` and `cli install` (native route). On the Wine/Proton route they do not apply; Setup checks its own files.
+
+What still holds with either or both on:
+- lengths, offsets, counts and names in the index are checked as before; the footer scan still prefers the last CRC-valid descriptor; if none exists, it uses the last descriptor whose complete fields parse, and refuses if its blocks cannot be read;
+- each file is written with exactly the size the index gives; a data block that ends early is an error;
+- each decoder's own checks still refuse damaged data (for example a bad lzma stream or a rolz packet CRC);
+- files go only into a new folder, and nothing is overwritten.
+
+**Before the run.** The plan and the approval name each opt-in. A failed index or footer CRC is shown with its stored and computed values. With `--keep-bad-file-crc`, the plan starts with: "WARNING: files whose CRC-32 does not match the archive are KEPT (--keep-bad-file-crc). gitfurl cannot tell a damaged file from an archive with wrong checksums; use this only for an installer you trust." With either opt-in, `cli extract` writes a local log and a timeline (mode 0600). A dry run or a declined approval writes neither.
+
+**After the run.** With `--keep-bad-file-crc`, each kept file is listed with its stored and computed CRC-32: the first five in the end text with a count of the rest, every one in the log, and a warning row with the count in the timeline. The run counts as complete, but a `--cleanup` is skipped, so the installer stays. Without it, the end text and the timeline say how many files failed and suggest running again with `--keep-bad-file-crc` if you trust the installer (the destination must not exist, so delete it or use another prefix). When every file of an archive failed, the end text and the timeline say so; that is what was observed, not a diagnosis.
+
+**Suggestions only.** When the plan is refused because of an index or footer CRC, the reason names `--accept-bad-index-crc`; the window names its switch instead. gitfurl never turns either opt-in on by itself.
 
 gitfurl reads the FreeArc archives beside the installer (and the installer itself, if it is one) with its own reader and writes their files to `C:\Games\NAME`, that is `drive_c/Games/NAME` inside the prefix. **The installer is not run:** no registry entries, no redistributables, no shortcuts and none of its own steps, so the result may not work. The end text says "files extracted", never "installed".
 
