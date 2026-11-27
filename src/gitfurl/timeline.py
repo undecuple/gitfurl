@@ -324,27 +324,34 @@ def prefix_entry(tl: Timeline, path: Path, exists: bool, create: bool) -> None:
         tl.add("prefix", f"Prefix {name}: missing", f"creating it was not asked for ({path})")
 
 
-def skip_entries(tl: Timeline, choice, target: str | None = None) -> None:
-    """What the route leaves out, in the plan's words."""
+def skip_entries(tl: Timeline, choice, target: str | None = None,
+                 setup_entries: bool = False) -> None:
+    """What the route leaves out, in the plan's words. With setup_entries on, the setup's own
+    registry entries and shortcuts are added after the unpack (listed in the plan), so they
+    are not named as skipped."""
     if choice is None:
         return
     if choice.route == "native":
         where = target or "C:\\Games\\PREFIX"
+        left = ("Setup's own files, redistributables it would run and every step of its "
+                "script; the registry entries and shortcuts it declares are added after the "
+                "unpack, as the plan lists" if setup_entries else
+                "Setup's own files, shortcuts, registry entries, redistributables it would "
+                "run and every step of its script")
         tl.add("skip", "Setup is not run",
-               "skipped: Setup's own files, shortcuts, registry entries, redistributables "
-               "it would run and every step of its script; the archives are unpacked with "
-               f"their own folder layout into {where}")
+               f"skipped: {left}; the archives are unpacked with their own folder layout "
+               f"into {where}")
     elif choice.route == "wine":
         tl.add("skip", "gitfurl does not unpack anything itself",
                "Setup does all of its own steps")
 
 
 def plan_entries(tl: Timeline, det, choice, prefix: Path, exists: bool, create: bool,
-                 target: str | None = None) -> None:
+                 target: str | None = None, setup_entries: bool = False) -> None:
     detection_entries(tl, det)
     route_entries(tl, choice)
     prefix_entry(tl, prefix, exists, create)
-    skip_entries(tl, choice, target)
+    skip_entries(tl, choice, target, setup_entries)
 
 
 def approval_entry(tl: Timeline, how: str) -> None:

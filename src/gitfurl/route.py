@@ -23,7 +23,9 @@ Setup does everything (wine) or gitfurl does the unpack and nothing of Setup run
 
 run_native() performs an approved native plan's unpack: a local log (mode 0600), an optional
 JSON-lines event log, progress lines printed by the caller's callback on the calling thread,
-and the listings afterwards (nothing found is run). It starts no process.
+and the listings afterwards (nothing found is run). When the plan holds the setup's registry
+entries and shortcuts (opt-in, gitfurl.setup_entries), they are written after a complete
+unpack, without Wine. It starts no process.
 """
 
 from __future__ import annotations
@@ -308,13 +310,21 @@ class NativeInstallPlan:
     cleanup_text: str | None = None  # CleanupPlan.describe(), if a cleanup mode was chosen
     unused: list[str] = field(default_factory=list)  # options that do not apply here
     memory_check: bool = True  # compare the decoders' memory with MemAvailable before the start
+    # setup_entries.SetupEntriesPlan when the setup's registry entries and shortcuts were asked
+    # for (--apply-setup-entries); None otherwise
+    setup_entries: object = None
 
     @property
     def extract(self):
         return self.choice.extract
 
     def skipped(self) -> str:
-        return SKIPPED_TEXT.format(target=self.extract.target)
+        text = SKIPPED_TEXT.format(target=self.extract.target)
+        if self.setup_entries is not None:
+            text = text.replace("shortcuts, registry entries,",
+                                "shortcuts and registry entries other than those the plan "
+                                "lists,")
+        return text
 
     def describe(self) -> list[str]:
         lines = [self.choice.line(), self.skipped()]
@@ -349,6 +359,11 @@ class NativeInstallPlan:
         lines.extend(f"  {ln}" for ln in self.extract.describe())
         step("list program candidates and redistributable installers found in the new folder "
              "(nothing is run)")
+        if self.setup_entries is not None:
+            step("only after a complete unpack: add the registry entries and menu entries the "
+                 "setup declares that gitfurl can apply exactly (no Wine program runs; its "
+                 "redistributables and [Run] entries are not run):")
+            lines.extend(f"  {ln}" for ln in self.setup_entries.describe())
         if self.cleanup_text is not None:
             step("only after a complete unpack (every file written, every CRC-32 matching): "
                  + self.cleanup_text.replace("\n", "\n  "))
@@ -564,6 +579,23 @@ def run_native(plan: NativeInstallPlan, cancel=None, on_line=None, detailed_log:
                     lines.extend(listings(xplan, plan.prefix_name))
                 else:
                     lines.append("program listing: skipped, the unpack did not complete")
+                if plan.setup_entries is not None:
+                    if result.ok and cancel is not None and cancel.is_set():
+                        lines.append("setup entries: not added, Stop was asked for")
+                        _tl_entries_not(timeline, "Stop was asked for")
+                    elif result.ok:
+                        from gitfurl.setup_entries import Applied, apply_entries
+
+                        applied = Applied()
+                        written = apply_entries(plan.setup_entries, log_dir, stamp,
+                                                applied=applied)
+                        event("setup_entries", lines=written)
+                        lines.append("setup entries (registry values and menu entries):")
+                        lines.extend(f"  {ln}" for ln in written)
+                        _tl_entries(timeline, plan.setup_entries, applied)
+                    else:
+                        lines.append("setup entries: not added, the unpack did not complete")
+                        _tl_entries_not(timeline, "the unpack did not complete")
                 lines.append(plan.skipped())
                 for ln in lines:
                     log.write(f"--- {ln}\n")
@@ -671,6 +703,44 @@ def _tl_unpack_end(tl, xplan, result) -> None:
         if redist:
             tl.add("skip", f"{redist} redistributable installer{'s' if redist != 1 else ''} "
                    "unpacked but not run", "gitfurl never runs what it unpacks; they are listed")
+
+
+TL_SKIPPED_ROWS = 20  # skipped setup entries with a row each; the rest are counted in one
+
+
+def _tl_entries(tl, entries, applied) -> None:
+    """Rows for the setup's registry values and menu entries written after the unpack, and
+    one row per entry left out with its reason (the log has every one)."""
+    if tl is None:
+        return
+    from gitfurl.setup_entries import SERVER_WAIT_S
+    from gitfurl.timeline import shown
+
+    for name, n in applied.values.items():
+        tl.add("files", f"Registry values written into {name}: {n}",
+               "the setup's [Registry] entries gitfurl can apply exactly, written without Wine "
+               "while no Wine server for the prefix ran; the file was copied into the log "
+               "folder first")
+    if entries.values and not applied.values:
+        tl.add("note", "No registry value was written",
+               f"each value the plan listed was kept or refused (a Wine server is waited for up "
+               f"to {SERVER_WAIT_S:g} s); see below and the log")
+    if applied.menu_entries:
+        many = "s" if applied.menu_entries != 1 else ""
+        tl.add("files", f"Menu entries written: {applied.menu_entries}",
+               f"one .desktop file{many} per program under {{app}} in your data folder's "
+               "applications folder, starting it in this prefix")
+    items = [*entries.skipped, *applied.not_done]
+    for item in items[:TL_SKIPPED_ROWS]:
+        tl.add("skip", "Setup entry not applied", shown(item, 280))
+    if len(items) > TL_SKIPPED_ROWS:
+        tl.add("skip", f"{len(items) - TL_SKIPPED_ROWS} more setup entries not applied",
+               "the log lists each one with its reason")
+
+
+def _tl_entries_not(tl, why: str) -> None:
+    if tl is not None:
+        tl.add("skip", "The setup's registry entries and menu entries were not added", why)
 
 
 def native_prefix_create(plan: NativeInstallPlan, memory_limit: bool,

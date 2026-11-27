@@ -101,8 +101,16 @@ def scenario(root, ui, name):
         assert "route: wine (chosen by you)" in messages[-1], messages[-1][-1500:]
         assert "Setup is not run" not in messages[-1]
     elif name == "declined":
+        # The setup entries switch: off by default; on, the plan and the approval list it.
+        assert ui["entries_var"].get() is False
+        assert "add the registry entries" not in plan_text()
+        ui["entries_var"].set(True)
+        ui["refresh_plan"]()
+        settle(root)
+        assert "add the registry entries" in plan_text(), plan_text()[-1500:]
         answers["Unpack this installer?"] = False
         ui["run_clicked"]()
+        assert "add the registry entries" in messages[-1], messages[-1][-1500:]
         settle(root)
         assert not ui["busy"]["on"] and not started.is_set()
     else:

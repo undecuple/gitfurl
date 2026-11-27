@@ -231,6 +231,9 @@ class Icon:
     parameters: str
     working_dir: str
     cond: Conditions
+    icon_file: str = ""
+    comment: str = ""
+    hooks: str = ""  # its AfterInstall and BeforeInstall [Code] calls, joined; "" for none
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +249,15 @@ ROOT_KEYS = {0x80000000: "HKCR", 0x80000001: "HKCU", 0x80000002: "HKLM", 0x80000
              0x80000005: "HKCC", 1: "HKA"}
 
 
+# [Registry] value types and options (bit numbers), as stored.
+REG_TYPES = {0: "none", 1: "string", 2: "expandsz", 3: "dword", 4: "binary", 5: "multisz",
+             6: "qword"}
+REG_FLAGS = ("createvalueifdoesntexist", "uninsdeletevalue", "uninsclearvalue",
+             "uninsdeletekey", "uninsdeletekeyifempty", "preservestringtype", "deletekey",
+             "deletevalue", "noerror", "dontcreatekey")
+REG_FLAGS_OLD = REG_FLAGS + ("32bit", "64bit")  # before 7.0.0.3 (then a bitness byte)
+
+
 @dataclass(frozen=True, slots=True)
 class RegistryEntry:
     root: int
@@ -254,10 +266,19 @@ class RegistryEntry:
     value_data: str
     value_type: int
     cond: Conditions
+    flags: frozenset = frozenset()  # names from REG_FLAGS_OLD; unknown bits as "bit N"
+    bitness: int = 0  # 7.0.0.3 and later: the stored bitness byte (0 = the default)
+    hooks: str = ""  # its AfterInstall and BeforeInstall [Code] calls, joined; "" for none
+    min_nt: int = 0  # MinVersion, Windows NT part (major << 24 | minor << 16 | build)
+    below_nt: int = 0  # OnlyBelowVersion, Windows NT part (0 = no limit)
 
     @property
     def root_name(self) -> str:
         return ROOT_KEYS.get(self.root & 0xFFFFFFFF, "an unknown root key")
+
+    @property
+    def type_name(self) -> str:
+        return REG_TYPES.get(self.value_type, "an unknown type")
 
 
 @dataclass(frozen=True, slots=True)
@@ -843,6 +864,14 @@ class _Parser:
     def ver(self) -> None:
         self.b.skip(10)  # one Windows version: u32, u32, u16
 
+    def nt_ver(self) -> int:
+        """One Windows version; returns its NT part (the Windows 9x part and the service
+        pack are read past)."""
+        self.b.u32()
+        nt = self.b.u32()
+        self.b.u16()
+        return nt
+
     def common(self, s: list[str], at: int) -> Conditions:
         return Conditions(s[at], s[at + 1], s[at + 2], s[at + 3])
 
@@ -1033,7 +1062,8 @@ class _Parser:
             self.ver()
             self.ver()
             b.skip(4 + 4 + 1 + 2 + 1)
-            return Icon(s[0], s[1], s[2], s[3], self.common(s, 6))
+            return Icon(s[0], s[1], s[2], s[3], self.common(s, 6), s[4], s[5],
+                        "|".join(x for x in (s[10], s[11]) if x))
 
         def ini():
             s = rec(10)
@@ -1042,19 +1072,26 @@ class _Parser:
             b.u8()
             return IniEntry(s[0], s[1], s[2], s[3], self.common(s, 4))
 
+        reg_names = REG_FLAGS if f >= F7003 else REG_FLAGS_OLD
+
         def registry():
             s = rec(9)
-            self.ver()
-            self.ver()
+            min_nt = self.nt_ver()
+            below_nt = self.nt_ver()
             root = b.u32()
             perm_ok(b.i16())
             vtype = b.u8()
-            if f >= F7003 and b.u8() > 4:
+            bitness = b.u8() if f >= F7003 else 0
+            if bitness > 4:
                 self.odd("a [Registry] entry has an unknown bitness")
-            b.u16()
+            raw = b.u16()
+            flags, _unknown = _names(raw, reg_names, len(reg_names))
+            flags = flags | {f"bit {i}" for i in range(len(reg_names), 16) if raw >> i & 1}
             if vtype > 6:
                 self.odd("a [Registry] entry has an unknown value type")
-            return RegistryEntry(root, s[0], s[1], s[2], vtype, self.common(s, 3))
+            return RegistryEntry(root, s[0], s[1], s[2], vtype, self.common(s, 3),
+                                 frozenset(flags), bitness,
+                                 "|".join(x for x in (s[7], s[8]) if x), min_nt, below_nt)
 
         def delete():
             s = rec(7)

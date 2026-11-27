@@ -280,6 +280,20 @@ class PlanEntryTests(NativeBase):
         self.assertIn("Setup is not run", text)
         self.assertIn("C:\\Games\\p1", text)
         self.assertIn("Approved with --yes", text)
+        self.assertIn("shortcuts, registry entries", text)
+
+    def test_skipped_row_with_setup_entries_on(self):
+        from gitfurl.detect import detect
+
+        plan = self.plan()
+        tl = Timeline()
+        tlm.plan_entries(tl, detect(self.setup), plan.choice, self.prefix, False, True,
+                         plan.extract.target, setup_entries=True)
+        text = tl.text()
+        self.assertIn("Setup is not run", text)
+        self.assertNotIn("shortcuts, registry entries", text)
+        self.assertIn("registry entries and shortcuts it declares are added after the unpack",
+                      text)
 
 
 class WineRunTests(RunEventHelpers, unittest.TestCase):

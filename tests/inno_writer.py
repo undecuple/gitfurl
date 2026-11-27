@@ -182,6 +182,45 @@ class WRun:
 
 
 @dataclass
+class WIcon:
+    name: str  # e.g. "{group}\\Play"
+    target: str  # e.g. "{app}\\Game.exe"
+    parameters: str = ""
+    working_dir: str = ""
+    components: str = ""
+    tasks: str = ""
+    languages: str = ""
+    check: str = ""
+    after_install: str = ""
+
+
+REG_ROOTS = {"HKCR": 0x80000000, "HKCU": 0x80000001, "HKLM": 0x80000002, "HKU": 0x80000003,
+             "HKCC": 0x80000005, "HKA": 1}
+REG_TYPES = {"none": 0, "string": 1, "expandsz": 2, "dword": 3, "binary": 4, "multisz": 5,
+             "qword": 6}
+REG_BITS = {"createvalueifdoesntexist": 0, "uninsdeletevalue": 1, "uninsclearvalue": 2,
+            "uninsdeletekey": 3, "uninsdeletekeyifempty": 4, "preservestringtype": 5,
+            "deletekey": 6, "deletevalue": 7, "noerror": 8, "dontcreatekey": 9, "32bit": 10,
+            "64bit": 11}
+
+
+@dataclass
+class WReg:
+    root: str  # HKLM, HKCU, HKCR, HKA, HKU, HKCC
+    subkey: str
+    name: str = ""
+    data: str = ""
+    type: str = "string"
+    flags: tuple = ()
+    components: str = ""
+    tasks: str = ""
+    languages: str = ""
+    check: str = ""
+    before_install: str = ""
+    below_nt: int = 0  # OnlyBelowVersion, NT part
+
+
+@dataclass
 class Spec:
     fmt: str = "6.7.0"
     variant: bool = False  # the 5.5.0 layout with one extra header byte
@@ -212,9 +251,9 @@ class Spec:
     tasks: list = field(default_factory=list)  # (name, options)
     dirs: list = field(default_factory=list)  # names
     files: list = field(default_factory=list)  # WFile
-    icons: int = 0
+    icons: int | list = 0  # a count of placeholder entries, or WIcon records
     ini: int = 0
-    registry: int = 0
+    registry: int | list = 0  # a count of placeholder entries, or WReg records
     run: list = field(default_factory=list)  # WRun
     uninstall_run: list = field(default_factory=list)  # WRun
     code: bytes = b""
@@ -295,7 +334,11 @@ def build_block1(sp: Spec, nlocations: int) -> bytes:
               len(sp.dirs)]
     if f >= F["6.5.0"]:
         counts.append(0)
-    counts += [len(sp.files), nlocations, sp.icons, sp.ini, sp.registry, 0, 0, len(sp.run),
+    icons = sp.icons if isinstance(sp.icons, list) else [
+        WIcon(f"{{group}}\\Icon{k}", "{app}\\a.exe") for k in range(sp.icons)]
+    regs = sp.registry if isinstance(sp.registry, list) else [
+        WReg("HKCU", "Software\\Test", f"V{k}", "{app}") for k in range(sp.registry)]
+    counts += [len(sp.files), nlocations, len(icons), sp.ini, len(regs), 0, 0, len(sp.run),
                len(sp.uninstall_run)]
     out += b"".join(i32(c) for c in counts)
     if f >= F["7.0.0.3"]:
@@ -348,21 +391,28 @@ def build_block1(sp: Spec, nlocations: int) -> bytes:
         if f >= F["7.0.0.3"]:
             out += u8(0)
         out += bits(flags, file_bits, nopt) + u8(1 if wf.kind == "uninstaller" else 0)
-    for k in range(sp.icons):
-        out += b"".join(text(s) for s in [f"{{group}}\\Icon{k}", "{app}\\a.exe", "", "", "", "",
-                                          *_six(), ""])
+    for ic in icons:
+        six = _six(ic.components, ic.tasks, ic.languages, ic.check)
+        six[4] = ic.after_install
+        out += b"".join(text(s) for s in [ic.name, ic.target, ic.parameters, ic.working_dir,
+                                          "", "", *six, ""])
         if f >= F["6.1.0"]:
             out += bytes(16)
         out += _ver() + _ver() + i32(0) + i32(1) + u8(0) + u16(0) + u8(0)
     for k in range(sp.ini):
         out += b"".join(text(s) for s in ["{app}\\a.ini", "S", f"K{k}", "V", *_six()])
         out += _ver() + _ver() + u8(16)
-    for k in range(sp.registry):
-        out += b"".join(text(s) for s in ["Software\\Test", f"V{k}", "{app}", *_six()])
-        out += _ver() + _ver() + u32(0x80000001) + struct.pack("<h", -1) + u8(1)
+    for r in regs:
+        six = _six(r.components, r.tasks, r.languages, r.check)
+        six[5] = r.before_install
+        out += b"".join(text(s) for s in [r.subkey, r.name, r.data, *six])
+        below = bytes(4) + u32(r.below_nt) + bytes(2)
+        out += _ver() + below + u32(REG_ROOTS[r.root]) + struct.pack("<h", -1)
+        out += u8(REG_TYPES[r.type])
         if f >= F["7.0.0.3"]:
             out += u8(0)
-        out += u16(0)
+        out += bits([x for x in r.flags if f < F["7.0.0.3"] or x not in ("32bit", "64bit")],
+                    REG_BITS, 2)
     for r in [*sp.run, *sp.uninstall_run]:
         strings = [r.filename, r.parameters, "", "", "", r.verb, r.description,
                    *_six(r.components, r.tasks, r.languages, r.check)]
