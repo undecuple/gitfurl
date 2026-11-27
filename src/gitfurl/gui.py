@@ -21,6 +21,7 @@ from gitfurl.detect import detect
 from gitfurl.doctor import run_doctor
 from gitfurl.memlimit import availability as memory_availability
 from gitfurl.memlimit import describe as describe_memory
+from gitfurl.namelinks import plan_staging, propose_for, run_staged, staged_plan
 from gitfurl.prefixes import (
     PrefixStopped,
     create_prefix,
@@ -139,12 +140,37 @@ def memory_limit_problem(enabled: bool, avail=None, meminfo: str = "/proc/meminf
     return f"{problem}. Turn off '{MEMORY_TITLE}' to run without it."
 
 
+LINK_NAMES_TITLE = "Link the archives under the names the setup expects"
+LINK_NAMES_NOTE = ("Off by default. When the setup expects archives that are missing and the "
+                   "folder holds one matching numbered series under another name, Setup runs "
+                   "from a folder of links that gitfurl makes and deletes; your files are not "
+                   "renamed.")
+
+
+def window_links(installer, prefix: str, enabled: bool, portable: bool = False, now=None):
+    """(namelinks.Staging or None, plan lines, LinkProposal or None) for the window's link
+    switch. Reads the setup data and the folder's names only. Raises ValueError when the
+    links cannot be used."""
+    if not enabled:
+        return None, [], None
+    links = propose_for(Path(installer))
+    if not links.ok:
+        return None, [*links.lines(), "  Setup runs from the installer's own folder"], links
+    if portable:
+        raise ValueError(f"'{LINK_NAMES_TITLE}' cannot be combined with the portable install: "
+                         "the sandbox does not see the staging folder. Turn one of them off")
+    staging = plan_staging(Path(installer), links, prefix, now=now)
+    return staging, staging.describe(), links
+
+
 def describe_plan(installer: str, prefix: str, runtime: str = "wine",
                   proton_path: str | None = None, portable: bool = False,
                   scan: bool = False, memory_limit: bool = False, unattended: bool = False,
-                  now=None, wine_addons: bool = False) -> tuple[str, str | None]:
+                  now=None, wine_addons: bool = False,
+                  link_names: bool = False) -> tuple[str, str | None]:
     """Return (preview text, error). No side effects: the scan is described, never run; the
-    memory limit lines read files only."""
+    memory limit lines read files only; with link_names the staging folder and its links are
+    described, never made."""
     if not installer.strip():
         return "", "Choose an installer file."
     if not prefix.strip():
@@ -169,6 +195,10 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
             check_portable_supported(wrapped, bwrap, penv, installer_path)
             portable_lines = describe_portable(wrapped, bwrap, installer_path, penv,
                                                full_argv=True)
+        staging, link_lines, _links = window_links(validate_installer(installer.strip()),
+                                                   prefix.strip(), link_names, portable, now)
+        if staging is not None:
+            plan = staged_plan(plan, staging)
     except ValueError as exc:
         return "", str(exc)
     text = (
@@ -182,6 +212,8 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
         text += f"if created:  {boot}\n"
     if portable_lines:
         text += "\n".join(portable_lines) + "\n"
+    if link_lines:
+        text += "\n".join(link_lines) + "\n"
     if plan.unattended is not None:
         text += "\n".join(plan.unattended.describe(plan.prefix)) + "\n"
     if scan_plan is not None:
@@ -243,26 +275,29 @@ def window_setup_options(portable: bool, unattended: bool, runtime: str,
 
 
 def window_route(installer, prefix: str, *, setup_instead: bool = False,
-                 setup_options=(), env=None):
+                 setup_options=(), env=None, link_names: bool = False):
     """(detection, RouteChoice or None, error text or None). Reads headers and archive
     indexes only. The route is chosen as the command line's automatic choice; the 'Run Setup
-    instead' switch asks for the Wine/Proton route."""
+    instead' switch asks for the Wine/Proton route; link_names is the link switch (as
+    --link-names)."""
     from gitfurl.route import choose_route
 
     det = detect(installer)
+    links = propose_for(Path(installer)) if link_names else None
     try:
         choice = choose_route(installer, prefix, det, "wine" if setup_instead else "auto", env,
-                              setup_options=list(setup_options))
+                              setup_options=list(setup_options), links=links)
     except ValueError as exc:
         return det, None, str(exc)
     return det, choice, None
 
 
 def window_route_text(installer, prefix: str, env=None, *, setup_instead: bool = False,
-                      setup_options=()) -> str:
+                      setup_options=(), link_names: bool = False) -> str:
     """The detection text with the route line the window will take."""
     det, choice, error = window_route(installer, prefix, setup_instead=setup_instead,
-                                      setup_options=setup_options, env=env)
+                                      setup_options=setup_options, env=env,
+                                      link_names=link_names)
     if choice is None:
         return describe_detection(det) + f"\nroute: not chosen ({error})."
     return window_words(describe_detection(det, choice))
@@ -652,6 +687,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     unattended_var = tk.BooleanVar(value=False)
     addons_var = tk.BooleanVar(value=False)  # Wine's Mono and Gecko dialogs: off
     setup_var = tk.BooleanVar(value=False)  # "Run Setup instead": off, so the route is automatic
+    link_var = tk.BooleanVar(value=False)  # link the archives under the expected names: off
     route_cache: dict = {}
     progress_var = tk.StringVar(value="Shown while an installer runs: payload read, rate, rough ETA.")
     pending = {"cleanup": None, "control": None, "proton": False}
@@ -1090,6 +1126,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         lambda p: w.Switch(p, addons_var, command=lambda: refresh_plan()))
     row(c, SETUP_INSTEAD_TITLE, SETUP_INSTEAD_NOTE,
         lambda p: w.Switch(p, setup_var, command=lambda: refresh_plan()))
+    row(c, LINK_NAMES_TITLE, LINK_NAMES_NOTE,
+        lambda p: w.Switch(p, link_var, command=lambda: refresh_plan()))
     row(c, UNATTENDED_TITLE, UNATTENDED_NOTE,
         lambda p: w.Switch(p, unattended_var, command=lambda: refresh_plan()))
     row(c, "Show what the installer changed on my system",
@@ -1567,11 +1605,11 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         options = tuple(window_setup_options(portable_var.get(), unattended_var.get(),
                                              runtime_var.get(), changes_var.get()))
         key = (str(installer), st.st_mtime_ns, st.st_size, selected_prefix(), setup_var.get(),
-               options)
+               options, link_var.get())
         if route_cache.get("key") != key:
             route_cache.clear()  # a failed choice must not leave the old value under a new key
             value = window_route(installer, selected_prefix(), setup_instead=setup_var.get(),
-                                 setup_options=options)
+                                 setup_options=options, link_names=link_var.get())
             route_cache["key"], route_cache["value"] = key, value
         return route_cache["value"]
 
@@ -1637,7 +1675,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         else:
             text, err = describe_plan(installer_var.get(), name, runtime, proton_dir(),
                                       portable_var.get(), scan_var.get(), memory_var.get(),
-                                      unattended_var.get(), wine_addons=addons_var.get())
+                                      unattended_var.get(), wine_addons=addons_var.get(),
+                                      link_names=link_var.get())
             set_text(plan_box, text or (err or ""))
             rows = plan_checklist(installer_problem(installer_var.get()), prefix_error, exists,
                                   create_var.get(), runtime, bool(tool), err,
@@ -1795,7 +1834,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         text, err = describe_plan(installer_var.get(), selected_prefix(), runtime_var.get(),
                                   proton_dir(), portable_var.get(), scan_var.get(),
                                   memory_var.get(), unattended_var.get(), now,
-                                  wine_addons=addons_var.get())
+                                  wine_addons=addons_var.get(), link_names=link_var.get())
         err = err or memory_limit_problem(memory_var.get())
         if err:
             messagebox.showerror("Cannot run", err)
@@ -1819,6 +1858,15 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                           unattended=unattended_for(validate_installer(installer_var.get().strip()),
                                                     selected_prefix(), unattended_var.get(), now),
                           wine_addons=addons_var.get())
+        try:  # the same staging folder as in the approved text (same time stamp)
+            staging, _lines, links = window_links(
+                validate_installer(installer_var.get().strip()), selected_prefix(),
+                link_var.get(), portable_var.get(), now)
+        except ValueError as exc:
+            messagebox.showerror("Cannot run", f"{exc}. Nothing was run.")
+            return
+        if staging is not None:
+            plan = staged_plan(plan, staging)
         missing = not plan.prefix.is_dir()
         if missing and not create_var.get():
             messagebox.showerror("Prefix missing", f"{plan.prefix} does not exist. Create it first, "
@@ -1839,7 +1887,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
 
         checked = validate_installer(installer_var.get().strip())
         extra += "\n\nChecks before the run (read-only, advisory):\n" + measure(
-            checked, plan.prefix, unpacked=setup_unpacked(checked, detect(checked))).describe()
+            checked, plan.prefix, unpacked=setup_unpacked(checked, detect(checked),
+                                                          links)).describe()
         if proton:
             extra += RUNTIME_DOWNLOAD_NOTE
         extra += "\n\n" + STALL_PLAN_LINE
@@ -1870,7 +1919,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         start_busy(busy, "install")
         create, track = create_var.get(), changes_var.get() or find_var.get()
         ctx = {"prefix": selected_prefix_path(), "changes": changes_var.get(), "find": find_var.get(),
-               "portable": plan.portable}
+               "portable": plan.portable, "staging": staging}
         bar.set(0)
         progress_var.set("Waiting for the installer to start reading its files...")
         control = RunControl()
@@ -1998,8 +2047,15 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         pending["notes"] = []
         stop_btn.state(["!disabled"])  # a Stop from an earlier run must not leave it disabled
         stop_btn.pack(side="left", padx=(0, SP["md"]), before=create_btn)
-        run_in_thread(lambda: run_tracked(plan, tool, create, track,
-                                          options=options), results)
+        staging = ctx.get("staging")
+
+        def staging_line(line):  # removal of the staging folder: kept for the end text
+            if options.control is not None:
+                options.control.notes.append(line)
+            note_received(line)
+
+        run_in_thread(lambda: run_staged(staging, lambda: run_tracked(
+            plan, tool, create, track, options=options), on_line=staging_line), results)
         poll("install", ctx)
 
     def scan_hit_override(blocked) -> bool:

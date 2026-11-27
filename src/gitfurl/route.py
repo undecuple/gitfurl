@@ -89,6 +89,7 @@ class RouteChoice:
     chosen_by: str  # "gitfurl" (auto) or "you" (--route)
     reasons: tuple[str, ...]
     extract: object = None  # gitfurl.extract.ExtractPlan, only for native
+    links: object = None  # gitfurl.namelinks.LinkProposal used for the link check, if any
 
     def line(self) -> str:
         if self.route == ROUTE_UNSUPPORTED:
@@ -177,13 +178,31 @@ def archives_not_linked(installer: Path, paths: list[Path],
     return link_check(installer, paths, named)[0]
 
 
+def _with_links(named: set[str] | None, links) -> set[str] | None:
+    """The script's names plus the archives that stand for a name it expects (links, a
+    gitfurl.namelinks.LinkProposal, when --link-names is on and it has a mapping)."""
+    if named is None or links is None or not links.ok:
+        return named
+    return named | links.mapped_archives()
+
+
+def _linked_text(linked: str, links) -> str:
+    if links is None or not links.ok or linked != "the setup script names every archive":
+        return linked
+    return f"{linked}, with the names linked ({links.stands_for()})"
+
+
 def choose_route(installer: Path, prefix_name: str, det: Detection, requested: str = "auto",
                  env: dict[str, str] | None = None,
-                 setup_options: tuple[str, ...] | list[str] = ()) -> RouteChoice:
+                 setup_options: tuple[str, ...] | list[str] = (), links=None) -> RouteChoice:
     """Pick the route. Writes nothing and runs nothing.
 
     `setup_options` are the options the user gave that only a Setup run uses (for example
     --unattended); with requested="auto" they choose the Wine/Proton route.
+
+    `links` is a gitfurl.namelinks.LinkProposal (--link-names on). With a mapping, the
+    archives it maps count as named by the setup script for the link check, and the reasons
+    say which archive stands for which name.
 
     Raises ValueError when `requested` is "native" and the native route is not possible (the
     message says why), or when the prefix name is not valid.
@@ -235,19 +254,23 @@ def choose_route(installer: Path, prefix_name: str, det: Detection, requested: s
         if inno:
             reasons.append(SETUP_UNPACKS_ITSELF)
         return wine(*reasons)
-    unlinked, linked = link_check(installer, paths, script_names(installer) if inno else None,
+    unlinked, linked = link_check(installer, paths,
+                                  _with_links(script_names(installer), links) if inno else None,
                                   has_script=inno)
     if unlinked and requested == "auto":
         return wine(unlinked, "to unpack them anyway, use --route native")
+    if linked:
+        linked = _linked_text(linked, links)
     what = "a FreeArc archive" if is_arc and not inno else "an Inno Setup installer"
     n = len(plan.archives)
     reason = (f"{what}; its payload is {n} FreeArc archive{'s' if n != 1 else ''} whose every "
               f"data block uses {METHODS_TEXT}; gitfurl can unpack them itself")
     reasons = [reason, linked or "you chose this route although " + unlinked, "Setup is not run"]
-    return RouteChoice(ROUTE_NATIVE, by, tuple(reasons), plan)
+    return RouteChoice(ROUTE_NATIVE, by, tuple(reasons), plan,
+                       links if links is not None and links.ok else None)
 
 
-def setup_unpacked(installer: Path, det: Detection):
+def setup_unpacked(installer: Path, det: Detection, links=None):
     """For a Setup run's preflight: extract.unpacked_size() of the archives beside the
     installer, but only when they belong to it as the route judges that (an Inno Setup
     installer or a FreeArc one, and archives linked to it by its script or by name), so
@@ -265,7 +288,8 @@ def setup_unpacked(installer: Path, det: Detection):
         return None
     if not paths:
         return None
-    unlinked, _linked = link_check(installer, paths, script_names(installer) if inno else None,
+    unlinked, _linked = link_check(installer, paths,
+                                   _with_links(script_names(installer), links) if inno else None,
                                    has_script=inno)
     return None if unlinked else unpacked_size(installer)
 
@@ -314,6 +338,13 @@ class NativeInstallPlan:
                  "answer, and the prefix has no Mono or Gecko, which the unpack does not "
                  "need); if it does not finish, the prefix is marked incomplete and gitfurl "
                  "will not unpack into it; this is the only Wine step")
+        links = self.choice.links
+        if links is not None and links.ok:
+            lines.append(f"names: {links.stands_for()}; the native route reads these archives "
+                         "directly (no links are made)")
+            if links.unmatched:
+                lines.append("still missing, no counterpart in the folder (not needed for the "
+                             "unpack): " + ", ".join(clean(n, 60) for n in links.unmatched[:6]))
         step("unpack the archives with gitfurl's own reader (no Windows program runs):")
         lines.extend(f"  {ln}" for ln in self.extract.describe())
         step("list program candidates and redistributable installers found in the new folder "

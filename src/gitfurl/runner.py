@@ -46,6 +46,9 @@ class InstallPlan:
     # Keep Wine's Mono and Gecko install dialogs when the prefix is created (wine runtime).
     # Off by default: wineboot gets prefixes.QUIET_WINEBOOT_ENV.
     wine_addons: bool = False
+    # The original installer when Setup is started from a staging folder of links
+    # (gitfurl.namelinks); progress reads the payload beside it. None otherwise.
+    source: Path | None = None
 
     @property
     def installer(self) -> Path:
@@ -620,7 +623,7 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
 
         seen_titles: set[str] = set()
         observer = ActivityObserver()
-        monitor = ProgressMonitor(plan.installer, plan.prefix, handle,
+        monitor = ProgressMonitor(plan.source or plan.installer, plan.prefix, handle,
                                   options.progress_interval, options.proc_root)
     t0 = time.monotonic()
     # Variable names only, never values: the environment can hold secrets.
