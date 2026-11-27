@@ -21,6 +21,14 @@
 
 gitfurl is a graphical app (with an optional command line) for running a Windows installer on Linux through Wine. **You supply the installer.** Gitfurl does not find, download or include any.
 
+When the installer's payload is FreeArc archives that gitfurl can read (storing, lzma, exe, x86, delta, rep, 4x4 with lzma inside, and srep), gitfurl unpacks them itself and does not run Setup. Otherwise Setup runs under Wine, or under Proton through umu-run. The plan names the route and says why.
+
+Each run gets a timeline: one line per step, saying what it did and why. It shows in the window's Timeline card, under "Last run" in the library, and with `gitfurl cli log PREFIX`.
+
+Two options are off by default. One links your archives under the names the setup expects, when the match is clear (`--link-names`); your files are not renamed. The other adds the setup's registry entries and menu shortcuts to the prefix after a native unpack (`--apply-setup-entries`). Both are switches in the window's Options too. They are tested only with synthetic installers: whether Setup under Wine finds the linked files, and whether a real program reads the entries, is unverified.
+
+To remove a prefix, use **Delete...** in the library or `gitfurl cli prefix delete NAME` (`--dry-run` shows the plan only). It deletes only that prefix folder and the menu entries gitfurl marked for it, after an approval that lists them. This cannot be undone. It refuses while Wine or anything else still uses the prefix.
+
 <p align="center">
   <img src="docs/project-facts.svg" alt="Project Facts: what gitfurl does, its limits and how to use it" width="420">
 </p>
@@ -29,7 +37,7 @@ gitfurl is a graphical app (with an optional command line) for running a Windows
 
 ![The Library page: a list of Wine prefixes](docs/screenshot.png)
 
-*The Library page with demo prefixes (empty folders). No installer was run to make this picture. More pictures are in the [user guide](docs/user-guide.md).*
+*The Library page with demo prefixes (empty folders), under the File, View and Help menus. No installer was run to make this picture. More pictures are in the [user guide](docs/user-guide.md).*
 
 <p align="center"><img src="docs/assets/divider-rule.svg" width="660" alt=""></p>
 
@@ -39,9 +47,11 @@ The [latest release](https://github.com/undecuple/gitfurl/releases/latest) has a
 
 1. `git clone https://github.com/undecuple/gitfurl.git && cd gitfurl`
 2. `python -m gitfurl cli doctor` reports Wine, tkinter, bubblewrap and umu-run.
-3. `python -m gitfurl`, press **+ New prefix**, name it, open it.
-4. Pick your installer, read the plan, press **Run installer** and confirm.
-5. Gitfurl shows the exit status and where the log is.
+3. `python -m gitfurl`, press **+ New prefix** (or File > New prefix), name it, open it.
+4. Pick your installer, read the plan and its route, press **Run installer** and confirm.
+5. Gitfurl shows the result (Setup's exit status, or what was unpacked), the run's timeline and where the log is.
+
+The menu bar has File, View and Help. Text size, reduced motion and remembering the window size are in the View menu and in Settings > Window.
 
 Terminal instead: `python -m gitfurl cli --help` (same code, same approvals).
 
@@ -71,7 +81,12 @@ Optional: `python -m gitfurl cli desktop-entry` (or `gitfurl cli desktop-entry` 
 <p align="center"><img src="docs/assets/divider-rule.svg" width="660" alt=""></p>
 
 ## Privacy
-Nothing goes online from gitfurl itself: no network requests, no telemetry, no uploads. Two things you start yourself can use the network: umu-run downloading its runtime on first use, and anything the installer does. Prefixes live in `~/.local/share/gitfurl/prefixes/` and logs in `~/.local/state/gitfurl/logs/` (readable only by you; they can hold your user name and local paths, so remove those before sharing one). Nothing is written to `~/.wine`.
+Nothing goes online from gitfurl itself: no network requests, no telemetry, no uploads. Two things you start yourself can use the network: umu-run downloading its runtime on first use, and anything the installer does. Nothing is written to `~/.wine`. Gitfurl keeps its own files here:
+- Prefixes in `~/.local/share/gitfurl/prefixes/`.
+- Logs in `~/.local/state/gitfurl/logs/`, with each run's timeline beside its log (`.timeline.txt`), and a `.delete.log` when you delete a prefix. Before the setup's registry entries change a prefix's `system.reg` or `user.reg`, a copy of each goes into the log folder. These files are readable only by you; they can hold your user name and local paths, so remove those before sharing one.
+- View settings in `~/.config/gitfurl/view.json`.
+- With `--link-names` on the Setup route: a staging folder of links in `~/.local/state/gitfurl/staging/`, removed after the run.
+- Menu entries in `~/.local/share/applications/`, only when you ask: `gitfurl-PREFIX-NAME.desktop` files with `--apply-setup-entries`, and `gitfurl.desktop` (with a copy of the icon) from `cli desktop-entry`.
 
 <p align="center"><img src="docs/assets/divider-rule.svg" width="660" alt=""></p>
 

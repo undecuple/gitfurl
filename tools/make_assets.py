@@ -1,11 +1,17 @@
 #!/usr/bin/env python3
 """Generate the banner, social preview and icon as SVG. Run: python3 tools/make_assets.py
+With --png it also renders the PNGs and favicon.ico (needs resvg and ImageMagick on PATH).
 
-Style follows the ANSI/NFO banner of undecuple/me (block letters, dithered shadow,
-double frame); colours follow vim-tictoc.
+The banner follows the ANSI/NFO banner of undecuple/me (block letters as bricks, dithered
+shadow, double frame); the icon and social preview lay the letters in smooth 2x1 tiles on a
+studded plate. Colours follow vim-tictoc.
 """
+import math
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
@@ -32,24 +38,6 @@ DEFS = (
     f'<rect width="2" height="2" fill="{SHADOW}"/><rect x="2" y="2" width="2" height="2" fill="{SHADOW}"/>'
     f"</pattern></defs>"
 )
-
-
-def word_svg(word, font, cell, ox, oy, shadow=1, colour_each=True):
-    """Shadow layer (dither) then solid letters, one path per letter in a cycling accent."""
-    cs, _ = cells(word, font)
-    out = [(f'<path d="{block_path(cs, cell, ox + cell * shadow, oy + cell * shadow)}" '
-           f'fill="url(#d)" shape-rendering="crispEdges"/>')]
-    x, i = 0, 0
-    for ch in word:
-        g = font[ch]
-        mine = [(c, r, ch) for (c, r, _) in cells(ch, font)[0]]
-        if ch != " ":
-            colour = ACCENTS[i % len(ACCENTS)] if colour_each else FG
-            out.append(f'<path d="{block_path(mine, cell, ox + x * cell, oy)}" fill="{colour}" '
-                       f'shape-rendering="crispEdges"/>')
-            i += 1
-        x += len(g[0]) + 1
-    return "".join(out)
 
 
 def width_cells(word, font):
@@ -117,36 +105,226 @@ def banner():
             f'<title id="t">gitfurl</title>{body}</svg>\n')
 
 
+# --- Social preview and icon: smooth 2x1 tiles laid on a studded plate ---------------------
+# A tiny 3D drawing: u runs right, v towards the viewer, z up; one unit is one stud. A View
+# turns that into SVG coordinates, tilted by `tilt` degrees from straight down and, with
+# `dist`, in perspective. Faces are drawn back to front, so no z-buffer is needed.
+PLATE_SOCIAL, PLATE_ICON = _mix(FRAME, BG, 0.25), "#1A1F36"
+STUD_R, STUD_H, PLATE_H, TILE_H, TILE_GAP = 0.3, 0.18, 0.35, 0.3, 0.05
+TAGLINE = "Run Windows installers you already have, in their own Wine prefix"
+FONT = "'Exo 2', 'Adwaita Sans', 'DejaVu Sans', sans-serif"
+
+
+class View:
+    def __init__(self, tilt, dist, centre, scale, origin, clip=None):
+        self.t, self.d = math.radians(tilt), dist
+        self.clip = clip  # (width, height): studs outside it are left out
+        self.uc, self.vc = centre
+        self.k = scale
+        self.ox, self.oy = origin
+
+    def p(self, u, v, z):
+        y = (v - self.vc) * math.cos(self.t) - z * math.sin(self.t)
+        s = 1.0
+        if self.d:
+            s = self.d / (self.d - (v - self.vc) * math.sin(self.t) - z * math.cos(self.t))
+        return self.ox + (u - self.uc) * s * self.k, self.oy + y * s * self.k
+
+
+def _pts(ps):
+    return " ".join(f"{x:.1f},{y:.1f}" for x, y in ps)
+
+
+def _area(ps):
+    return sum(ps[i][0] * ps[i - 1][1] - ps[i - 1][0] * ps[i][1] for i in range(len(ps))) / 2
+
+
+def _stud(view, u, v, colour, n=16):
+    """A plate stud on cell (u, v): its side, then its top with a lit rim. The projected
+    circles are drawn as ellipses (close enough at these angles, and much smaller)."""
+    def ellipse(z):
+        ps = [view.p(u + 0.5 + STUD_R * math.cos(2 * math.pi * i / n),
+                     v + 0.5 + STUD_R * math.sin(2 * math.pi * i / n), z) for i in range(n)]
+        xs, ys = [x for x, _ in ps], [y for _, y in ps]
+        return ((max(xs) + min(xs)) / 2, (max(ys) + min(ys)) / 2,
+                (max(xs) - min(xs)) / 2, (max(ys) - min(ys)) / 2)
+    bx, by, brx, bry = ellipse(0)
+    tx, ty, trx, try_ = ellipse(STUD_H)
+    if view.clip and not (-brx < bx < view.clip[0] + brx and -bry - (by - ty) < by < view.clip[1] + bry):
+        return ""  # outside the picture
+    side = _mix(colour, "#000000", 0.32)
+    return (f'<ellipse cx="{bx:.1f}" cy="{by:.1f}" rx="{brx:.1f}" ry="{bry:.1f}" fill="{side}"/>'
+            f'<path d="M{bx - brx:.1f} {by:.1f}V{ty:.1f}h{2 * trx:.1f}V{by:.1f}z" fill="{side}"/>'
+            f'<ellipse cx="{tx:.1f}" cy="{ty:.1f}" rx="{trx:.1f}" ry="{try_:.1f}" '
+            f'fill="{_mix(colour, "#FFFFFF", 0.06)}" stroke="{_mix(colour, "#FFFFFF", 0.35)}" '
+            f'stroke-width="{view.k * 0.035:.2f}"/>')
+
+
+def _box(view, u0, v0, u1, v1, z0, z1, colour, edge=True):
+    """A box: whichever of its sides face the camera, then its top, with lit far and left
+    edges when edge is set."""
+    faces = [  # corners in the order that makes a face seen from outside wind one way
+        ([(u0, v0, z1), (u0, v1, z1), (u0, v1, z0), (u0, v0, z0)], 0.18),  # left
+        ([(u1, v1, z1), (u1, v0, z1), (u1, v0, z0), (u1, v1, z0)], 0.5),   # right
+        ([(u0, v1, z1), (u1, v1, z1), (u1, v1, z0), (u0, v1, z0)], 0.38),  # front
+        ([(u0, v0, z1), (u1, v0, z1), (u1, v1, z1), (u0, v1, z1)], 0),     # top
+    ]
+    out = []
+    for corners, dark in faces:
+        ps = [view.p(*c) for c in corners]
+        if _area(ps) < -1e-6:
+            out.append(f'<polygon points="{_pts(ps)}" fill="{_mix(colour, "#000000", dark)}"/>')
+    if edge:
+        ps = [view.p(u0, v1, z1), view.p(u0, v0, z1), view.p(u1, v0, z1)]
+        out.append(f'<polyline points="{_pts(ps)}" fill="none" '
+                   f'stroke="{_mix(colour, "#FFFFFF", 0.4)}" stroke-width="{view.k * 0.05:.2f}"/>')
+    return "".join(out)
+
+
+def tile_cells(cellset):
+    """Cover the cells with 2x1 tiles, either way round, with as few 1x1s as possible; on a
+    tie, prefer tiles that run along the stroke. Returns [(u0, v0, u1, v1)]."""
+    cellset = set(cellset)
+    order = sorted(cellset, key=lambda c: (c[1], c[0]))
+
+    def run(c, du, dv):
+        n = 0
+        for sign in (1, -1):
+            u, v = c if sign == 1 else (c[0] - du, c[1] - dv)
+            while (u, v) in cellset:
+                n, u, v = n + 1, u + sign * du, v + sign * dv
+        return n
+    best = []
+
+    def go(i, used, acc, singles, score):
+        if best and singles > best[0][0]:
+            return
+        while i < len(order) and order[i] in used:
+            i += 1
+        if i == len(order):
+            if not best or (singles, -score) < best[0]:
+                best[:] = [(singles, -score), acc]
+            return
+        u, v = order[i]
+        opts = [((u, v, u + 1 + du, v + 1 + dv), (u + du, v + dv), run((u, v), du, dv))
+                for du, dv in ((1, 0), (0, 1))
+                if (u + du, v + dv) in cellset and (u + du, v + dv) not in used]
+        for tile, other, sc in sorted(opts, key=lambda o: -o[2]):
+            go(i + 1, used | {(u, v), other}, acc + [tile], singles, score + sc)
+        go(i + 1, used | {(u, v)}, acc + [(u, v, u + 1, v + 1)], singles + 1, score)
+    go(0, frozenset(), [], 0, 0)
+    return best[1]
+
+
+def word_tiles(word, u0=0, v0=0, colours=ACCENTS):
+    """The word's block letters as 2x1 tiles, one accent per letter: [(u0, v0, u1, v1, colour)]."""
+    out, x, i = [], 0, 0
+    for ch in word:
+        cs = [(u0 + x + c, v0 + r) for c, r, _ in cells(ch, BIG)[0]]
+        if cs:
+            out += [(*t, colours[i % len(colours)]) for t in tile_cells(cs)]
+            i += 1
+        x += len(BIG[ch][0]) + 1
+    return out
+
+
+def plate_scene(view, plate, colour, tiles):
+    """A studded plate with tiles laid on it; the studs show wherever no tile covers them."""
+    u0, v0, u1, v1 = plate
+    out = [_box(view, u0, v0, u1, v1, -PLATE_H, 0, colour, edge=False)]
+    covered = {(a, b) for a0, b0, a1, b1, _ in tiles for a in range(a0, a1) for b in range(b0, b1)}
+    items = [((v, -abs(u + 0.5 - view.uc)), _stud(view, u, v, colour))
+             for u in range(u0, u1) for v in range(v0, v1) if (u, v) not in covered]
+    g = TILE_GAP
+    items += [(((b0 + b1) / 2 - 0.5, -abs((a0 + a1) / 2 - view.uc)),
+               _box(view, a0 + g, b0 + g, a1 - g, b1 - g, 0, TILE_H, c))
+              for a0, b0, a1, b1, c in tiles]
+    return out + [s for _, s in sorted(items, key=lambda i: i[0])]
+
+
+def _svg(w, h, body, width=None, height=None):
+    return (f'<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" '
+            f'viewBox="0 0 {w} {h}" width="{width or w}" height="{height or h}" role="img" '
+            f'aria-labelledby="t"><title id="t">gitfurl</title>'
+            f'<rect width="{w}" height="{h}" fill="{BG}"/>{body}</svg>\n')
+
+
 def social():
+    """1280x640: a studded plate in perspective, edge to edge, with the word in tiles and the
+    tagline on a row of dark 1x8 tiles. Everything that matters sits inside GitHub's middle
+    1200x600."""
     w, h = 1280, 640
-    cell = 22
-    n = width_cells("gitfurl", BIG)
-    ox = (w - n * cell) // 2
-    body = (f'<rect width="{w}" height="{h}" fill="{BG}"/>'
-            f'<rect x="10" y="10" width="{w - 20}" height="{h - 20}" fill="none" stroke="{FRAME}" stroke-width="4"/>'
-            f'<rect x="24" y="24" width="{w - 48}" height="{h - 48}" fill="none" stroke="{FRAME}" stroke-width="4"/>'
-            + DEFS.replace('width="4" height="4"', 'width="8" height="8"')
-                  .replace('width="2" height="2"', 'width="4" height="4"')
-                  .replace('x="2" y="2" width="2" height="2"', 'x="4" y="4" width="4" height="4"')
-            + word_svg("gitfurl", BIG, cell, ox, (h - 5 * cell) // 2, shadow=1))
-    return (f'<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" '
-            f'viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img">'
-            f"<title>gitfurl</title>{body}</svg>\n")
+    word = word_tiles("gitfurl")  # 39 x 5 studs
+    mid = width_cells("gitfurl", BIG) / 2
+    view = View(40, 34, (mid, 4.5), 27, (w / 2, h / 2 + 2), clip=(w, h))
+    strip = [(u, v, u + 8, v + 1, BG) for v in (7, 8) for u in range(-1, 39, 8)]
+    body = plate_scene(view, (-16, -30, 55, 22), PLATE_SOCIAL, word + strip)
+    x, y = view.p(mid, 8, TILE_H)
+    body.append(f'<text x="{x:.1f}" y="{y:.1f}" text-anchor="middle" dominant-baseline="central" '
+                f'font-family="{FONT}" font-weight="600" font-size="30" fill="{FG}" '
+                f'stroke="{BG}" stroke-width="5" stroke-linejoin="round" paint-order="stroke">'
+                f"{TAGLINE}</text>")
+    return _svg(w, h, "".join(body))
 
 
-def icon(size=64):
-    cell = 7
-    cs, n = cells("g", BIG)
-    ox = (size - n * cell) // 2 - 2
-    oy = (size - 5 * cell) // 2 - 2
-    body = (f'<rect width="{size}" height="{size}" fill="{BG}"/>'
-            f'<rect x="1.5" y="1.5" width="{size - 3}" height="{size - 3}" fill="none" stroke="{FRAME}" stroke-width="2"/>'
-            f'<rect x="5" y="5" width="{size - 10}" height="{size - 10}" fill="none" stroke="{FRAME}" stroke-width="1"/>'
-            f'<path d="{block_path(cs, cell, ox + 3, oy + 3)}" fill="{SHADOW}" shape-rendering="crispEdges"/>'
-            f'<path d="{block_path(cs, cell, ox, oy)}" fill="{ACCENTS[0]}" shape-rendering="crispEdges"/>')
-    return (f'<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" '
-            f'viewBox="0 0 {size} {size}" width="{size * 4}" height="{size * 4}" role="img">'
-            f"<title>gitfurl</title>{body}</svg>\n")
+def icon():
+    """The app icon, 256 units: a G of orange 2x1 tiles on a 7x7 studded plate, tilted 30°."""
+    s = 256
+    view = View(30, None, (3.5, 3.5), s / 7.2, (s / 2, s / 2 + 4))
+    g = word_tiles("g", 1, 1, colours=[ACCENTS[0]])
+    return _svg(s, s, "".join(plate_scene(view, (0, 0, 7, 7), PLATE_ICON, g)))
+
+
+def icon_small(px):
+    """The icon redrawn on the pixel grid for 48, 32 and 16 pixels: the plate's colour, then the
+    G. At 48 the tiles show (lit and shaded edges, 1 px gaps); below that it is a solid G."""
+    cell = px // 5 if px < 48 else 8
+    off = (px - 5 * cell) / 2
+    out = [f'<rect width="{px}" height="{px}" fill="{PLATE_ICON}"/>']
+    o = ACCENTS[0]
+    if px < 48:
+        cs, _ = cells("g", BIG)
+        out.append(f'<path d="{block_path(cs, cell, off, off)}" fill="{o}"/>')
+    else:
+        for a0, b0, a1, b1, _c in word_tiles("g", colours=[o]):
+            x, y, tw, th = off + a0 * cell, off + b0 * cell, (a1 - a0) * cell - 1, (b1 - b0) * cell - 1
+            out.append(f'<rect x="{x}" y="{y}" width="{tw}" height="{th}" '
+                       f'fill="{_mix(o, "#000000", 0.4)}"/>'
+                       f'<rect x="{x}" y="{y}" width="{tw - 1}" height="{th - 1}" '
+                       f'fill="{_mix(o, "#FFFFFF", 0.35)}"/>'
+                       f'<rect x="{x + 1}" y="{y + 1}" width="{tw - 2}" height="{th - 2}" fill="{o}"/>')
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {px} {px}" width="{px}" '
+            f'height="{px}" shape-rendering="crispEdges">{"".join(out)}</svg>\n')
+
+
+def render_pngs(root):
+    """--png: the PNGs and favicon.ico from the SVGs, with resvg and ImageMagick's magick from
+    PATH. 64 and up come from icon.svg; 48, 32 and 16 from icon_small()."""
+    assets = root / "assets"
+    fonts = []
+    exo = shutil.which("fc-match") and subprocess.run(
+        ["fc-match", "-f", "%{file}", "Exo 2"], capture_output=True, text=True).stdout
+    if exo and "Exo2" in exo:
+        fonts = ["--use-font-file", exo]
+
+    def resvg(src, dst, size=None):
+        subprocess.run(["resvg", *fonts, *(["-w", str(size)] if size else []), str(src),
+                        str(dst)], check=True)
+    for size in (64, 128, 256, 512):
+        resvg(assets / "icon.svg", assets / f"icon-{size}.png", size)
+    shutil.copyfile(assets / "icon-64.png", root / "src" / "gitfurl" / "icon.png")
+    resvg(assets / "social-preview.svg", assets / "social-preview.png")
+    with tempfile.TemporaryDirectory() as tmp:
+        small = []
+        for px in (16, 32, 48):
+            svg = Path(tmp) / f"icon-{px}.svg"
+            svg.write_text(icon_small(px))
+            resvg(svg, svg.with_suffix(".png"))
+            small.append(str(svg.with_suffix(".png")))
+        subprocess.run(["magick", *small, str(assets / "favicon.ico")], check=True)
+    pngs = [*assets.glob("*.png"), root / "src" / "gitfurl" / "icon.png"]
+    for png in pngs:  # strip timestamps so a rebuild gives the same bytes
+        subprocess.run(["magick", str(png), "-strip", str(png)], check=True)
 
 
 # --- README dividers: transparent strips, so they sit on GitHub's light and dark pages ------
@@ -267,5 +445,7 @@ if __name__ == "__main__":
     (docs / "divider-stripe.svg").write_text(divider_stripe())
     facts = root / "docs" / "project-facts.svg"
     facts.write_text(theme_facts(facts.read_text()))
+    if "--png" in sys.argv[1:]:
+        render_pngs(root)
     print("wrote", *sorted(p.name for p in out.glob("*.svg")),
           *sorted(p.name for p in docs.glob("*.svg")), facts.name)
