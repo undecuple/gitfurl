@@ -102,6 +102,13 @@ class ExtractPlan:
     # folder id -> (parent id, name on disk); id 0 is the destination itself
     folders: list[tuple[int, str]] = field(default_factory=lambda: [(-1, "")])
 
+    accept_bad_index_crc: bool = False
+
+    @property
+    def warnings(self) -> list[str]:
+        return [f"{clean(ap.path.name, 80)}: {warning}"
+                for ap in self.archives for warning in ap.archive.warnings]
+
     def parts(self, folder: int) -> list[str]:
         """The folder's path below the destination, as parts."""
         out: list[str] = []
@@ -188,6 +195,7 @@ class ExtractPlan:
                      "have placed files differently")
         lines.append("  each file's CRC-32 is checked; a file that does not match is removed "
                      "again and listed")
+        lines.extend(f"  warning: {warning}" for warning in self.warnings)
         lines.extend(f"  note: {n}" for n in self.notes)
         return lines
 
@@ -257,7 +265,8 @@ def unpacked_size(installer: Path) -> Unpacked | None:
 
 
 def plan_extract(installer: Path, prefix_name: str,
-                 env: dict[str, str] | None = None) -> ExtractPlan:
+                 env: dict[str, str] | None = None, *,
+                 accept_bad_index_crc: bool = False) -> ExtractPlan:
     """Read every archive's index and check every name. Writes nothing. Raises ExtractRefused."""
     validate_prefix_name(prefix_name)
     installer = Path(installer)
@@ -276,7 +285,7 @@ def plan_extract(installer: Path, prefix_name: str,
     for path in paths:
         name = clean(path.name, 80)
         try:
-            arc = farc.read_archive(path)
+            arc = farc.read_archive(path, accept_bad_index_crc=accept_bad_index_crc)
         except farc.FarcError as exc:
             raise ExtractRefused(f"{name}: {clean(str(exc), 200)}") from exc
         if arc.unsupported:
@@ -346,7 +355,7 @@ def plan_extract(installer: Path, prefix_name: str,
                      "needs more is refused and the extraction stops with an error")
     dest = prefix / "drive_c" / "Games" / prefix_name
     return ExtractPlan(installer, prefix_name, prefix, dest, archives, total, count, memory,
-                       notes, folders)
+                       notes, folders, accept_bad_index_crc)
 
 
 def _windows_problem(part: str) -> bool:
@@ -570,12 +579,13 @@ def extract(plan: ExtractPlan, cancel: threading.Event | None = None,
                                      f"({exc.strerror})") from exc
             opened.append((fd, ap))
             try:
-                again = farc.read_fd(fd, ap.path)
+                again = farc.read_fd(fd, ap.path,
+                                     accept_bad_index_crc=plan.accept_bad_index_crc)
             except farc.FarcError as exc:
                 raise ExtractRefused(f"{clean(ap.path.name, 80)}: {clean(str(exc), 200)}") \
                     from exc
-            if (again.size, again.blocks, again.entries) != \
-                    (ap.archive.size, ap.archive.blocks, ap.archive.entries):
+            if (again.size, again.blocks, again.entries, again.warnings) != \
+                    (ap.archive.size, ap.archive.blocks, ap.archive.entries, ap.archive.warnings):
                 raise ExtractRefused(f"{clean(ap.path.name, 80)} changed after the plan was "
                                      "made; make the plan again")
             if on_event is not None:

@@ -281,7 +281,8 @@ def window_setup_options(portable: bool, unattended: bool, runtime: str,
 
 
 def window_route(installer, prefix: str, *, setup_instead: bool = False,
-                 setup_options=(), env=None, link_names: bool = False):
+                 setup_options=(), env=None, link_names: bool = False,
+                 accept_bad_index_crc: bool = False):
     """(detection, RouteChoice or None, error text or None). Reads headers and archive
     indexes only. The route is chosen as the command line's automatic choice; the 'Run Setup
     instead' switch asks for the Wine/Proton route; link_names is the link switch (as
@@ -292,18 +293,21 @@ def window_route(installer, prefix: str, *, setup_instead: bool = False,
     links = propose_for(Path(installer)) if link_names else None
     try:
         choice = choose_route(installer, prefix, det, "wine" if setup_instead else "auto", env,
-                              setup_options=list(setup_options), links=links)
+                              setup_options=list(setup_options), links=links,
+                              accept_bad_index_crc=accept_bad_index_crc)
     except ValueError as exc:
         return det, None, str(exc)
     return det, choice, None
 
 
 def window_route_text(installer, prefix: str, env=None, *, setup_instead: bool = False,
-                      setup_options=(), link_names: bool = False) -> str:
+                      setup_options=(), link_names: bool = False,
+                      accept_bad_index_crc: bool = False) -> str:
     """The detection text with the route line the window will take."""
     det, choice, error = window_route(installer, prefix, setup_instead=setup_instead,
                                       setup_options=setup_options, env=env,
-                                      link_names=link_names)
+                                      link_names=link_names,
+                                      accept_bad_index_crc=accept_bad_index_crc)
     if choice is None:
         return describe_detection(det) + f"\nroute: not chosen ({error})."
     return window_words(describe_detection(det, choice))
@@ -709,6 +713,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     addons_var = tk.BooleanVar(value=False)  # Wine's Mono and Gecko dialogs: off
     setup_var = tk.BooleanVar(value=False)  # "Run Setup instead": off, so the route is automatic
     link_var = tk.BooleanVar(value=False)  # link the archives under the expected names: off
+    bad_index_crc_var = tk.BooleanVar(value=False)
     entries_var = tk.BooleanVar(value=False)  # the setup's registry entries and shortcuts: off
     route_cache: dict = {}
     progress_var = tk.StringVar(value="Shown while an installer runs: payload read, rate, rough ETA.")
@@ -1169,6 +1174,10 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         lambda p: w.Switch(p, setup_var, command=lambda: refresh_plan()))
     row(c, LINK_NAMES_TITLE, LINK_NAMES_NOTE,
         lambda p: w.Switch(p, link_var, command=lambda: refresh_plan()))
+    row(c, "Read archives with a bad index or footer CRC (native route)",
+        "Off by default. Warns before reading; each file's own CRC is still checked, "
+        "and a file that fails is not kept.",
+        lambda p: w.Switch(p, bad_index_crc_var, command=lambda: refresh_plan()))
     row(c, SETUP_ENTRIES_TITLE, SETUP_ENTRIES_NOTE,
         lambda p: w.Switch(p, entries_var, command=lambda: refresh_plan()))
     row(c, UNATTENDED_TITLE, UNATTENDED_NOTE,
@@ -1652,11 +1661,12 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         options = tuple(window_setup_options(portable_var.get(), unattended_var.get(),
                                              runtime_var.get(), changes_var.get()))
         key = (str(installer), st.st_mtime_ns, st.st_size, selected_prefix(), setup_var.get(),
-               options, link_var.get())
+               options, link_var.get(), bad_index_crc_var.get())
         if route_cache.get("key") != key:
             route_cache.clear()  # a failed choice must not leave the old value under a new key
             value = window_route(installer, selected_prefix(), setup_instead=setup_var.get(),
-                                 setup_options=options, link_names=link_var.get())
+                                 setup_options=options, link_names=link_var.get(),
+                                 accept_bad_index_crc=bad_index_crc_var.get())
             route_cache["key"], route_cache["value"] = key, value
         return route_cache["value"]
 
@@ -2410,6 +2420,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                     "scan_reason": scan_reason,
                     "setup_var": setup_var,
                     "entries_var": entries_var,
+                    "bad_index_crc_var": bad_index_crc_var,
                     "addons_var": addons_var,
                     "changes_var": changes_var,
                     "plan_checklist_rows": lambda: {k: (bool(f.winfo_manager()), m.cget("text"))

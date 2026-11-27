@@ -196,7 +196,8 @@ def _linked_text(linked: str, links) -> str:
 
 def choose_route(installer: Path, prefix_name: str, det: Detection, requested: str = "auto",
                  env: dict[str, str] | None = None,
-                 setup_options: tuple[str, ...] | list[str] = (), links=None) -> RouteChoice:
+                 setup_options: tuple[str, ...] | list[str] = (), links=None, *,
+                 accept_bad_index_crc: bool = False) -> RouteChoice:
     """Pick the route. Writes nothing and runs nothing.
 
     `setup_options` are the options the user gave that only a Setup run uses (for example
@@ -250,7 +251,8 @@ def choose_route(installer: Path, prefix_name: str, det: Detection, requested: s
                     "files itself, and the native route does not unpack Inno Setup's own "
                     "file data")
     try:
-        plan = plan_extract(installer, prefix_name, env)
+        plan = plan_extract(installer, prefix_name, env,
+                            accept_bad_index_crc=accept_bad_index_crc)
     except ExtractRefused as exc:
         reasons = [f"the archives cannot be unpacked by gitfurl: {exc}"]
         if inno:
@@ -541,6 +543,8 @@ def run_native(plan: NativeInstallPlan, cancel=None, on_line=None, detailed_log:
             log.write(f"destination: {xplan.target} ({xplan.dest})\n")
             if scan_summary:
                 log.write("".join(f"scan: {ln}\n" for ln in scan_summary.splitlines()))
+            for warning in xplan.warnings:
+                log.write(f"warning: {warning}\n")
             log.write("---\n")
             log.flush()
             event("start", route=ROUTE_NATIVE, prefix=str(plan.prefix),

@@ -247,3 +247,7 @@ Local check with the pinned versions: `ruff==0.11.13 check src tests` and `PYTHO
 - The internal structure of `gui.py` (about 1,760 lines: pages, dialogs and the run loop in one `main()` closure). Its pages are named in the [user guide](user-guide.md); the map shows only its calls into the core.
 - Decoder internals of `farc_codecs.py` and `farc_rolz.py` and the record layouts of `inno.py`: they follow the clean-room specifications, which are not in the repository.
 - Timing: which calls happen on Tk's thread and which on the worker thread beyond the sequence above.
+
+## FreeArc index CRC opt-in
+
+`cli.py` and the window's Options pass `accept_bad_index_crc` through `choose_route()` to `plan_extract()` and `farc.read_archive()`. The plan keeps the choice for `extract()`'s `read_fd()` recheck. The reader records failed CRC values in `Archive.warnings`; `ExtractPlan.describe()`, `route.run_native()` and `timeline.archive_warning_entries()` show them in the plan, approval, log and timeline. File CRC checks remain in the extraction writer. `tests/test_farc_bad_crc.py` covers this path with synthetic archives.
