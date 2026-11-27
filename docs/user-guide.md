@@ -22,19 +22,19 @@ Running a Windows installer under Wine by hand works, until it does not. These a
 - **You want a stricter box.** The repository includes a bubblewrap wrapper that runs an installer with no network and an empty home folder. It is a manual script, tested on NixOS only, and it opens no window.
 
 ## Screenshots
-These were made with gitfurl 1.3.0 under a virtual display, in a demo home folder (`/home/demo`) with empty example prefixes. No real installer and no real Wine were run: a small stand-in script took Wine's place.
+These were made on 2026-11-27 from the code after 1.4.0 (with the menu bar and the run timeline), under a virtual display, in a demo home folder (`/home/demo`) with empty example prefixes. No installer, no Wine and no other process was run: the screenshot script replaced the tool checks, the memory-limit check and the run itself with stand-ins, and the "installer" is a small file that only starts like a Windows program.
 
 ![A prefix's page with an installer chosen: the checklist, the installer field and the options, with the memory limit on](screenshot-plan.png)
 
 *Before a run: the checklist, the chosen installer and the options. Nothing runs until you approve the plan.*
 
-![A run in progress: the progress bar at 58 percent, with payload read, rate, estimate, data written and the process count](screenshot-run.png)
+![A run in progress: the progress bar at 58 percent, with payload read, rate, estimate, data written and the process count, and the Timeline card below it](screenshot-run.png)
 
-*During a run. The numbers are real readings from `/proc`, but of the stand-in, which slowly read 0.21 GB of example files (sparse files of zeros) and wrote the same amount into the prefix. That is why the process shown is `python3.14`.*
+*During a run. The bar and the progress line were set by the screenshot script to show what a run looks like; they are not readings of a real process. In the Timeline card, the first four rows (route, prefix, nothing unpacked, your approval) are gitfurl's own, from the plan; the last three (Setup started, a window opened, the progress row) were added by the script in the run's own wording.*
 
-![The Settings page: Wine, bubblewrap, umu-run and platform, and the About card](screenshot-settings.png)
+![The Settings page: Wine, bubblewrap, umu-run and platform, the Window card (text size, reduce motion, remember window size) and the About card](screenshot-settings.png)
 
-*Settings, made on the maintainer's machine: the bubblewrap version and the platform line are real, the Wine version is the stand-in's.*
+*Settings: the platform line, the Wine and bubblewrap versions and the missing umu-run were all set by the screenshot script.*
 
 ## Before you start
 You need:
