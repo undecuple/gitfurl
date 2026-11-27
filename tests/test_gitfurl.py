@@ -233,7 +233,8 @@ class PrefixCreateTests(unittest.TestCase):
         argv = run.call_args.args[0]
         self.assertEqual(argv, ["/x/wine", "wineboot", "--init"])
         self.assertEqual(run.call_args.kwargs["env"]["WINEPREFIX"], str(target))
-        self.assertEqual(run.call_args.kwargs["env"]["WINEDLLOVERRIDES"], "mscoree,mshtml=")
+        self.assertEqual(run.call_args.kwargs["env"]["WINEDLLOVERRIDES"],
+                         "mscoree,mshtml=;winemenubuilder.exe=d")
         self.assertNotIn("shell", run.call_args.kwargs)
 
     def test_create_with_wine_addons_keeps_wines_dialogs(self):
@@ -246,8 +247,10 @@ class PrefixCreateTests(unittest.TestCase):
             code, out, _ = run_cli("prefix", "create", "abc", "--yes", "--wine-addons")
         self.assertEqual(code, 0)
         self.assertIn("may show its Mono and Gecko install dialogs", out)
-        # Not set by gitfurl, and the shell's value is not passed on either.
-        self.assertNotIn("WINEDLLOVERRIDES", run.call_args.kwargs["env"])
+        # Only the menu-builder override; the shell's value is not passed on.
+        self.assertEqual(run.call_args.kwargs["env"]["WINEDLLOVERRIDES"],
+                         "winemenubuilder.exe=d")
+        self.assertIn("menu builder is off", out)
 
     def test_create_with_proton_runs_umu_run_with_the_proton_folder(self):
         done = subprocess.CompletedProcess([], 0)
@@ -266,7 +269,9 @@ class PrefixCreateTests(unittest.TestCase):
         self.assertEqual(env["WINEPREFIX"], str(target))
         self.assertEqual(env["PROTONPATH"], str(Path(proton).resolve()))
         self.assertEqual(env["GAMEID"], "umu-0")
-        self.assertNotIn("WINEDLLOVERRIDES", env)  # Proton sets up its own prefix
+        # Proton sets up its own prefix (no Mono/Gecko override), but the menu builder is off.
+        self.assertEqual(env["WINEDLLOVERRIDES"], "winemenubuilder.exe=d")
+        self.assertIn("menu builder is off", out)
         self.assertIn("Steam Linux Runtime", out)
         self.assertIn("PROTONPATH=", out)
         self.assertNotIn("mscoree", out)
@@ -448,8 +453,9 @@ class CreateIfMissingTests(unittest.TestCase):
         self.assertEqual(argvs[0], ["/x/wine", "wineboot", "--init"])
         self.assertEqual(argvs[1], ["/x/wine", str(f.resolve())])
         envs = [c.kwargs["env"] for c in run.call_args_list]
-        self.assertEqual(envs[0]["WINEDLLOVERRIDES"], "mscoree,mshtml=")  # wineboot only
-        self.assertNotIn("WINEDLLOVERRIDES", envs[1])  # the installer gets Wine's default
+        # The Mono/Gecko override for wineboot only; the menu builder is off for both.
+        self.assertEqual(envs[0]["WINEDLLOVERRIDES"], "winemenubuilder.exe=d;mscoree,mshtml=")
+        self.assertEqual(envs[1]["WINEDLLOVERRIDES"], "winemenubuilder.exe=d")
 
     def test_stop_during_prefix_creation_cancels_before_the_installer(self):
         # The window's Stop while wineboot runs (Wine route): wineboot's group is ended
@@ -919,7 +925,9 @@ class ReviewFixTests(unittest.TestCase):
                     mock.patch("shutil.which", return_value="/x/wine"), \
                     patched_runs(done) as run:
                 run_cli("install", "--no-memory-limit", str(f), "--prefix", "p1", "--yes")
-        self.assertNotIn("WINEDLLOVERRIDES", run.call_args.kwargs["env"])
+        # The shell's value is dropped; only gitfurl's menu-builder override is set.
+        self.assertEqual(run.call_args.kwargs["env"]["WINEDLLOVERRIDES"],
+                         "winemenubuilder.exe=d")
 
     def test_cleanup_refuses_general_purpose_user_folders(self):
         from gitfurl.cleanup import plan_cleanup

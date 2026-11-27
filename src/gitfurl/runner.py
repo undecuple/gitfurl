@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from gitfurl.prefixes import child_env as build_child_env
-from gitfurl.prefixes import prefix_path
+from gitfurl.prefixes import MENU_LINE, prefix_path, without_wine_menus
 from gitfurl.preflight import memory_available
 from gitfurl.procgroup import SigintGuard as _SigintGuard
 from gitfurl.procgroup import wineserver_for
@@ -98,11 +98,8 @@ def build_plan(installer: Path, prefix_name: str, env: dict[str, str] | None = N
                memory_limit: bool = False, unattended=None,
                wine_addons: bool = False) -> InstallPlan:
     prefix = prefix_path(prefix_name, env)
-    extra = runtime_env(runtime, proton_path)
-    if portable:
-        from gitfurl.portable import MENU_OVERRIDE
-
-        extra = {**extra, **MENU_OVERRIDE}
+    # Wine's menu builder is off for every run (Wine and Proton, portable or not).
+    extra = without_wine_menus(runtime_env(runtime, proton_path))
     if runtime == "proton":
         needs = [
             "umu-run available on PATH",
@@ -493,7 +490,9 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
     log_path = log_dir / f"{plan.prefix.name}-{stamp}.log"
     argv = [wine, *plan.argv[1:]]
     base_env = os.environ if env is None else env
-    overrides = dict(plan.env_overrides)
+    # The plan already has the menu-builder override; merged again (idempotent) so a plan
+    # built some other way still starts no Wine process with the menu builder on.
+    overrides = without_wine_menus(plan.env_overrides)
     if options.wine_debug:
         overrides["WINEDEBUG"] = validate_wine_debug(options.wine_debug)
     if plan.portable:  # no silent fallback: refuse before anything is created or run
@@ -799,7 +798,7 @@ def run_with_prefix(plan: InstallPlan, wine: str, create_if_missing: bool,
 
         control = opts.control
         _tl_add(opts.timeline, "prefix", "Creating the prefix with wineboot",
-                "it does not exist yet and the plan creates it first")
+                f"it does not exist yet and the plan creates it first; {MENU_LINE}")
         try:
             status = create_prefix(plan.prefix.name, wine, env, run, extra_env=extra,
                                    wrap=boot_scope.wrap if boot_scope else None,
@@ -911,7 +910,8 @@ def _tl_started(tl, stem: Path, log_path: Path, plan: InstallPlan, watched: bool
            f"{'Proton (umu-run)' if plan.runtime == 'proton' else 'Wine'}, {how}",
            "you approved the plan" + ("; it runs inside bwrap (portable)" if plan.portable
                                       else "") + ("" if watched else
-                                                  "; progress is not watched"))
+                                                  "; progress is not watched")
+           + f"; {MENU_LINE}")
 
 
 def _tl_sample(tl, sample, look, seen: set) -> None:

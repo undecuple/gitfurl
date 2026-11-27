@@ -25,10 +25,12 @@ def run_cli(*argv):
 
 class WinebootEnvTests(unittest.TestCase):
     def test_choices(self):
-        self.assertEqual(wineboot_env(), {"WINEDLLOVERRIDES": "mscoree,mshtml="})
-        self.assertEqual(wineboot_env("wine", addon_prompts=True), {})
-        self.assertEqual(wineboot_env("proton"), {})
-        self.assertIs(NATIVE_WINEBOOT_ENV, QUIET_WINEBOOT_ENV)
+        self.assertEqual(wineboot_env(),
+                         {"WINEDLLOVERRIDES": "mscoree,mshtml=;winemenubuilder.exe=d"})
+        self.assertEqual(wineboot_env("wine", addon_prompts=True),
+                         {"WINEDLLOVERRIDES": "winemenubuilder.exe=d"})
+        self.assertEqual(wineboot_env("proton"), {"WINEDLLOVERRIDES": "winemenubuilder.exe=d"})
+        self.assertEqual(NATIVE_WINEBOOT_ENV, wineboot_env())
         wineboot_env()["X"] = "1"  # a copy: the constant is never changed
         self.assertEqual(QUIET_WINEBOOT_ENV, {"WINEDLLOVERRIDES": "mscoree,mshtml="})
 
@@ -45,8 +47,10 @@ class MergeTests(unittest.TestCase):
         got = with_wineboot_env({"WINEDLLOVERRIDES": "winemenubuilder.exe=d", "A": "1"})
         self.assertEqual(got, {"WINEDLLOVERRIDES": "winemenubuilder.exe=d;mscoree,mshtml=",
                                "A": "1"})
-        self.assertEqual(with_wineboot_env({"A": "1"}), {"A": "1", **QUIET_WINEBOOT_ENV})
-        self.assertEqual(with_wineboot_env({"A": "1"}, "wine", True), {"A": "1"})
+        self.assertEqual(with_wineboot_env({"A": "1"}),
+                         {"A": "1", "WINEDLLOVERRIDES": "mscoree,mshtml=;winemenubuilder.exe=d"})
+        self.assertEqual(with_wineboot_env({"A": "1"}, "wine", True),
+                         {"A": "1", "WINEDLLOVERRIDES": "winemenubuilder.exe=d"})
 
 
 class DryRunTests(unittest.TestCase):
@@ -98,11 +102,12 @@ class InstallCreateTests(DryRunTests):
     def test_wine_addons_keeps_wines_dialogs_on_install(self):
         out, env = self.run_install("--wine-addons")
         self.assertIn("Wine may show", out)
-        self.assertNotIn("WINEDLLOVERRIDES", env)  # neither gitfurl's nor the shell's
+        # Not gitfurl's Mono/Gecko override nor the shell's value; the menu builder is off.
+        self.assertEqual(env["WINEDLLOVERRIDES"], "winemenubuilder.exe=d")
 
     def test_default_install_boots_quietly(self):
         out, env = self.run_install()
-        self.assertEqual(env["WINEDLLOVERRIDES"], "mscoree,mshtml=")
+        self.assertEqual(env["WINEDLLOVERRIDES"], "winemenubuilder.exe=d;mscoree,mshtml=")
 
 
 class WindowTests(DryRunTests):

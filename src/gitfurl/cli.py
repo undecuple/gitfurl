@@ -16,6 +16,7 @@ from gitfurl.doctor import format_report, run_doctor
 from gitfurl.memlimit import MemoryLimitError
 from gitfurl.namelinks import plan_staging, propose_for, run_staged, staged_plan
 from gitfurl.prefixes import (
+    MENU_LINE,
     create_prefix,
     list_prefixes,
     plan_create,
@@ -252,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"working dir: {plan.cwd}")
     for k, v in plan.env_overrides.items():
         print(f"env:         {k}={v}")
+    print(f"desktop:     {MENU_LINE} (wineboot and Setup)")
     print("needed for a real run:")
     for item in plan.prerequisites:
         print(f"  - {item}")
@@ -484,6 +486,7 @@ def _prefix_command(args) -> int:
     line = wineboot_line(args.runtime, args.wine_addons)
     if line:
         print(line)
+    print(f"{MENU_LINE}.")
     if args.runtime == "proton":
         print("umu-run downloads the Steam Linux Runtime on its first run unless it is already "
               "present (a network download that gitfurl does not make). Use this prefix for "
@@ -692,6 +695,7 @@ def _real_install(args, det, choice, links=None) -> int:
     boot = wineboot_line(plan.runtime, plan.wine_addons) if missing else None
     if boot:
         print(boot)
+    print(f"{MENU_LINE}.")
     if args.portable:
         for line in portable_lines:
             print(line)

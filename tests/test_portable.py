@@ -224,7 +224,8 @@ class RefusalTests(unittest.TestCase):
     def test_default_is_not_portable(self):
         plain = build_plan(self.installer, "p1")
         self.assertFalse(plain.portable)
-        self.assertNotIn("WINEDLLOVERRIDES", plain.env_overrides)
+        # The menu builder is off for every run now, portable or not.
+        self.assertEqual(plain.env_overrides["WINEDLLOVERRIDES"], "winemenubuilder.exe=d")
         args = cli.build_parser().parse_args(["install", "x.exe"])
         self.assertFalse(args.portable)
 
@@ -436,7 +437,7 @@ class GuiTests(unittest.TestCase):
                 text, err = describe_plan(str(f), "p1")
         self.assertIsNone(err)
         self.assertNotIn("PORTABLE", text)
-        self.assertNotIn("winemenubuilder", text)
+        self.assertIn("menu builder is off", text)  # every run, not only portable ones
 
     def test_describe_plan_portable_shows_limits_and_override(self):
         from gitfurl.gui import describe_plan

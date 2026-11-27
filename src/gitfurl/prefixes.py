@@ -66,25 +66,82 @@ def list_prefixes(env: dict[str, str] | None = None) -> list[str]:
 # (Internet Explorer parts); most installers need neither.
 QUIET_WINEBOOT_ENV = {"WINEDLLOVERRIDES": "mscoree,mshtml="}
 
+# For every Wine process gitfurl starts in its prefixes (wineboot and the installer, with
+# Wine or Proton): Wine's menu builder stays off, so Wine writes no .desktop entries, MIME
+# types, icons or menu folders into your XDG data folder (they would still point at the
+# prefix after it is deleted). A setup's own shortcuts come only from the opt-in
+# setup-entries step (setup_entries.py).
+MENU_BUILDER_OFF = "winemenubuilder.exe=d"
+MENU_OVERRIDE = {"WINEDLLOVERRIDES": MENU_BUILDER_OFF}
+MENU_LINE = (f"Wine's menu builder is off (WINEDLLOVERRIDES={MENU_BUILDER_OFF}), so Wine adds "
+             "no menu entries or file types to your desktop")
+
 WINE_ADDONS_OPTION = "--wine-addons"
+
+
+def _dll_key(name: str) -> str:
+    name = name.strip().lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def merge_dll_overrides(current: str | None, *entries: str) -> str:
+    """The WINEDLLOVERRIDES value `current` with each of `entries` ("dll[,dll...]=mode")
+    added once, joined with Wine's ';' separator.
+
+    What is already there is kept, in its order. A DLL that already has the entry's mode is
+    not added again; a DLL that an earlier entry gives another mode is taken out of that
+    entry, so the value holds one rule per DLL and the added one decides. Pure.
+    """
+    parts = [p.strip() for p in (current or "").split(";") if p.strip()]
+    for entry in entries:
+        dlls, _, mode = entry.partition("=")
+        names = [d.strip() for d in dlls.split(",") if d.strip()]
+        want = {_dll_key(d) for d in names}
+        have: set[str] = set()
+        kept: list[str] = []
+        for part in parts:
+            pdlls, eq, pmode = part.partition("=")
+            pnames = [d.strip() for d in pdlls.split(",") if d.strip()]
+            if not eq or not want & {_dll_key(d) for d in pnames}:
+                kept.append(part)
+            elif pmode.strip() == mode.strip():
+                have.update(_dll_key(d) for d in pnames)
+                kept.append(part)
+            else:
+                rest = [d for d in pnames if _dll_key(d) not in want]
+                if rest:
+                    kept.append(f"{','.join(rest)}={pmode}")
+        missing = [d for d in names if _dll_key(d) not in have]
+        if missing:
+            kept.append(f"{','.join(missing)}={mode}")
+        parts = kept
+    return ";".join(parts)
+
+
+def without_wine_menus(env: dict[str, str]) -> dict[str, str]:
+    """A copy of `env` (the overrides for a Wine child) with MENU_BUILDER_OFF merged into
+    its WINEDLLOVERRIDES (merge_dll_overrides); a value already there is kept."""
+    out = dict(env)
+    out["WINEDLLOVERRIDES"] = merge_dll_overrides(out.get("WINEDLLOVERRIDES"), MENU_BUILDER_OFF)
+    return out
 
 
 def wineboot_env(runtime: str = "wine", addon_prompts: bool = False) -> dict[str, str]:
     """The environment wineboot gets besides the runtime's own: QUIET_WINEBOOT_ENV for the
-    wine runtime unless the user wants Wine's Mono and Gecko prompts. Proton (umu-run) sets
-    up its own prefix and ships these parts itself, so it gets nothing."""
-    return dict(QUIET_WINEBOOT_ENV) if runtime == "wine" and not addon_prompts else {}
+    wine runtime unless the user wants Wine's Mono and Gecko prompts (Proton (umu-run) sets
+    up its own prefix and ships these parts itself), and the menu-builder override always."""
+    quiet = runtime == "wine" and not addon_prompts
+    return without_wine_menus(dict(QUIET_WINEBOOT_ENV) if quiet else {})
 
 
 def with_wineboot_env(base: dict[str, str], runtime: str = "wine",
                       addon_prompts: bool = False) -> dict[str, str]:
-    """`base` plus wineboot_env(...), with WINEDLLOVERRIDES joined (';') rather than
-    replaced, so an override already in the plan (a portable run's menu-builder override)
-    is kept for wineboot too."""
+    """`base` plus wineboot_env(...), with WINEDLLOVERRIDES merged (merge_dll_overrides)
+    rather than replaced, so an override already in the plan is kept for wineboot too."""
     out = dict(base)
     for key, value in wineboot_env(runtime, addon_prompts).items():
-        out[key] = f"{out[key]};{value}" if key == "WINEDLLOVERRIDES" and out.get(key) \
-            else value
+        out[key] = (merge_dll_overrides(out.get(key), *value.split(";"))
+                    if key == "WINEDLLOVERRIDES" else value)
     return out
 
 
@@ -105,12 +162,13 @@ def wineboot_line(runtime: str = "wine", addon_prompts: bool = False,
 
 def plan_create(name: str, wine: str, env: dict[str, str] | None = None,
                 extra_env: dict[str, str] | None = None) -> dict:
-    """Describe what creating a prefix would do. Has no side effects."""
+    """Describe what creating a prefix would do. Has no side effects. Wine's menu builder is
+    always off for wineboot (MENU_BUILDER_OFF merged into `extra_env`)."""
     path = prefix_path(name, env)
     return {
         "path": path,
         "argv": [wine, "wineboot", "--init"],
-        "env_overrides": {**(extra_env or {}), "WINEPREFIX": str(path)},
+        "env_overrides": without_wine_menus({**(extra_env or {}), "WINEPREFIX": str(path)}),
     }
 
 
