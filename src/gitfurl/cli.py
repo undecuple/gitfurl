@@ -169,6 +169,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="a Proton folder you already have (or set PROTONPATH); never "
                              "downloaded")
     pre_sub.add_parser("list", help="list dedicated prefixes")
+    delete = pre_sub.add_parser(
+        "delete", help="delete a prefix gitfurl made, with the menu entries gitfurl wrote "
+                       "for it; shows the plan first")
+    delete.add_argument("name")
+    delete.add_argument("--dry-run", action="store_true", help="show the plan; change nothing")
+    delete.add_argument("--yes", action="store_true", help="approve without prompting")
     desk = sub.add_parser(
         "desktop-entry",
         help="add (or with --remove, remove) an application-menu entry for the window, in "
@@ -399,7 +405,43 @@ def _prefix_interrupt_message(exc: BaseException) -> str:
             + ". The prefix folder was kept and may be incomplete.")
 
 
+def _prefix_delete_command(args) -> int:
+    from gitfurl.prefix_delete import DeleteRefused, perform_delete_prefix, plan_delete_prefix
+
+    if not args.dry_run and running_as_root():
+        print(f"error: {ROOT_MESSAGE}", file=sys.stderr)
+        return 1
+    try:
+        plan = plan_delete_prefix(args.name)
+    except DeleteRefused as exc:
+        print(f"error: {exc}. Nothing was deleted.", file=sys.stderr)
+        return 1
+    print("Plan (dry run, nothing changed):" if args.dry_run else "Plan:")
+    for line in plan.describe():
+        print(f"  {line}")
+    if args.dry_run:
+        return 0
+    if not args.yes:
+        refused = _confirm(f"Type 'yes' to delete the prefix {args.name}: ",
+                           "Nothing was deleted.")
+        if refused is not None:
+            return refused
+    try:
+        res = perform_delete_prefix(plan, how="yes" if args.yes else "typed")
+    except DeleteRefused as exc:
+        print(f"error: {exc}. Nothing was deleted.", file=sys.stderr)
+        return 1
+    for line in res.lines(plan):
+        print(line)
+    if res.log_path is not None:
+        print(f"log: {res.log_path}")
+    print(res.headline(plan))
+    return 0 if res.folder_gone and not res.left else 1
+
+
 def _prefix_command(args) -> int:
+    if args.prefix_command == "delete":
+        return _prefix_delete_command(args)
     if args.prefix_command == "create" and running_as_root():
         print(f"error: {ROOT_MESSAGE}", file=sys.stderr)
         return 1
