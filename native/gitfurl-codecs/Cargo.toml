@@ -2,7 +2,7 @@
 name = "gitfurl-codecs"
 version = "0.1.0"
 edition = "2021"
-description = "gitfurl's native decoders (the cm stage), as a Python extension module"
+description = "gitfurl's native decoders (the cm and rolz stages), as a Python extension module"
 license = "GPL-3.0-or-later"
 publish = false
 

@@ -30,7 +30,7 @@ flowchart TB
     runner["runner.py: run_tracked() → run_with_prefix() → execute()"]
     native["route.run_native() → extract.extract()"]
     innox["inno.extract_inno_files()"]
-    codecs["farc_codecs.py · farc_rolz.py (cm stage: native gitfurl._codecs, optional)"]
+    codecs["farc_codecs.py · farc_rolz.py (cm stage, and rolz when built: native gitfurl._codecs, optional)"]
     prefixes["prefixes.py"]
     progress["progress.py · windows.py"]
     changes["changes.py · cleanup.py · prefix_delete.py"]
@@ -220,7 +220,8 @@ flowchart LR
 | `tests/test_farc_rolz.py` | `farc_rolz` (tables, bit reader, container, tokens and special blocks, the x86 call stage, records, damage, caps) and the rolz stage in `farc_codecs` (method strings, plan, chains from a file, Stop, an extraction) | `tests/rolz_writer.py`, `tests/farc_writer.py` |
 | `tests/test_farc_x86.py` | `farc_codecs` x86 stage (blocks, framing, damage, caps, memory), its method strings, chains and an extraction; the specification's vectors when `GITFURL_X86_VECTORS` is set | `tests/farc_writer.py` |
 | `tests/test_farc_cm.py` | `farc_codecs` cm stage (method string, chain position, memory, refusal without the native module; with it: jobs, threads, limits, Stop, damage, an extraction); the real vectors when `GITFURL_CM_VECTORS` is set | `tests/cm_writer.py`, `tests/farc_writer.py` |
-| `native/gitfurl-codecs` (`cargo test`) | the cm-stage decoder in Rust: header, models, every match kind and special mode it decodes, refusals, damage, threads | `src/cm/testkit.rs` (test encoder) |
+| `tests/test_farc_rolz_native.py` | the rolz stage's native decoder against `farc_rolz` (every block, record and container `tests/test_farc_rolz.py` builds, its token streams, refused tokens and x86 call cases as records: the same bytes and pieces, or the same refusal text), the choice between them in `RolzStage`, errors from `read` and Stop; the real block when `GITFURL_ROLZ_VECTORS` is set | `tests/test_farc_rolz.py`, `tests/rolz_writer.py` |
+| `native/gitfurl-codecs` (`cargo test`) | the cm-stage decoder in Rust: header, models, every match kind and special mode it decodes, refusals, damage, threads; the rolz decoder: the rANS reader (random round trips, several packets, damage), tables, container, records, refusals, random damage without a panic | `src/cm/testkit.rs` (test encoder), `src/rolz/testkit.rs` (rANS encoder, literal records) |
 | `tests/test_inno.py` | `inno` reader, `[Code]` scan, preflight, `extract-inno`, `detect` and `cli` lines | `tests/inno_writer.py` |
 | `tests/test_unattended.py` | `unattended`, its CLI and window options | - |
 | `tests/test_portable.py` | `portable`, `runner` wrapping, window option | - |

@@ -9,7 +9,7 @@
       forAll = f: nixpkgs.lib.genAttrs systems (s: f nixpkgs.legacyPackages.${s});
       python = pkgs: pkgs.python3.withPackages (ps: [ ps.tkinter ps.pytest ]);
     in {
-      # The optional native decoder module (gitfurl._codecs, the cm stage), built with maturin
+      # The optional native decoder module (gitfurl._codecs: the cm and rolz stages), built with maturin
       # from native/gitfurl-codecs; crates come from its Cargo.lock.
       packages = forAll (pkgs: rec {
         codecs = pkgs.python3Packages.buildPythonPackage {

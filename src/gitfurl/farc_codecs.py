@@ -1,6 +1,6 @@
 """Streaming decoders for FreeArc method chains: storing, lzma, exe, x86, delta, rep, 4x4 (with
-lzma inside), srep, rolz (in farc_rolz.py) and the cm stage (in gitfurl's optional native
-module, gitfurl._codecs).
+lzma inside), srep, rolz (gitfurl's optional native module when it is built, else the
+pure-Python farc_rolz.py) and the cm stage (only in the native module, gitfurl._codecs).
 
 A chain is decoded right to left: the last method in the archive's string reads the block's
 stored bytes, and the first method's output is the block's file data. Each stage here is a
@@ -30,7 +30,8 @@ from itertools import accumulate
 
 from gitfurl import farc, farc_rolz
 
-try:  # the optional native decoder module (native/gitfurl-codecs); only the cm stage needs it
+try:  # the optional native decoder module (native/gitfurl-codecs): the cm stage needs it, the
+    # rolz stage uses it when it is there (farc_rolz.py is the fallback and the reference)
     from gitfurl import _codecs
 except ImportError:  # pragma: no cover - depends on the installation
     _codecs = None
@@ -1900,17 +1901,29 @@ class CmStage(_Stage):
             self._batch()
 
 
+def rolz_native() -> bool:
+    """True when the native module has the rolz decoder (a module built before it has not)."""
+    return _codecs is not None and hasattr(_codecs, "rolz_block")
+
+
 class RolzStage(_Stage):
     """The rolz method (see farc_rolz.py). It reads the block's stored bytes at random (each
     record's index is at its end), so it is always the chain's last method and reads the
     archive itself. `window` is the largest window accepted (the plan's); with a `limit`, more
-    output than that is refused."""
+    output than that is refused. The native decoder (gitfurl._codecs) is used when it is
+    built, else farc_rolz.py; both give the same bytes and the same refusal texts."""
 
     def __init__(self, fd: int, offset: int, size: int, window: int, chunk: int,
-                 limit: int | None = None, stop=None):
+                 limit: int | None = None, stop=None, native: bool | None = None):
         super().__init__(stop)
         self.fd, self.offset, self.size = fd, offset, size
-        self.gen = farc_rolz.decode_block(self._read, size, window, stop, chunk, limit)
+        self.native = rolz_native() if native is None else native
+        if self.native:
+            self.gen = _codecs.rolz_block(self._read, size, window, chunk, limit, stop)
+            self.errors = (farc_rolz.RolzError, _codecs.RolzError)
+        else:
+            self.gen = farc_rolz.decode_block(self._read, size, window, stop, chunk, limit)
+            self.errors = (farc_rolz.RolzError,)
 
     def _read(self, off: int, n: int) -> bytes:
         if off < 0 or n < 0 or off + n > self.size:
@@ -1929,7 +1942,7 @@ class RolzStage(_Stage):
         except StopIteration:
             self.done = True
             return b""
-        except farc_rolz.RolzError as exc:
+        except self.errors as exc:
             self.done = True
             raise CodecError(f"rolz stage: {exc}") from None
 
