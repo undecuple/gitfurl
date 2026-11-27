@@ -46,6 +46,7 @@ from gitfurl.runner import (
     runtime_env,
     validate_installer,
 )
+from gitfurl import viewprefs
 from gitfurl.theme import FG, MUTED, RADIUS, SIDE, SPACE, TYPE  # noqa: F401
 
 APP_CLASS = "gitfurl"  # the window class; desktop entries use StartupWMClass=Gitfurl
@@ -396,6 +397,59 @@ def native_end_text(outcome, cleanup_line: str | None, notes) -> tuple[str, str]
     return f"{head}\n{body}{clean}{tail}{logs}", colour
 
 
+def split_result(text: str) -> tuple[str, str]:
+    """A result or status text as (headline, details): the first line, then the rest."""
+    head, _sep, rest = text.strip().partition("\n")
+    return head.strip(), rest.strip()
+
+
+RUN_ENDED = "The last run has ended; its result is above."
+DONE_REASON = ("Done: this installer was unpacked into this prefix. To unpack it again, choose "
+               "another prefix (New prefix in the library or the File menu).")
+
+
+def done_rows(rows: list[tuple[str, bool, str]], dest) -> list[tuple[str, bool, str]]:
+    """After an unpack into this prefix, its destination exists because of that run: that is
+    the run's result, not a problem. The plan row then says so as done (Run stays off)."""
+    return [r for r in rows if r[0] != "plan"] + [("plan", True, f"Done: the files are in {dest}")]
+
+
+def key_help_text(desktop: str = "") -> str:
+    """The Help > Keys text. On niri the window has no maximize or minimize of its own (niri
+    does not act on those requests from X11 programs), so niri's own keys are listed."""
+    lines = [
+        "In gitfurl",
+        "  Tab / Shift+Tab   move between controls",
+        "  Enter or Space    press the focused button or switch",
+        "  Up / Down         move in the library",
+        "  Esc               back to the library",
+        "  Ctrl+O            choose an installer",
+        "  Ctrl+N            new prefix",
+        "  Ctrl+,            settings",
+        "  Ctrl+= / Ctrl+-   larger / smaller text; Ctrl+0 normal text",
+        "  Ctrl+Q            quit (asks first while something runs)",
+        "",
+    ]
+    if "niri" in desktop.lower():
+        lines += [
+            "The window itself (niri; these are niri's default keys, yours may differ)",
+            "  Mod+F             maximize the column",
+            "  Mod+Shift+F       full screen",
+            "  Mod+Q             close the window",
+            "  niri has no minimize: move the window to another workspace instead",
+        ]
+    else:
+        lines += ["The window itself: use your desktop's title bar or its keys."]
+    return "\n".join(lines)
+
+
+def about_text(version: str) -> str:
+    return (f"gitfurl {version}\n\nRuns a Windows installer you already have, in a dedicated "
+            "Wine or Proton prefix, after showing you the plan.\n\nLicence: GPL-3.0-or-later. "
+            "Not affiliated with Wine or any publisher.\n"
+            "Source: https://github.com/undecuple/gitfurl")
+
+
 def installer_problem(installer: str) -> str | None:
     """Why this installer text cannot be used, or None. Reads nothing but file metadata."""
     if not installer.strip():
@@ -561,15 +615,25 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     root.title("gitfurl")
     root.configure(bg=w.BG)
     root.minsize(900, 620)
-    root.geometry("1080x760")
+    view = {"prefs": viewprefs.load()}
+    root.geometry(view["prefs"].size if view["prefs"].remember_size and view["prefs"].size
+                  else "1080x760")
     try:
         icon = Path(__file__).resolve().parent / "icon.png"
         if icon.is_file():
             root.iconphoto(True, tk.PhotoImage(file=str(icon)))
     except tk.TclError:
         pass
+    from tkinter import font as tkfont
+
+    fonts: dict = {}  # one named font per (size, bold), so a text-size change reaches every widget
+
     def F(size=10, bold=False):
-        return w.pick_font(root, size, bold)
+        if (size, bold) not in fonts:
+            family, _s, weight = w.pick_font(root, size, bold)
+            fonts[(size, bold)] = tkfont.Font(root, family=family, weight=weight,
+                                              size=round(size * view["prefs"].scale))
+        return fonts[(size, bold)]
 
     SP, T = SPACE, TYPE
 
@@ -593,6 +657,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     pending = {"cleanup": None, "control": None, "proton": False}
     proton_var = tk.StringVar(value=os.environ.get("PROTONPATH", ""))
     busy = {"on": False}
+    done = {"dest": None}  # the destination of the last unpack that finished (status 0)
     run = {"kind": None, "stopping": False}  # kind: None, "prefix" or "install"
     banners: list = []
     nav_state = {"page": start}
@@ -744,6 +809,10 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         glide["job"] = root.after(GLIDE_MS, glide_step)
 
     def glide_by(cv, pixels):
+        if view["prefs"].reduced_motion:  # View > Reduce motion: move at once, no glide
+            glide_stop()
+            cv.yview_scroll(int(pixels), "units")
+            return
         if glide["cv"] is not cv:
             glide_stop()
             glide["cv"] = cv
@@ -936,15 +1005,28 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         check_rows[key] = (rr, mark, msg)
     status_slot = tk.Frame(det, bg=w.BG)
     status_slot.pack(fill="x")
-    status_label = tk.Label(status_slot, textvariable=status_var, bg=w.BG, fg=w.CYAN,
-                            font=F(T["body"]), justify="left")
+    # The result's first line is its headline (bold, in the state's colour); the details below
+    # it are plain text, so a long result no longer reads as one coloured block.
+    head_var, body_var = tk.StringVar(), tk.StringVar()
+    status_label = tk.Label(status_slot, textvariable=head_var, bg=w.BG, fg=w.CYAN,
+                            font=F(T["lead"], True), justify="left")
     autowrap(status_label, status_slot)
+    status_body = tk.Label(status_slot, textvariable=body_var, bg=w.BG, fg=FG,
+                           font=F(T["body"]), justify="left")
+    autowrap(status_body, status_slot)
 
     def show_status(*_):  # no empty gap while there is nothing to say
-        if status_var.get():
+        head, body = split_result(status_var.get())
+        head_var.set(head)
+        body_var.set(body)
+        if head:
             status_label.pack(anchor="w", pady=(SP["sm"], 0))
         else:
             status_label.pack_forget()
+        if body:
+            status_body.pack(anchor="w", pady=(SP["xs"], 0))
+        else:
+            status_body.pack_forget()
 
     status_var.trace_add("write", show_status)
 
@@ -1130,12 +1212,116 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     env_rows.pack(fill="x")
     w.PillButton(env_card.body, "Check again", lambda: refresh_env(), "plain", F(T["caption"]),
                  outer=w.PANEL, pad=(SP["md"], 6)).pack(anchor="w", pady=(SP["sm"], 0))
+
+    # ---- view settings: the View menu and the Window card share these ----
+    size_names = {"smaller": "Smaller", "normal": "Normal", "larger": "Larger"}
+    size_var = tk.StringVar(value=size_names[view["prefs"].text_size])
+    motion_var = tk.BooleanVar(value=view["prefs"].reduced_motion)
+    remember_var = tk.BooleanVar(value=view["prefs"].remember_size)
+
+    def walk_widgets(wd):
+        yield wd
+        for child in wd.winfo_children():
+            yield from walk_widgets(child)
+
+    def set_view(**changes):
+        old = view["prefs"]
+        new = view["prefs"] = replace(old, **changes)
+        if new.text_size != old.text_size:
+            for (size, _bold), font in fonts.items():
+                font.configure(size=round(size * new.scale))
+            for wd in walk_widgets(root):
+                if isinstance(wd, w.PillButton):
+                    wd.refit()
+        size_var.set(size_names[new.text_size])
+        motion_var.set(new.reduced_motion)
+        remember_var.set(new.remember_size)
+        problem = viewprefs.save(new)
+        if problem:
+            messagebox.showerror("View settings", problem)
+
+    def text_size_step(step):
+        order = list(viewprefs.TEXT_SIZES)
+        i = order.index(view["prefs"].text_size)
+        set_view(text_size=order[max(0, min(len(order) - 1, i + step))])
+
+    heading(st, "Window")
+    c = w.RoundCard(st)
+    c.pack(fill="x")
+    row(c, "Text size", "Also in the View menu (Ctrl+= and Ctrl+-). Saved for the next start.",
+        segmented_for(size_var, list(size_names.values()),
+                      after=lambda: set_view(text_size=size_var.get().lower())), first=True)
+    row(c, "Reduce motion", "The page moves at once when you turn the mouse wheel, without the "
+        "glide.", lambda p: w.Switch(p, motion_var,
+                                     command=lambda: set_view(reduced_motion=motion_var.get())))
+    row(c, "Remember window size", "gitfurl starts with the size it had when you closed it. "
+        "Where it opens is up to your desktop.",
+        lambda p: w.Switch(p, remember_var,
+                           command=lambda: set_view(remember_size=remember_var.get())))
+    label(st, f"View settings are kept in {short_path(viewprefs.prefs_path())} (only these three; "
+          "written when you change one).", T["caption"], False, w.MUTED).pack(
+        anchor="w", pady=(SP["sm"], 0))
+
     heading(st, "About")
     c = w.RoundCard(st)
     c.pack(fill="x")
     row(c, "gitfurl", f"Version {__version__}. Licence GPL-3.0-or-later. Not affiliated with Wine "
         "or any publisher.", first=True)
     row(c, "Safety", WARNING.replace("\n", " "))
+
+    def show_text(title, body):
+        win = tk.Toplevel(root)
+        win.title(title)
+        win.configure(bg=w.BG)
+        box = text_box(win, min(24, body.count("\n") + 2))
+        box.configure(font=("monospace", round(10 * view["prefs"].scale)))
+        box.pack(fill="both", expand=True, padx=12, pady=12)
+        set_text(box, body)
+
+    def choose_installer():
+        show("details")
+        browse()
+
+    menubar = tk.Menu(root, tearoff=0, bg=SIDE, fg=FG, activebackground=w.LINE,
+                      activeforeground=FG, relief="flat", bd=0)
+    menu_style = dict(tearoff=0, bg=w.PANEL, fg=FG, activebackground=w.LINE,
+                      activeforeground=FG, selectcolor=w.ORANGE, relief="flat", bd=1)
+    file_menu = tk.Menu(menubar, **menu_style)
+    file_menu.add_command(label="Choose installer...", accelerator="Ctrl+O",
+                          command=choose_installer)
+    file_menu.add_command(label="New prefix...", accelerator="Ctrl+N",
+                          command=lambda: new_prefix())
+    file_menu.add_separator()
+    file_menu.add_command(label="Settings", accelerator="Ctrl+,",
+                          command=lambda: show("settings"))
+    file_menu.add_separator()
+    file_menu.add_command(label="Quit", accelerator="Ctrl+Q", command=lambda: on_close())
+    view_menu = tk.Menu(menubar, **menu_style)
+    for name in size_names.values():
+        view_menu.add_radiobutton(label=f"{name} text", variable=size_var, value=name,
+                                  command=lambda n=name: set_view(text_size=n.lower()))
+    view_menu.add_separator()
+    view_menu.add_checkbutton(label="Reduce motion", variable=motion_var,
+                              command=lambda: set_view(reduced_motion=motion_var.get()))
+    view_menu.add_checkbutton(label="Remember window size", variable=remember_var,
+                              command=lambda: set_view(remember_size=remember_var.get()))
+    help_menu = tk.Menu(menubar, **menu_style)
+    help_menu.add_command(label="Keys", accelerator="F1", command=lambda: show_text(
+        "Keys", key_help_text(os.environ.get("XDG_CURRENT_DESKTOP", ""))))
+    help_menu.add_command(label="About gitfurl", command=lambda: show_text(
+        "About gitfurl", about_text(__version__)))
+    for title, sub in (("File", file_menu), ("View", view_menu), ("Help", help_menu)):
+        menubar.add_cascade(label=title, menu=sub)
+    root.configure(menu=menubar)
+    for seq, fn in (("<Control-o>", choose_installer), ("<Control-n>", lambda: new_prefix()),
+                    ("<Control-comma>", lambda: show("settings")),
+                    ("<Control-q>", lambda: on_close()),
+                    ("<Control-equal>", lambda: text_size_step(1)),
+                    ("<Control-plus>", lambda: text_size_step(1)),
+                    ("<Control-minus>", lambda: text_size_step(-1)),
+                    ("<Control-0>", lambda: set_view(text_size="normal")),
+                    ("<F1>", lambda: help_menu.invoke(0))):
+        root.bind_all(seq, lambda _e, f=fn: (f(), "break")[1])
 
     def selected_prefix() -> str:
         return prefix_var.get().strip()
@@ -1222,6 +1408,11 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                                   create_var.get(), "wine", bool(wine_path["value"]),
                                   native_stop_text(plan_stops[0]) if plan_stops else None,
                                   None, runtime_needed=needs_wine, as_root=running_as_root())
+            dest = native.extract.dest
+            finished_here = (not busy["on"] and done["dest"] == str(dest)
+                             and os.path.lexists(dest))
+            if finished_here:
+                rows = done_rows(rows, dest)
         else:
             text, err = describe_plan(installer_var.get(), name, runtime, proton_dir(),
                                       portable_var.get(), scan_var.get(), memory_var.get(),
@@ -1230,6 +1421,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             rows = plan_checklist(installer_problem(installer_var.get()), prefix_error, exists,
                                   create_var.get(), runtime, bool(tool), err,
                                   memory_limit_problem(memory_var.get()), as_root=running_as_root())
+        if not (native is not None and preview_error is None):
+            finished_here = False
         for key, (frame, mark, msg) in check_rows.items():
             hit = next((r for r in rows if r[0] == key), None)
             if hit is None:
@@ -1242,8 +1435,12 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                 frame.pack(fill="x", pady=2)
         reason = run_reason(rows, busy["on"])
         c_reason = create_reason(prefix_error, exists, busy["on"], running_as_root())
+        reason_label.configure(fg=w.MUTED if finished_here else w.AMBER)
         if busy["on"]:
             reason_var.set(run_state_text(run["kind"], run["stopping"]) + ".")
+        elif finished_here:
+            reason = DONE_REASON  # Run stays off; Create keeps its own state (the prefix exists)
+            reason_var.set(DONE_REASON)
         else:
             reason_var.set("\n".join(r for r in (reason, c_reason) if r))
         run_btn.state(["disabled"] if reason else ["!disabled"])
@@ -1554,6 +1751,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         pending["cleanup"] = None
         if value.result is not None and value.result.status == 0:
             bar.set(100)
+            done["dest"] = str(value.result.result.dest)
             if stopped:
                 pending.setdefault("notes", []).append(
                     "Stop came after the unpack had finished; the files are complete.")
@@ -1561,6 +1759,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         status_var.set(text)
         status_label.configure(fg={"ok": w.CYAN, "warn": w.AMBER}.get(colour, w.RED))
         refresh_list()
+        refresh_plan()  # the checklist now shows the unpack as done, not as a problem
         return True
 
     def note_received(message):
@@ -1683,6 +1882,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         except queue.Empty:
             root.after(300, poll, kind, ctx)
             return
+        progress_var.set(RUN_ENDED)  # not the last sample's percentage and ETA
         end_busy()
         stop_btn.pack_forget()
         stop_btn.state(["!disabled"])
@@ -1762,6 +1962,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                 "may be incomplete; the installer's own window may stay open.\n\nQuit anyway?",
                 default="no"):
             return
+        if view["prefs"].remember_size and root.state() == "normal":
+            set_view(size=f"{root.winfo_width()}x{root.winfo_height()}")
         root.destroy()
 
     def on_exception(exc, val, tb):
@@ -1831,6 +2033,14 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                     "run_clicked": run_clicked,
                     "stop_clicked": stop_clicked,
                     "status_var": status_var,
+                    "head_var": head_var,
+                    "body_var": body_var,
+                    "view": view,
+                    "set_view": set_view,
+                    "fonts": fonts,
+                    "menubar": menubar,
+                    "menus": {"file": file_menu, "view": view_menu, "help": help_menu},
+                    "done": done,
                     "progress_var": progress_var,
                     "pending": pending,
                 }

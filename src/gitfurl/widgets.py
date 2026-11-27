@@ -165,11 +165,10 @@ class PillButton(tk.Canvas):
 
     def __init__(self, master, text, command, style="plain", font=None, outer=BG, pad=(16, 8)):
         self._font = font or ("sans-serif", 10)
-        f = tkfont.Font(font=self._font)
         self.text, self.command, self.style, self._outer = text, command, style, outer
-        w, h = f.measure(text) + 2 * pad[0], f.metrics("linespace") + 2 * pad[1]
+        self._pad = pad
         self._top = 0 if style == "ghost" else STUD_H  # room for the studs
-        h += self._top
+        w, h = self._size()
         super().__init__(master, width=w, height=h, bg=outer, highlightthickness=0, bd=0,
                          cursor="hand2")
         self._state, self._hover = "normal", False
@@ -178,6 +177,17 @@ class PillButton(tk.Canvas):
         self.bind("<Button-1>", self._click)
         self.bind("<Configure>", lambda _e: self._draw())
         make_focusable(self, self._activate, self._draw)
+        self._draw()
+
+    def _size(self):
+        f = self._font if isinstance(self._font, tkfont.Font) else tkfont.Font(font=self._font)
+        return (f.measure(self.text) + 2 * self._pad[0],
+                f.metrics("linespace") + 2 * self._pad[1] + self._top)
+
+    def refit(self):
+        """Measure the text again (after the text size changed) and redraw."""
+        w, h = self._size()
+        self.configure(width=w, height=h)
         self._draw()
 
     def _activate(self):

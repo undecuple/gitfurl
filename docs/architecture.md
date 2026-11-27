@@ -33,4 +33,5 @@ A dry run never falls through to real execution.
 - `procgroup.py`: helpers shared by everything that starts Wine in its own process group (`SigintGuard` holds Ctrl-C back on the main thread until it is safe; `group_alive`; finding the prefix's `wineserver`).
 - `safety.py`: the root check shared by the app and the command line.
 - `widgets.py`, `pixelfont.py`: the app's rounded widgets and block letters.
+- `viewprefs.py`: the window's view settings (text size, reduce motion, remember window size) in `$XDG_CONFIG_HOME/gitfurl/view.json`, mode 0600, written only when one changes; a missing or damaged file gives the defaults, and a symbolic link is neither read nor written.
 - `theme.py`: colours, spacing, type sizes, the corner radius and the contrast calculation (no tkinter, so it is tested without a display).

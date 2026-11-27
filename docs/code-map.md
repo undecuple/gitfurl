@@ -14,7 +14,7 @@ flowchart TB
   subgraph ui["Interfaces"]
     gui["gui.py (default)"]
     cli["cli.py (gitfurl cli …)"]
-    widgets["widgets.py · theme.py · pixelfont.py"]
+    widgets["widgets.py · theme.py · pixelfont.py · viewprefs.py"]
   end
   subgraph plan["Read-only: detect and plan (nothing runs, nothing is written)"]
     detect["detect.py"]
@@ -52,13 +52,13 @@ flowchart TB
 
 ## Module dependencies
 
-Arrows point from a module to the modules it imports. Modules with no gitfurl imports: `changes`, `cleanup`, `desktop`, `farc`, `memlimit`, `pixelfont`, `preflight`, `procgroup`, `safety`, `theme`.
+Arrows point from a module to the modules it imports. Modules with no gitfurl imports: `changes`, `cleanup`, `desktop`, `farc`, `memlimit`, `pixelfont`, `preflight`, `procgroup`, `safety`, `theme`, `viewprefs`.
 
 ```mermaid
 flowchart LR
   app --> cli & gui
   cli --> cleanup & desktop & detect & doctor & extract & inno & memlimit & portable & prefixes & preflight & route & runner & safety & scan & unattended
-  gui --> cleanup & detect & doctor & memlimit & portable & prefixes & preflight & route & runner & safety & scan & theme & unattended & widgets
+  gui --> cleanup & detect & doctor & memlimit & portable & prefixes & preflight & route & runner & safety & scan & theme & unattended & viewprefs & widgets
   widgets --> pixelfont & theme
   route --> changes & detect & extract & farc & inno & memlimit & prefixes & runner & scan
   runner --> changes & memlimit & portable & prefixes & preflight & procgroup & progress & scan & unattended & windows
@@ -207,6 +207,7 @@ flowchart LR
 | `tests/test_progress.py` | `progress` (fake `/proc`), stall detector | - |
 | `tests/test_crash.py` | `progress.prefix_processes` (crash handler), `windows` (fake `xwininfo`/`xprop`: order, size and map-state filters, the newest and top window), the crash and stall notes in `runner` | `tests/test_gitfurl.py` (`RunEventHelpers`) |
 | `tests/test_gui_polish.py` | `theme`, `widgets`, window polish (window parts skipped without `xvfb-run` or tkinter) | - |
+| `tests/test_view.py` | `viewprefs`, the result headline and done row, the Help texts (no window) | - |
 | `tests/test_gui_stop.py` | Stop in the real window | `tests/gui_stop_driver.py` (`xvfb-run -a`) |
 | `tests/test_native_run.py` | `route.native_stops`, `route.perform_native` (stop checks, Stop during the scan and wineboot, cancel) | `tests/test_route.py` (`Base`, archive builders on `tests/farc_writer.py`) |
 | `tests/test_gui_native.py` | the window's native-route plain functions (route switches, stop texts, footer, root refusal, plan and approval, progress, end text, cleanup) | `tests/test_native_run.py` (`NativeBase`) |

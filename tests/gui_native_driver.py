@@ -59,6 +59,17 @@ def scenario(root, ui, name):
         pump(root, lambda: "Unpacked (Setup was not run)." in texts(), "the unpack", 30)
         assert "Local log:" in texts()
         assert not ui["busy"]["on"]
+        # after the unpack: shown as done, not as a problem; no stale percentage
+        settle(root)
+        assert ui["head_var"].get() == "Unpacked (Setup was not run).", ui["head_var"].get()
+        assert ui["body_var"].get().startswith("Extraction finished"), ui["body_var"].get()
+        assert ui["progress_var"].get() == gui.RUN_ENDED, ui["progress_var"].get()
+        rows = ui["plan_checklist_rows"]()
+        assert rows["plan"][1].startswith("Done: the files are in"), rows
+        assert ui["reason_var"].get() == gui.DONE_REASON, ui["reason_var"].get()
+        assert ui["run_btn"]._state == "disabled"
+        assert [ui["menubar"].entrycget(i, "label") for i in (0, 1, 2)] == [
+            "File", "View", "Help"], "menu bar"
     elif name == "stop":
         answers["Unpack this installer?"] = True
         ui["run_clicked"]()
