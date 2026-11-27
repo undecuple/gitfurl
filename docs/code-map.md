@@ -58,11 +58,12 @@ Arrows point from a module to the modules it imports. Modules with no gitfurl im
 ```mermaid
 flowchart LR
   app --> cli & gui
-  cli --> cleanup & desktop & detect & doctor & extract & inno & memlimit & portable & prefixes & preflight & route & runner & safety & scan & timeline & unattended
-  gui --> cleanup & detect & doctor & memlimit & portable & prefixes & preflight & route & runner & safety & scan & theme & timeline & unattended & viewprefs & widgets
+  cli --> cleanup & desktop & detect & doctor & extract & inno & memlimit & namelinks & portable & prefixes & preflight & route & runner & safety & scan & timeline & unattended
+  gui --> cleanup & detect & doctor & memlimit & namelinks & portable & prefixes & preflight & route & runner & safety & scan & theme & timeline & unattended & viewprefs & widgets
   runner --> timeline
   route --> timeline
   timeline --> detect
+  namelinks --> detect & extract & inno
   widgets --> pixelfont & theme
   route --> changes & detect & extract & farc & inno & memlimit & prefixes & runner & scan
   runner --> changes & memlimit & portable & prefixes & preflight & procgroup & progress & scan & unattended & windows
@@ -177,6 +178,7 @@ For `extract-inno` the source is the setup file itself: `inno.read_setup()` give
 | Prefixes | `prefixes.prefixes_root()` (per user) / NAME | `prefixes.create_prefix()`, `route.native_prefix_create()` |
 | Logs and event logs (mode 0600) | `runner.logs_root()` | `runner.execute()`, `route.run_native()` |
 | Timelines `<prefix>-<stamp>.timeline.txt` (mode 0600) | `runner.logs_root()`, beside the run's log | `timeline.Timeline.attach()` (from `execute()`, `run_native()`), or `Timeline.save()` when the run made no log |
+| Staging folders of links (mode 0700, removed after the run) | `namelinks.staging_root()` / PREFIX-DATE-TIME-PID | `namelinks.Staging.create()`, `remove()` (`--link-names` on the Setup route) |
 | Extracted files | `drive_c/Games/NAME` in the prefix | `extract.extract()`, `inno.extract_inno_files()` |
 | Inno Setup's own log (unattended) | inside the prefix | Setup itself; read by `unattended.read_report()` |
 | Nothing else | - | the read-only layer writes nothing |
@@ -217,6 +219,7 @@ flowchart LR
 | `tests/test_timeline.py` | `timeline` (format, folding, caps, cleaning, the file), rows from a mocked Wine run and a native unpack, `cli log` and `install --timeline` | `tests/test_gitfurl.py` (`RunEventHelpers`), `tests/test_native_run.py` (`NativeBase`) |
 | `tests/test_view.py` | `viewprefs`, the result headline and done row, the Help texts (no window) | - |
 | `tests/test_gui_stop.py` | Stop in the real window | `tests/gui_stop_driver.py` (`xvfb-run -a`) |
+| `tests/test_namelinks.py` | `namelinks` (mapping, staging folder and its removal), the route with links, `cli install --link-names`, the window's plain functions | `tests/inno_writer.py`, `tests/farc_writer.py` |
 | `tests/test_native_run.py` | `route.native_stops`, `route.perform_native` (stop checks, Stop during the scan and wineboot, cancel) | `tests/test_route.py` (`Base`, archive builders on `tests/farc_writer.py`) |
 | `tests/test_gui_native.py` | the window's native-route plain functions (route switches, stop texts, footer, root refusal, plan and approval, progress, end text, cleanup) | `tests/test_native_run.py` (`NativeBase`) |
 | `tests/test_gui_native_xvfb.py` | the native route in the real window: Run and the unpack, Stop, the "Run Setup instead" switch, declining the approval; the Timeline card (the plan's rows before the run, the route reason, Stop and the done line) and the library's Last run | `tests/gui_native_driver.py` (`xvfb-run -a`) |

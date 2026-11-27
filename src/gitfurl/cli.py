@@ -14,6 +14,7 @@ from gitfurl.detect import describe as describe_detection
 from gitfurl.detect import detect
 from gitfurl.doctor import format_report, run_doctor
 from gitfurl.memlimit import MemoryLimitError
+from gitfurl.namelinks import plan_staging, propose_for, run_staged, staged_plan
 from gitfurl.prefixes import (
     create_prefix,
     list_prefixes,
@@ -79,6 +80,13 @@ def build_parser() -> argparse.ArgumentParser:
                            "gitfurl unpacks the FreeArc archives beside an Inno Setup installer "
                            "itself and does not run Setup (refused, with the reason, when that "
                            "is not possible). wine: Setup runs under Wine/Proton")
+    inst.add_argument("--link-names", action="store_true",
+                      help="when the setup script expects archives that are missing and the "
+                           "folder holds one matching numbered series of FreeArc archives under "
+                           "another name (fg-01.bin expected, other-01.bin there), use that "
+                           "mapping: Setup runs from a staging folder of symbolic links that "
+                           "gitfurl makes and deletes afterwards (your files are not renamed), "
+                           "and the route check counts the archives as named. Default: off")
     inst.add_argument("--unattended", action="store_true",
                       help="Wine route only. Inno Setup installers only: run without the installer's wizard and "
                            "windows (Inno's /VERYSILENT switches), install to C:\\Games\\PREFIX "
@@ -190,15 +198,16 @@ def main(argv: list[str] | None = None) -> int:
     try:
         installer = validate_installer(args.installer)
         det = detect(installer)  # once; passed on
+        links = propose_for(installer) if args.link_names else None
         choice = choose_route(installer, args.prefix or DEFAULT_PREFIX, det, args.route,
-                              setup_options=_native_unused(args))
+                              setup_options=_native_unused(args), links=links)
     except ValueError as exc:
         print(f"error: {exc}. Nothing was run.", file=sys.stderr)
         return 1
     if choice.route == ROUTE_NATIVE:
-        return _native_install(args, installer, det, choice)
+        return _native_install(args, installer, det, choice, links)
     if not args.dry_run:
-        return _real_install(args, det, choice)
+        return _real_install(args, det, choice, links)
     try:
         scan_plan = _scan_plan(args, installer)
         plan = build_plan(installer, args.prefix or DEFAULT_PREFIX, runtime=args.runtime,
@@ -209,9 +218,12 @@ def main(argv: list[str] | None = None) -> int:
                           wine_addons=args.wine_addons)
         portable_lines = _portable_lines(plan, installer, shutil.which("wine") or "wine",
                                          full=True) if args.portable else []
+        staging = _staging(args, installer, links, args.prefix or DEFAULT_PREFIX)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    if staging is not None:
+        plan = staged_plan(plan, staging)
     print("DRY RUN: nothing was executed, created or changed.")
     print(f"command:     {plan.preview()}")
     print(f"prefix:      {plan.prefix}")
@@ -225,6 +237,8 @@ def main(argv: list[str] | None = None) -> int:
     for item in plan.prerequisites:
         print(f"  - {item}")
     for line in portable_lines:
+        print(line)
+    for line in _link_lines(links, staging):
         print(line)
     for line in _unattended_lines(plan):
         print(line)
@@ -240,10 +254,29 @@ def main(argv: list[str] | None = None) -> int:
         print(line)
     print("preflight (read-only, advisory):")
     for line in measure(installer, plan.prefix,
-                        unpacked=setup_unpacked(installer, det)).describe().splitlines():
+                        unpacked=setup_unpacked(installer, det, links)).describe().splitlines():
         print(f"  {line}")
     print("Running an installer can expose files the current user can access.")
     return 0
+
+
+def _staging(args, installer, links, prefix_name):
+    """The staging folder for a Setup run with --link-names and a mapping, else None.
+    Raises ValueError when it cannot be used."""
+    if links is None or not links.ok:
+        return None
+    if args.portable:
+        raise ValueError("--link-names cannot be combined with --portable: the sandbox does "
+                         "not see the staging folder. Use one of them")
+    return plan_staging(installer, links, prefix_name)
+
+
+def _link_lines(links, staging) -> list[str]:
+    if staging is not None:
+        return staging.describe()
+    if links is None:
+        return []
+    return [*links.lines(), "  Setup runs from the installer's own folder"]
 
 
 def _unattended_plan(args, prefix_name, det):
@@ -515,7 +548,7 @@ def _extract_inno_command(args) -> int:
     return 0 if result.ok else 1
 
 
-def _real_install(args, det, choice) -> int:
+def _real_install(args, det, choice, links=None) -> int:
     if running_as_root():
         print(f"error: {ROOT_MESSAGE}", file=sys.stderr)
         return 1
@@ -533,6 +566,9 @@ def _real_install(args, det, choice) -> int:
                           wine_addons=args.wine_addons)
         if args.portable and args.runtime != "wine":
             raise ValueError("portable install is only supported with the wine runtime")
+        staging = _staging(args, installer, links, args.prefix)
+        if staging is not None:
+            plan = staged_plan(plan, staging)
     except ValueError as exc:
         print(f"error: {exc}. Nothing was run.", file=sys.stderr)
         return 1
@@ -585,6 +621,8 @@ def _real_install(args, det, choice) -> int:
             print(line)
     else:
         print("Wine prefixes are not sandboxes: the installer can reach files you can reach.")
+    for line in _link_lines(links, staging):
+        print(line)
     for line in _unattended_lines(plan):
         print(line)
     for line in memory_lines:
@@ -594,7 +632,7 @@ def _real_install(args, det, choice) -> int:
         print(line)
     print("preflight (read-only, advisory):")
     for line in measure(installer, plan.prefix,
-                        unpacked=setup_unpacked(installer, det)).describe().splitlines():
+                        unpacked=setup_unpacked(installer, det, links)).describe().splitlines():
         print(f"  {line}")
     if scan_plan is not None:
         from gitfurl.scan import database_info, describe_scan_plan
@@ -626,8 +664,9 @@ def _real_install(args, det, choice) -> int:
             stall_after_s=args.stall_after,
             on_note=(lambda note: print(f"[note] {note}", flush=True)),
             allow_scan_hit=args.allow_scan_hit)
-        result = run_tracked(
-            plan, wine, args.create_prefix, args.show_changes or args.find_exe, options=options)
+        result = run_staged(staging, lambda: run_tracked(
+            plan, wine, args.create_prefix, args.show_changes or args.find_exe, options=options),
+            on_line=lambda line: print(line, flush=True))
         status, log_path, changes = result
     except MemoryLimitError as exc:
         _end_timeline(tl, args.prefix, "Not run: the memory limit could not be used", str(exc))
@@ -716,7 +755,7 @@ def _native_unused(args) -> list[str]:
     return out
 
 
-def _native_install(args, installer, det, choice) -> int:
+def _native_install(args, installer, det, choice, links=None) -> int:
     """The native route: Setup is not run; gitfurl unpacks the archives itself after one
     approval of the whole plan (scan, prefix creation, unpack, listings, cleanup)."""
     from gitfurl.route import NativeInstallPlan, native_stops
@@ -790,6 +829,12 @@ def _native_install(args, installer, det, choice) -> int:
     if args.stall_after is not None:
         print("--stall-after does not apply to the native route: Setup is not run, and the "
               "unpack prints its own progress (Ctrl-C stops it)")
+    if links is not None and not links.ok:
+        for line in links.lines():
+            print(line)
+    elif links is not None:
+        print("--link-names: no staging folder is needed on the native route; gitfurl reads "
+              "the archives under their own names")
     for line in memory_lines:
         print(line)
     for line in describe_detection(det, choice).splitlines():
