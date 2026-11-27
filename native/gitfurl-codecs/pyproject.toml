@@ -1,0 +1,16 @@
+[build-system]
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
+
+[project]
+name = "gitfurl-codecs"
+version = "0.1.0"
+description = "gitfurl's optional native decoders (the cm stage)"
+requires-python = ">=3.11"
+license = "GPL-3.0-or-later"
+
+[tool.maturin]
+features = ["python"]
+# installs gitfurl/_codecs.abi3.so (and its type stub, from python/) into the gitfurl package
+module-name = "gitfurl._codecs"
+python-source = "python"

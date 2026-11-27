@@ -17,10 +17,26 @@ The [code map](code-map.md) shows how the modules, entry points, tests and CI jo
 src/gitfurl/   the app, command line and core
 tests/         mock-based tests (no Wine, no network, no installers)
 docs/          user guide, scope, status, testing, architecture, code map, development
-tools/         sandbox wrapper and the asset generator
+native/        gitfurl-codecs: the optional native decoder module (Rust, PyO3)
+tools/         sandbox wrapper, asset generator, native module build
 assets/        banner, icon, favicon, social preview
 .github/       CI and issue forms
 ```
+
+## The native decoder module (optional)
+The cm stage of FreeArc extraction is decoded by `gitfurl._codecs`, a Rust extension in `native/gitfurl-codecs` (edition 2021, PyO3 with the stable ABI for Python 3.11 and newer, built with maturin). gitfurl itself stays pure Python and installs without Rust; without the module the cm stage is refused with "the cm stage needs gitfurl's native decoder module, which is not installed", and everything else works as before. The decoder modules forbid `unsafe`; only the Python bindings (`src/py.rs`, the `python` feature) use PyO3's.
+
+    nix develop .#native -c sh tools/build_codecs.sh   # builds the wheel, puts gitfurl/_codecs.abi3.so into src/
+    nix build .#codecs                                 # or: the module as a Nix package (nixpkgs' python3)
+
+Without Nix: a Rust toolchain (CI pins 1.99.1) and `pip install maturin==1.15.0`, then `sh tools/build_codecs.sh`. The built `.so` in `src/gitfurl/` is ignored by git. The crate's own checks, from `native/gitfurl-codecs`:
+
+    cargo fmt --check
+    cargo clippy --locked --all-targets -- -D warnings
+    cargo clippy --locked --features python --all-targets -- -D warnings
+    cargo test --locked
+
+CI runs these in its `native` job, builds the module and runs the Python suite with it. Keep local builds to a few threads (`CARGO_BUILD_JOBS=4`, `nice -n 19`). `examples/cmcheck.rs` is a manual checksum tool for the real-data check in [testing.md](testing.md): it prints CRC-32s and SHA-256s and writes no decoded data.
 
 ## Running an installer in a sandbox
 This wrapper is a manual script, **tested on NixOS only**: it binds `/nix` and `/run/current-system` and exits on other systems. It is not part of the app. It sets no `DISPLAY`, so a graphical installer opens no window unless you start Xvfb inside it. With `SANDBOX_ETC=1` it also exposes `/etc/passwd`, `/etc/group`, `/etc/hosts`, `/etc/machine-id`, `/etc/zoneinfo` and `/sys` read-only, which weakens the "empty home" idea.

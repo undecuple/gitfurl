@@ -1,5 +1,6 @@
 """Streaming decoders for FreeArc method chains: storing, lzma, exe, x86, delta, rep, 4x4 (with
-lzma inside), srep and rolz (in farc_rolz.py).
+lzma inside), srep, rolz (in farc_rolz.py) and the cm stage (in gitfurl's optional native
+module, gitfurl._codecs).
 
 A chain is decoded right to left: the last method in the archive's string reads the block's
 stored bytes, and the first method's output is the block's file data. Each stage here is a
@@ -29,6 +30,11 @@ from itertools import accumulate
 
 from gitfurl import farc, farc_rolz
 
+try:  # the optional native decoder module (native/gitfurl-codecs); only the cm stage needs it
+    from gitfurl import _codecs
+except ImportError:  # pragma: no cover - depends on the installation
+    _codecs = None
+
 EXE_ROUND = 262144  # the exe filter converts the stream in rounds of this many bytes
 EXE_SLACK = 64  # bytes decoded past the files' end for each exe stage to the left (it needs 5)
 REP_MAX_MATCHES = 1 << 21  # matches in one rep block (their tables take 12 bytes each)
@@ -47,6 +53,12 @@ SREP_PENDING_COST = 192  # bytes counted for each pending srep match besides its
 SREP_RECORD_COST = 72  # bytes counted for each match record of one srep block
 CHECK_SLICE = 1 << 20  # an srep block checksum is computed this many bytes at a time
 CHECK_BLOCKS = 256  # ... or, for VHASH, this many NH blocks, with a Stop check in between
+# One cm-stage job being decoded: its output (at most 512 MiB, held until it is passed on),
+# its models (under 10 MiB) and one chunk of its input.
+CM_JOB_MEMORY = 520 << 20
+CM_THREADS = 1  # cm-stage jobs decoded at once, each on its own thread
+CM_HEADER = 11  # bytes of the cm stage's stream header
+CM_MISSING = "the cm stage needs gitfurl's native decoder module, which is not installed"
 
 _LITTLE = sys.byteorder == "little"
 _OPCODES = re.compile(b"[\xe8\xe9]")
@@ -138,6 +150,8 @@ def stage_plan(method: farc.Method, out_size: int) -> list[StagePlan]:
         elif st.name == "srep":
             budget = srep_budget(limit)
             out.append(StagePlan(st, budget, budget + srep_block_memory(st.size), limit))
+        elif st.name == "cm":  # budget: jobs decoded at once
+            out.append(StagePlan(st, CM_THREADS, CM_THREADS * CM_JOB_MEMORY, limit))
         elif st.name == "rolz":
             # the window comes from the data; one over `budget` is refused before it is used
             w = rolz_window(limit)
@@ -1791,6 +1805,101 @@ class X86Stage(_Stage):
         return data
 
 
+def cm_available() -> bool:
+    """True when the native module the cm stage needs can be imported."""
+    return _codecs is not None
+
+
+class CmStage(_Stage):
+    """The cm stage, decoded by gitfurl's native module (gitfurl._codecs). It reads the
+    block's stored bytes itself, so it is always the chain's last method: an 11-byte header,
+    then independent jobs, each two streams found by their lengths. Up to `threads` jobs are
+    decoded at once, on as many threads; each gives at most 512 MiB, held until it is passed
+    on. The decoder reads a job's data a chunk at a time through _read, and calls stop()
+    between chunks and every few segments. Every job but the last must give the header's job
+    size, and with a `limit` more output than that is refused."""
+
+    def __init__(self, fd: int, offset: int, size: int, threads: int, chunk: int,
+                 limit: int | None = None, stop=None):
+        super().__init__(stop)
+        if _codecs is None:
+            raise StartError(CM_MISSING)
+        self.fd, self.offset, self.size = fd, offset, size
+        self.threads, self.chunk, self.left = max(1, threads), chunk, limit
+        self.head = self._read(0, CM_HEADER)
+        try:
+            self.job_size, _ = _codecs.cm_header(self.head)
+        except _codecs.CmError as exc:
+            raise CodecError(f"cm stage: {exc}") from None
+        self.at, self.ended, self.outs = CM_HEADER, False, []
+
+    def _read(self, off: int, n: int) -> bytes:
+        if off < 0 or n < 0 or off + n > self.size:
+            raise CodecError("cm stage: damaged data (a read past the end of the block)")
+        try:
+            data = os.pread(self.fd, n, self.offset + off)
+        except OSError as exc:
+            raise CodecError(f"the archive could not be read ({exc.strerror or exc})") from exc
+        if len(data) != n:
+            raise CodecError("the archive could not be read completely (did it change?)")
+        return data
+
+    def _u32(self, off: int) -> int:
+        return int.from_bytes(self._read(off, 4), "little")
+
+    def _at_end(self) -> bool:
+        """True (and the stream checked to end there) when the next job length is 0."""
+        if self._u32(self.at):
+            return False
+        if self.at + 4 != self.size:
+            raise CodecError("cm stage: damaged data (data after the end of the stream)")
+        self.ended = True
+        return True
+
+    def _batch(self) -> None:
+        jobs = []
+        while len(jobs) < self.threads and not self._at_end():
+            a_len = self._u32(self.at)
+            a_off = self.at + 4
+            b_len = self._u32(a_off + a_len) if a_len <= self.size - a_off - 4 else -1
+            b_off = a_off + a_len + 4
+            if b_len < 0 or b_len > self.size - b_off:
+                raise CodecError("cm stage: damaged data (a job longer than the block)")
+            jobs.append((a_off, a_len, b_off, b_len))
+            self.at = b_off + b_len
+        if not jobs:
+            return
+        if not self.ended:
+            self._at_end()  # whether the last of these is the stream's last job
+        try:
+            outs = _codecs.cm_decode_jobs(self.head, jobs, self._read, self.threads, self.stop)
+        except _codecs.CmError as exc:
+            raise CodecError(f"cm stage: {exc}") from None
+        except MemoryError:
+            raise CodecError("cm stage: not enough memory for a job") from None
+        for i, out in enumerate(outs):
+            last = self.ended and i == len(outs) - 1
+            if not len(out) or (len(out) < self.job_size and not last):
+                raise CodecError("cm stage: damaged data (a job shorter than the others)")
+            if self.left is not None:
+                if len(out) > self.left:
+                    raise CodecError("cm stage: more output than the block's files hold")
+                self.left -= len(out)
+        self.outs = outs
+
+    def _next(self) -> bytes:
+        while True:
+            while self.outs:
+                piece = self.outs[0].take(self.chunk)
+                if piece:
+                    return piece
+                self.outs.pop(0)
+            if self.ended:
+                self.done = True
+                return b""
+            self._batch()
+
+
 class RolzStage(_Stage):
     """The rolz method (see farc_rolz.py). It reads the block's stored bytes at random (each
     record's index is at its end), so it is always the chain's last method and reads the
@@ -1847,6 +1956,10 @@ def open_chain(method: farc.Method, fd: int, offset: int, compsize: int, out_siz
             reader = X86Stage(reader, p.stage.size, p.budget, chunk, p.limit, stop)
         elif name == "srep":
             reader = SrepStage(reader, p.stage.size, p.budget, chunk, p.limit, stop)
+        elif name == "cm":
+            if not isinstance(reader, Source):
+                raise StartError("the cm stage can only read the stored data (the last method)")
+            reader = CmStage(fd, offset, compsize, p.budget, chunk, p.limit, stop)
         elif name == "rolz":
             if not isinstance(reader, Source):
                 raise StartError("rolz can only read the stored data (the last method)")

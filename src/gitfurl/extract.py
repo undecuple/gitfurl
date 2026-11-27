@@ -1,7 +1,8 @@
 """Native extraction of FreeArc archives, without running the installer.
 
-Methods decoded: storing, lzma, exe, x86, delta, rep, 4x4 (with lzma inside), srep and rolz,
-alone or chained (farc_codecs.py, farc_rolz.py).
+Methods decoded: storing, lzma, exe, x86, delta, rep, 4x4 (with lzma inside), srep, rolz and
+the cm stage (with gitfurl's optional native module), alone or chained (farc_codecs.py,
+farc_rolz.py).
 
 Off unless asked for, per run, after an approval that shows the plan. gitfurl reads each
 FreeArc archive beside the installer itself (gitfurl.farc) and writes the files into a new
@@ -177,7 +178,8 @@ class ExtractPlan:
 
     def describe(self) -> list[str]:
         lines = [
-            ("NATIVE EXTRACTION (FreeArc: storing, lzma, exe, x86, delta, rep, 4x4, srep and rolz): "
+            ("NATIVE EXTRACTION (FreeArc: storing, lzma, exe, x86, delta, rep, 4x4, srep, "
+             "cm and rolz): "
             "gitfurl reads the archives itself."),
             f"  {EXTRACTS_ONLY}",
             (f"  destination: {self.target} (in the prefix: {self.dest}); it must not exist "
@@ -281,7 +283,7 @@ def plan_extract(installer: Path, prefix_name: str,
     # the work and memory are linear in the names' length, however deep the paths are.
     names: dict[tuple[int, str], int] = {}
     merged: str | None = None
-    total = count = memory = srep = 0
+    total = count = memory = srep = cm = 0
     for path in paths:
         name = clean(path.name, 80)
         try:
@@ -292,8 +294,11 @@ def plan_extract(installer: Path, prefix_name: str,
             raise ExtractRefused(f"{name} uses {farc.KIND_OTHER} "
                                  f"({len(arc.unsupported)} of {len(arc.blocks)} data blocks); "
                                  "only storing, lzma, exe, x86, delta, rep, 4x4 (with "
-                                 "lzma inside), srep and rolz, alone or chained, can be "
+                                 "lzma inside), srep, cm and rolz, alone or chained, can be "
                                  "extracted")
+        if not farc_codecs.cm_available() and any(
+                st.name == "cm" for blk in arc.blocks for st in blk.method.stages):
+            raise ExtractRefused(f"{name}: {farc_codecs.CM_MISSING}")
         ap = ArchivePlan(path, arc, [], [])
         for entry in arc.entries:
             parts = farc.relative_parts(entry.path)
@@ -346,6 +351,8 @@ def plan_extract(installer: Path, prefix_name: str,
             srep = max([srep] + [p.budget for p in farc_codecs.stage_plan(blk.method,
                                                                           blk.origsize)
                                  if p.stage.name == "srep"])
+            cm = max([cm] + [p.budget for p in farc_codecs.stage_plan(blk.method, blk.origsize)
+                             if p.stage.name == "cm"])
         archives.append(ap)
     if merged:
         notes.append(merged)
@@ -353,6 +360,10 @@ def plan_extract(installer: Path, prefix_name: str,
         notes.append(f"srep keeps up to {farc._size(srep)} of earlier output, pending matches "
                      "or its input between its blocks (counted in the memory line); data that "
                      "needs more is refused and the extraction stops with an error")
+    if cm:
+        notes.append(f"the cm stage decodes {cm} job{'s' if cm > 1 else ''} at a time, each "
+                     f"up to {farc._size(farc_codecs.CM_JOB_MEMORY)} (counted in the memory "
+                     "line), with gitfurl's native decoder module")
     dest = prefix / "drive_c" / "Games" / prefix_name
     return ExtractPlan(installer, prefix_name, prefix, dest, archives, total, count, memory,
                        notes, folders, accept_bad_index_crc)

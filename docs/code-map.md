@@ -30,7 +30,7 @@ flowchart TB
     runner["runner.py: run_tracked() → run_with_prefix() → execute()"]
     native["route.run_native() → extract.extract()"]
     innox["inno.extract_inno_files()"]
-    codecs["farc_codecs.py · farc_rolz.py"]
+    codecs["farc_codecs.py · farc_rolz.py (cm stage: native gitfurl._codecs, optional)"]
     prefixes["prefixes.py"]
     progress["progress.py · windows.py"]
     changes["changes.py · cleanup.py · prefix_delete.py"]
@@ -171,7 +171,7 @@ flowchart LR
   EP --> RC
   RC --> NP["route.NativeInstallPlan"]
   NP -->|approval| X["extract.extract()"]
-  X -->|"farc_codecs.open_chain(): storing · lzma · exe · x86 · delta · rep · 4x4 · srep · rolz"| F["files under drive_c/Games/PREFIX<br/>O_EXCL | O_NOFOLLOW, dir fds"]
+  X -->|"farc_codecs.open_chain(): storing · lzma · exe · x86 · delta · rep · 4x4 · srep · cm · rolz"| F["files under drive_c/Games/PREFIX<br/>O_EXCL | O_NOFOLLOW, dir fds"]
   X --> L["log (0600), event log, ExtractResult"]
 ```
 
@@ -198,10 +198,11 @@ For `extract-inno` the source is the setup file itself: `inno.read_setup()` give
 flowchart LR
   subgraph ci["ci.yml (push and PR; Python 3.11 and 3.12)"]
     c1["tracked-file check: no installers, archives, keys, files over 1 MiB"]
-    c2["shellcheck: tools/sandbox.sh, docker/entrypoint.sh, .githooks/pre-commit"]
+    c2["shellcheck: tools/sandbox.sh, tools/build_codecs.sh, docker/entrypoint.sh, .githooks/pre-commit"]
     c3["ruff==0.11.13 check ."]
     c4["PYTHONPATH=src pytest==8.3.5 -q (xvfb for the window tests)"]
     c5["secrets job: whole history"]
+    c6["native job: cargo fmt, clippy, test; maturin build; pytest with gitfurl._codecs"]
   end
   codeql["codeql.yml: push, PR, schedule"]
   rel["release.yml: v* tag → lint, test, PyInstaller, smoke test, SHA256SUMS, draft release"]
@@ -218,6 +219,8 @@ flowchart LR
 | `tests/test_codecs.py` | `farc_codecs` (lzma, exe, delta, rep, 4x4, srep, VHASH, SipHash, AES), chains through `extract` | `tests/farc_writer.py` |
 | `tests/test_farc_rolz.py` | `farc_rolz` (tables, bit reader, container, tokens and special blocks, the x86 call stage, records, damage, caps) and the rolz stage in `farc_codecs` (method strings, plan, chains from a file, Stop, an extraction) | `tests/rolz_writer.py`, `tests/farc_writer.py` |
 | `tests/test_farc_x86.py` | `farc_codecs` x86 stage (blocks, framing, damage, caps, memory), its method strings, chains and an extraction; the specification's vectors when `GITFURL_X86_VECTORS` is set | `tests/farc_writer.py` |
+| `tests/test_farc_cm.py` | `farc_codecs` cm stage (method string, chain position, memory, refusal without the native module; with it: jobs, threads, limits, Stop, damage, an extraction); the real vectors when `GITFURL_CM_VECTORS` is set | `tests/cm_writer.py`, `tests/farc_writer.py` |
+| `native/gitfurl-codecs` (`cargo test`) | the cm-stage decoder in Rust: header, models, every match kind and special mode it decodes, refusals, damage, threads | `src/cm/testkit.rs` (test encoder) |
 | `tests/test_inno.py` | `inno` reader, `[Code]` scan, preflight, `extract-inno`, `detect` and `cli` lines | `tests/inno_writer.py` |
 | `tests/test_unattended.py` | `unattended`, its CLI and window options | - |
 | `tests/test_portable.py` | `portable`, `runner` wrapping, window option | - |
