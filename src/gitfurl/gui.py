@@ -972,6 +972,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             for widget in [c, c.body, r, mid, *mid.winfo_children(), *r.winfo_children()]:
                 widget.bind("<Button-1>", lambda _e, n=n: open_prefix(n), add="+")
                 widget.configure(cursor="hand2")
+            last_run_button(r, n)
         refresh_plan()
 
     # ---- Details page ----
@@ -1174,6 +1175,226 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                               font=F(T["caption"]), justify="left", anchor="w")
     progress_label.pack(fill="x", pady=(SP["sm"], 0))
     autowrap(progress_label, c.body)
+
+    # ---- Timeline: what each step of the run did and why (gitfurl.timeline) ----
+    # Self-contained: the run code calls timeline_begin, timeline_tick, timeline_note_stop
+    # and timeline_finish; the library calls last_run_button.
+    from gitfurl import timeline as tlmod
+
+    tl_state: dict = {"tl": None, "lines": [], "version": -1, "open": True, "prefix": None,
+                      "last_run": {}, "buttons": {}}
+
+    def timeline_text(parent, height):
+        """A read-only text in the normal (not monospace) font, with its own scroll bar."""
+        frame = tk.Frame(parent, bg=w.PANEL)
+        box = tk.Text(frame, height=height, bg=w.BG, fg=FG, relief="flat", bd=0, wrap="word",
+                      highlightthickness=1, highlightbackground=w.LINE, state="disabled",
+                      font=F(T["body"]), padx=10, pady=SP["sm"], spacing1=2, cursor="arrow")
+        bar = tk.Scrollbar(frame, orient="vertical", command=box.yview, bg=w.PANEL,
+                           troughcolor=w.BG, activebackground=w.LINE, highlightthickness=0,
+                           bd=0, width=12)
+        box.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        box.pack(side="left", fill="both", expand=True)
+        box.tag_configure("muted", foreground=w.MUTED)
+        box.tag_configure("end", foreground=w.CYAN, font=F(T["body"], True))
+        return frame, box
+
+    def timeline_render(box, lines, old):
+        """Show `lines`, rewriting only from the first row that changed; keeps following the
+        newest row unless the user scrolled up."""
+        keep = 0
+        while keep < min(len(lines), len(old)) and lines[keep] == old[keep]:
+            keep += 1
+        following = box.yview()[1] >= 0.999
+        box.configure(state="normal")
+        box.delete(f"{keep}.end" if keep else "1.0", "end")
+        for i, line in enumerate(lines[keep:], keep):
+            if i:
+                box.insert("end", "\n")
+            stamp, _sp, rest = line.partition("  ")
+            what, sep, why = rest.partition(tlmod.SEP)
+            end = i == len(lines) - 1 and tl_state["tl"] is not None and tl_state["tl"].ended \
+                and box is tl_box
+            box.insert("end", stamp + "  ", "muted")
+            box.insert("end", what, "end" if end else ())
+            if sep:
+                box.insert("end", sep + why, "muted")
+        box.configure(state="disabled")
+        if following:
+            box.see("end")  # at once; nothing in this panel moves on its own otherwise
+
+    def timeline_show(on):
+        tl_state["open"] = on
+        tl_toggle.text = "Hide" if on else "Show"
+        tl_toggle.refit()
+        if on:
+            tl_card.pack(fill="x")
+        else:
+            tl_card.pack_forget()
+            tl_slot.configure(height=1)
+
+    def copy_text(text):
+        root.clipboard_clear()
+        root.clipboard_append(text)
+
+    def open_log(path):
+        """The run's own log, read-only: its last 512 KiB, never through a link."""
+        if path is None:
+            show_report("Full log", "This run has no log of its own: it ended before Setup or "
+                        "the unpack started. Its timeline says why.")
+            return
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            with os.fdopen(fd, "rb") as fh:
+                size = os.fstat(fh.fileno()).st_size
+                fh.seek(max(0, size - (512 << 10)))
+                data = fh.read(512 << 10)
+            body = "\n".join(describe_clean(ln, 2000) for ln in
+                             data.decode("utf-8", errors="replace").splitlines())
+            if size > len(data):
+                body = f"(the first {size - len(data)} bytes are not shown)\n" + body
+        except OSError as exc:
+            body = f"The log could not be read ({exc.strerror or exc}): {path}"
+        show_report(f"Log: {Path(path).name}", body)
+
+    from gitfurl.detect import clean as describe_clean
+
+    # The buttons sit in the heading row, a plain frame: a card far down the page is drawn
+    # (and its buttons mapped) only once it has been on screen, and Tab must reach them.
+    # They are made in screen order (Copy, Open full log, Hide) so Tab follows the screen.
+    tl_top = tk.Frame(det, bg=w.BG)
+    tl_top.pack(fill="x", pady=(SP["lg"], SP["sm"] - 2))
+    label(tl_top, "TIMELINE", T["caption"], True, w.MUTED).pack(side="left", padx=SP["xs"])
+    tl_copy = w.PillButton(tl_top, "Copy", lambda: copy_text("\n".join(tl_state["lines"])),
+                           "plain", F(T["caption"]), pad=(SP["md"], 4))
+    tl_log = w.PillButton(tl_top, "Open full log",
+                          lambda: open_log(tl_state["tl"].log_path if tl_state["tl"] else None),
+                          "plain", F(T["caption"]), pad=(SP["md"], 4))
+    tl_toggle = w.PillButton(tl_top, "Hide", lambda: timeline_show(not tl_state["open"]),
+                             "ghost", F(T["caption"]), pad=(SP["sm"], 2))
+    tl_toggle.pack(side="right", padx=(SP["sm"], 0))
+    tl_log.pack(side="right", padx=(SP["sm"], 0))
+    tl_copy.pack(side="right")
+    tl_slot = tk.Frame(det, bg=w.BG, height=1)
+    tl_slot.pack(fill="x")
+    tl_card = w.RoundCard(tl_slot)
+    tl_card.pack(fill="x")
+    tl_frame, tl_box = timeline_text(tl_card.body, 10)
+    tl_frame.pack(fill="x")
+    label(tl_card.body, "What each step of the run did and why. Saved next to the run's log.",
+          T["caption"], False, w.MUTED, w.PANEL, justify="left", anchor="w").pack(
+        fill="x", pady=(SP["sm"], 0))
+    timeline_render(tl_box, ["No run in this window yet. When a run starts, each step shows "
+                             "here with the reason for it."], [])
+
+    def timeline_tick():
+        tl = tl_state["tl"]
+        if tl is None or tl.version == tl_state["version"]:
+            return
+        tl_state["version"] = tl.version
+        lines = tl.lines()
+        timeline_render(tl_box, lines, tl_state["lines"])
+        tl_state["lines"] = lines
+
+    def timeline_begin(prefix_path, exists, create, target=None):
+        """After the approval: a new timeline with the plan's rows (route, reasons, prefix,
+        what is skipped) and the approval."""
+        det_, choice, _err = current_route()
+        tl = tlmod.Timeline()
+        tlmod.plan_entries(tl, det_, choice, prefix_path, exists, create, target)
+        tlmod.approval_entry(tl, "window")
+        tl_state.update(tl=tl, version=-1, prefix=selected_prefix(), preview=False,
+                        run_key=timeline_key())
+        tl_state["lines"] = []
+        timeline_render(tl_box, [], ["-"])
+        timeline_show(True)
+        timeline_tick()
+        return tl
+
+    def timeline_key():
+        return (route_cache.get("key"), selected_prefix(), create_var.get())
+
+    def timeline_preview():
+        """Before a run: the rows the plan starts the timeline with (route, reasons, prefix,
+        what is skipped). Nothing is saved; the last run's timeline stays while its installer
+        and prefix stay chosen."""
+        tl = tl_state["tl"]
+        if busy["on"] or (tl is not None and not tl_state.get("preview") and not tl.ended):
+            return
+        try:
+            det_, choice, _err = current_route()
+            key = timeline_key()
+            if det_ is None or key == tl_state.get("preview_key" if tl_state.get("preview")
+                                                   else "run_key"):
+                return
+            path = prefixes_root() / validate_prefix_name(selected_prefix())
+        except Exception:  # noqa: BLE001 - the checklist shows the problem; nothing runs
+            return
+        preview = tlmod.Timeline()
+        target = choice.extract.target if choice is not None and choice.extract else None
+        tlmod.plan_entries(preview, det_, choice, path, path.is_dir(), create_var.get(), target)
+        preview.add("note", "Nothing has run yet",
+                    "these rows start the run's timeline once you approve the plan")
+        tl_state.update(tl=preview, preview=True, preview_key=key, version=-1)
+        timeline_tick()
+
+    def timeline_note_stop():
+        tl = tl_state["tl"]
+        if tl is not None:
+            tl.add("note", "You pressed Stop", "you confirmed the Stop dialog; only what "
+                   "gitfurl started is stopped")
+        timeline_tick()
+
+    def timeline_finish():
+        """The outcome row, from the result headline, once the run has ended."""
+        tl = tl_state["tl"]
+        if busy["on"] or tl is None or tl.ended or tl_state.get("preview"):
+            return  # still running (a second approval after a scan match started it again)
+        if str(root.tk.call("grab", "current")):  # a dialog is open (the scan's second
+            root.after(200, timeline_finish)  # question): its answer decides the end
+            return
+        tl.save(logs_root(), tl_state["prefix"])
+        tl.end(*tlmod.end_words(head_var.get(), body_var.get()))
+        timeline_tick()
+
+    def open_last_run(name, path):
+        """A prefix's last saved timeline, read-only, in its own window."""
+        try:
+            text = tlmod.read_text(path)
+        except OSError as exc:
+            text = f"The timeline could not be read ({exc.strerror or exc})."
+        win = tk.Toplevel(root)
+        win.title(f"Last run: {name}")
+        win.configure(bg=w.BG)
+        win.geometry("860x520")
+        top_row = tk.Frame(win, bg=w.BG)
+        top_row.pack(fill="x", padx=SP["lg"], pady=(SP["lg"], 0))
+        label(top_row, f"Last run of {name}", T["lead"], True).pack(side="left")
+        log = tlmod.log_for(path)
+        copy = w.PillButton(top_row, "Copy", lambda: copy_text(text), "plain", F(T["caption"]),
+                            pad=(SP["md"], 4))
+        w.PillButton(top_row, "Open full log", lambda: open_log(log), "plain", F(T["caption"]),
+                     pad=(SP["md"], 4)).pack(side="right", padx=(SP["sm"], 0))
+        copy.pack(side="right")
+        label(win, short_path(path), T["caption"], False, w.MUTED).pack(
+            anchor="w", padx=SP["lg"], pady=(SP["xs"], 0))
+        frame, box = timeline_text(win, 20)
+        frame.pack(fill="both", expand=True, padx=SP["lg"], pady=SP["lg"])
+        timeline_render(box, text.splitlines(), [])
+        box.see("end")
+        tl_state["last_run"][name] = (win, box)
+        return win
+
+    def last_run_button(parent, name):
+        """'Last run' on a library card, when the prefix has a saved timeline."""
+        path = tlmod.latest(logs_root(), name)
+        if path is None:
+            return
+        b = w.PillButton(parent, "Last run", lambda: open_last_run(name, path), "plain",
+                         F(T["caption"]), outer=w.PANEL, pad=(SP["md"], 4))
+        b.pack(side="right", padx=(SP["sm"], 0))
+        tl_state["buttons"][name] = b
     warn_label = tk.Label(det, text=WARNING, bg=w.BG, fg=w.YELLOW, font=F(T["caption"]),
                           justify="left")
     warn_label.pack(anchor="w", pady=(SP["lg"], 0))
@@ -1445,6 +1666,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             reason_var.set("\n".join(r for r in (reason, c_reason) if r))
         run_btn.state(["disabled"] if reason else ["!disabled"])
         create_btn.state(["disabled"] if c_reason else ["!disabled"])
+        timeline_preview()
 
     def start_busy(message, kind):
         busy["on"] = True
@@ -1659,6 +1881,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                              on_note=note_received, stall_after_s=WINDOW_STALL_S)
         if scan_plan is not None:
             status_var.set("Scanning the installer with ClamAV first...")
+        options = replace(options, timeline=timeline_begin(plan.prefix, not missing, create))
         launch(plan, tool, create, track, options, ctx)
 
     def run_native_clicked(choice):
@@ -1698,6 +1921,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         progress_var.set("Waiting for the first files to be written...")
         if scan_plan is not None:
             status_var.set("Scanning the installer with ClamAV first...")
+        timeline_begin(xplan.prefix, xplan.prefix.is_dir(), plan.create_prefix, xplan.target)
         launch_native(plan, scan_plan, None, False, memory_var.get(), detail_var.get())
 
     def launch_native(plan, scan_plan, scan_result, allow_hit, memory_on, detail):
@@ -1714,7 +1938,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             plan, control, memory_limit=memory_on, scan_plan=scan_plan,
             scan_result=scan_result, allow_scan_hit=allow_hit,
             on_progress=lambda d, t, e: ui_updates.put(NativeSample(d, t, e)),
-            on_note=note_received, detailed_log=detail), results)
+            on_note=note_received, detailed_log=detail, timeline=tl_state["tl"]), results)
         poll("native")
 
     def native_hit_override(blocked) -> bool:
@@ -1827,6 +2051,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             status_var.set("Stopping...")
             refresh_plan()
             refresh_footer()
+            timeline_note_stop()
             threading.Thread(target=control.request_stop, daemon=True).start()
             return
         server = ("\n\nThis was a portable run: the sandbox ends with the run's process group, "
@@ -1851,6 +2076,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         status_var.set("Stopping the installer...")
         refresh_plan()
         refresh_footer()
+        timeline_note_stop()
         threading.Thread(target=control.request_stop, daemon=True).start()
 
     def show_report(title, body):
@@ -1862,6 +2088,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         set_text(box, body)
 
     def poll(kind, ctx=None):
+        timeline_tick()
         try:
             while True:  # keep only the newest progress sample
                 smp = ui_updates.get_nowait()
@@ -1883,6 +2110,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             root.after(300, poll, kind, ctx)
             return
         progress_var.set(RUN_ENDED)  # not the last sample's percentage and ETA
+        root.after_idle(timeline_finish)  # after the result below has set the headline
         end_busy()
         stop_btn.pack_forget()
         stop_btn.state(["!disabled"])
@@ -2043,6 +2271,11 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                     "done": done,
                     "progress_var": progress_var,
                     "pending": pending,
+                    "timeline": tl_state,
+                    "timeline_box": tl_box,
+                    "timeline_show": timeline_show,
+                    "open_last_run": open_last_run,
+                    "refresh_list": refresh_list,
                 }
                 driver(root, ui)
             except BaseException:  # noqa: BLE001 - reported on stderr, the exit status says it

@@ -374,6 +374,9 @@ class RunOptions:
     scan_summary: str | None = None  # set by run_with_prefix; written to the log
     cgroup_root: str = "/sys/fs/cgroup"  # injected in tests (memory limit)
     memory_interval: float = 5.0  # seconds between memory limit adjustments
+    # A gitfurl.timeline.Timeline: plain rows of what the run did and why, saved next to the
+    # log as <prefix>-<stamp>.timeline.txt. None: no timeline (library default).
+    timeline: object = None
 
 
 _WINEDEBUG_OK = None
@@ -576,9 +579,11 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
             def titles_now():
                 return look if tracker is not None else windows_now(sample)
 
+            _tl_sample(options.timeline, sample, look, seen_titles)
             if crash["seen_s"] is None and new_crash(sample):
                 crash["seen_s"] = sample.elapsed_s
                 titles = titles_now()
+                _tl_crash(options.timeline, titles)
                 event("crash_handler", elapsed_s=round(sample.elapsed_s),
                       programs=list(sample.helpers), windows=titles, advisory=True)
                 if options.on_note is not None:
@@ -599,6 +604,7 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
                       windows=titles, newest_window=newest[0] if newest else None,
                       newest_window_s=round(newest[1]) if newest else None,
                       top_window=top, advisory=True)
+                _tl_stall(options.timeline, idle, titles, newest, top)
                 if options.on_note is not None:
                     from gitfurl.windows import newest_text, titles_text, top_text
 
@@ -612,6 +618,7 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
             if options.on_progress is not None:
                 options.on_progress(sample)
 
+        seen_titles: set[str] = set()
         observer = ActivityObserver()
         monitor = ProgressMonitor(plan.installer, plan.prefix, handle,
                                   options.progress_interval, options.proc_root)
@@ -642,6 +649,8 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
             log.write("---\n")
             log.flush()
             output_start = log.tell()  # the run's own output starts here
+            _tl_started(options.timeline, log_dir / f"{plan.prefix.name}-{stamp}", log_path,
+                        plan, monitor is not None)
             if monitor:
                 crash["before"] = frozenset(
                     prefix_processes(plan.prefix, options.proc_root).crash_pids)
@@ -704,6 +713,8 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
                     log.write(f"--- {line}\n")
         if final is not None:
             event("progress_final", line=final.line())
+        _tl_exit(options.timeline, proc.returncode, control, started, crash["seen_s"],
+                 unattended_report, memory_report)
         if unattended_report is not None:
             event("unattended_result", log_found=unattended_report.log_found,
                   succeeded=unattended_report.succeeded, files=unattended_report.files,
@@ -784,6 +795,8 @@ def run_with_prefix(plan: InstallPlan, wine: str, create_if_missing: bool,
         from gitfurl.prefixes import PrefixStopped
 
         control = opts.control
+        _tl_add(opts.timeline, "prefix", "Creating the prefix with wineboot",
+                "it does not exist yet and the plan creates it first")
         try:
             status = create_prefix(plan.prefix.name, wine, env, run, extra_env=extra,
                                    wrap=boot_scope.wrap if boot_scope else None,
@@ -794,8 +807,15 @@ def run_with_prefix(plan: InstallPlan, wine: str, create_if_missing: bool,
             # is reported as cancelled; execute() then refuses to start the installer.
             control.notes.append(str(exc))
             status = 0
+            _tl_add(opts.timeline, "prefix", "Prefix creation stopped",
+                    "you pressed Stop while wineboot ran; the folder is kept, marked incomplete")
         finally:
             boot_report = boot_scope.finish() if boot_scope else None
+        if status == 0 and not (control is not None and control.cancelled):
+            _tl_add(opts.timeline, "prefix", "Prefix created", "wineboot exited with status 0")
+        elif status != 0:
+            _tl_add(opts.timeline, "prefix", f"Creating the prefix failed (wine exited {status})",
+                    "so Setup was not started")
         if status != 0:
             hit = " " + boot_report.lines()[0] if boot_report and boot_report.hit_limit else ""
             raise RuntimeError(f"creating the prefix failed (wine exited {status}); "
@@ -832,7 +852,9 @@ def _scan_gate(plan: InstallPlan, options: RunOptions) -> RunOptions:
                           should_stop=(lambda: control.cancelled) if control else None)
     proceed, message = decide(result, options.allow_scan_hit)
     if not proceed:
+        _tl_add(options.timeline, "note", "The ClamAV scan stopped the run", message)
         raise ScanBlocked(message, result)
+    _tl_add(options.timeline, "note", "ClamAV scan passed", message)
     if options.on_note is not None:
         options.on_note(message)
     return replace(options, scan_summary=message)
@@ -858,4 +880,103 @@ def run_tracked(plan: InstallPlan, wine: str, create_if_missing: bool, track: bo
     res = run_with_prefix(plan, wine, create_if_missing, env, run, on_ready=before,
                           options=options)
     after = take_snapshot(plan.prefix, skip=skip[:1])
-    return TrackedResult(**{**vars(res), "changes": compare(box["b"], after, plan.prefix)})
+    report = compare(box["b"], after, plan.prefix)
+    if options is not None and options.timeline is not None:
+        from gitfurl.timeline import changes_entry
+
+        changes_entry(options.timeline, report)
+    return TrackedResult(**{**vars(res), "changes": report})
+
+
+# ---- timeline rows (gitfurl.timeline); each does nothing without a timeline ---------------
+
+def _tl_add(tl, kind, what, why=""):
+    if tl is not None:
+        tl.add(kind, what, why)
+
+
+def _tl_started(tl, stem: Path, log_path: Path, plan: InstallPlan, watched: bool) -> None:
+    if tl is None:
+        return
+    from gitfurl.timeline import SUFFIX, shown
+
+    tl.log_path = log_path
+    tl.attach(Path(f"{stem}{SUFFIX}"))
+    how = ("without its wizard (unattended switches)" if plan.unattended is not None
+           else "with its own windows")
+    tl.add("start", f"Started Setup ({shown(plan.installer.name)}) under "
+           f"{'Proton (umu-run)' if plan.runtime == 'proton' else 'Wine'}, {how}",
+           "you approved the plan" + ("; it runs inside bwrap (portable)" if plan.portable
+                                      else "") + ("" if watched else
+                                                  "; progress is not watched"))
+
+
+def _tl_sample(tl, sample, look, seen: set) -> None:
+    """A progress row that updates, and a row for each window title seen for the first time
+    (only from the window looks the run already makes)."""
+    if tl is None:
+        return
+    from gitfurl.timeline import progress_text, shown, size_text
+
+    if sample.total_bytes:
+        what = progress_text("Setup reading the installer's data", sample.read_bytes,
+                             sample.total_bytes)
+    else:
+        what = "Setup running"
+    tl.progress(what, f"{size_text(sample.written_bytes)} written to the prefix so far, "
+                f"{sample.procs} process(es) running")
+    for title in look or ():
+        t = shown(title)
+        if t and t not in seen and len(seen) < 200:
+            seen.add(t)
+            tl.add("window", f'Window opened: "{t}"',
+                   "a program of the run opened it; it may be waiting for an answer")
+
+
+def _tl_crash(tl, titles) -> None:
+    if tl is None:
+        return
+    from gitfurl.timeline import shown
+
+    tl.add("crash", "Wine's crash handler (winedbg) started in the prefix",
+           "a Windows program there crashed; the run goes on until Setup exits or you stop it"
+           + (f'; open: "{shown(titles[0])}"' if titles else ""))
+
+
+def _tl_stall(tl, idle, titles, newest, top) -> None:
+    if tl is None:
+        return
+    from gitfurl.timeline import duration_text, shown
+
+    name = newest[0] if newest else top if top else titles[0] if titles else None
+    tl.add("stall", f"Quiet for {duration_text(idle)}: possibly stalled",
+           f"no data read, CPU under {QUIET_CPU_PCT:g} % and no log growth; advice only, "
+           "nothing was stopped"
+           + (f'; the window most likely waiting is "{shown(name)}"' if name else ""))
+
+
+def _tl_exit(tl, status, control, started, crash_s, unattended, memory) -> None:
+    if tl is None:
+        return
+    if not started:
+        tl.add("note", "Setup was not started", "Stop came before it started")
+    elif control.cancelled:
+        tl.add("note", f"Stopped by you; Setup's process exit status {status}",
+               "its own process group was ended"
+               + ("; this prefix's Wine server was asked to exit"
+                  if any("wineserver -k)" in n for n in control.notes) else ""))
+    else:
+        tl.add("note", f"Setup exited with status {status}",
+               "0 usually means it finished" if status == 0 else
+               "a non-zero status does not say why; the log may")
+    if crash_s is not None:
+        tl.add("crash", "A Windows program crashed during the run",
+               f"Wine's crash handler was seen {round(crash_s)} s into the run")
+    if unattended is not None:
+        lines = unattended.lines()
+        if lines:
+            tl.add("note", lines[0], "read from Inno Setup's own log")
+    if memory is not None:
+        lines = memory.lines()
+        if lines:
+            tl.add("note", lines[0], "the memory limit's own report")

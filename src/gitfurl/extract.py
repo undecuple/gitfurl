@@ -548,9 +548,13 @@ class ExtractStopped(ExtractRefused):
 
 
 def extract(plan: ExtractPlan, cancel: threading.Event | None = None,
-            on_progress=None) -> ExtractResult:
+            on_progress=None, on_event=None) -> ExtractResult:
     """Write the planned files. Raises ExtractRefused before anything is written; once the
-    destination exists, every problem is reported in the result instead."""
+    destination exists, every problem is reported in the result instead.
+
+    `on_event(kind, archive_plan, *details)` (optional, on this thread) is told when each
+    archive's index has been read again ("archive"), and when each data block starts
+    ("block", block number, DataBlock, number of its files); the timeline uses it."""
     problem = plan.problem()
     if problem:
         raise ExtractRefused(problem)
@@ -573,16 +577,18 @@ def extract(plan: ExtractPlan, cancel: threading.Event | None = None,
                     (ap.archive.size, ap.archive.blocks, ap.archive.entries):
                 raise ExtractRefused(f"{clean(ap.path.name, 80)} changed after the plan was "
                                      "made; make the plan again")
+            if on_event is not None:
+                on_event("archive", ap)
         if cancel is not None and cancel.is_set():
             raise ExtractStopped("stopped before the unpack started")
         root = _make_dest(plan)
-        return _write_all(plan, opened, root, cancel, on_progress)
+        return _write_all(plan, opened, root, cancel, on_progress, on_event)
     finally:
         for fd, _ in opened:
             os.close(fd)
 
 
-def _write_all(plan, opened, root, cancel, on_progress) -> ExtractResult:
+def _write_all(plan, opened, root, cancel, on_progress, on_event=None) -> ExtractResult:
     res = ExtractResult(plan.dest)
     tree = _Tree(root, plan.folders)
 
@@ -603,6 +609,8 @@ def _write_all(plan, opened, root, cancel, on_progress) -> ExtractResult:
                 files = by_block.get(k)
                 if not files:
                     continue
+                if on_event is not None:
+                    on_event("block", ap, k, blk, len(files))
                 stream = _chunks(fd, blk, stop)
                 buf, at = b"", 0
                 for folder, name, entry in files:

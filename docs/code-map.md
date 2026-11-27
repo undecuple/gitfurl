@@ -15,6 +15,7 @@ flowchart TB
     gui["gui.py (default)"]
     cli["cli.py (gitfurl cli …)"]
     widgets["widgets.py · theme.py · pixelfont.py · viewprefs.py"]
+    timeline["timeline.py (the run's timeline)"]
   end
   subgraph plan["Read-only: detect and plan (nothing runs, nothing is written)"]
     detect["detect.py"]
@@ -52,13 +53,16 @@ flowchart TB
 
 ## Module dependencies
 
-Arrows point from a module to the modules it imports. Modules with no gitfurl imports: `changes`, `cleanup`, `desktop`, `farc`, `memlimit`, `pixelfont`, `preflight`, `procgroup`, `safety`, `theme`, `viewprefs`.
+Arrows point from a module to the modules it imports. Modules with no gitfurl imports: `changes`, `cleanup`, `desktop`, `farc`, `memlimit`, `pixelfont`, `preflight`, `procgroup`, `safety`, `theme`, `viewprefs`. `timeline` imports only `detect` (for `clean`).
 
 ```mermaid
 flowchart LR
   app --> cli & gui
-  cli --> cleanup & desktop & detect & doctor & extract & inno & memlimit & portable & prefixes & preflight & route & runner & safety & scan & unattended
-  gui --> cleanup & detect & doctor & memlimit & portable & prefixes & preflight & route & runner & safety & scan & theme & unattended & viewprefs & widgets
+  cli --> cleanup & desktop & detect & doctor & extract & inno & memlimit & portable & prefixes & preflight & route & runner & safety & scan & timeline & unattended
+  gui --> cleanup & detect & doctor & memlimit & portable & prefixes & preflight & route & runner & safety & scan & theme & timeline & unattended & viewprefs & widgets
+  runner --> timeline
+  route --> timeline
+  timeline --> detect
   widgets --> pixelfont & theme
   route --> changes & detect & extract & farc & inno & memlimit & prefixes & runner & scan
   runner --> changes & memlimit & portable & prefixes & preflight & procgroup & progress & scan & unattended & windows
@@ -93,6 +97,7 @@ Notes:
 | `gitfurl cli extract-inno` | `cli._extract_inno_command()` → `inno.plan_inno_extract()`, `inno.extract_inno_files()` | files Inno Setup stores for `{app}` |
 | `gitfurl cli prefix create` / `list` | `cli._prefix_command()` → `runner.runtime_env()`, `prefixes.create_prefix()`, `list_prefixes()` | Wine or Proton (`umu-run`) |
 | `gitfurl cli desktop-entry` | `cli._desktop_command()` → `desktop.plan_desktop()`, `check()`, `apply()` | optional menu entry and icon in the user's data folder |
+| `gitfurl cli log` | `cli._log_command()` → `timeline.latest()`, `kept()`, `read_text()` | read-only: a prefix's latest timeline, or the list |
 | Sandbox wrapper (manual) | `tools/sandbox.sh` | bubblewrap, network off, NixOS only; not part of the app |
 | Asset generator | `tools/make_assets.py` | `assets/*.svg`, dividers, the facts label colours |
 | Release build | `.github/workflows/release.yml` | PyInstaller single file on a `v*` tag, draft release |
@@ -171,6 +176,7 @@ For `extract-inno` the source is the setup file itself: `inno.read_setup()` give
 |---|---|---|
 | Prefixes | `prefixes.prefixes_root()` (per user) / NAME | `prefixes.create_prefix()`, `route.native_prefix_create()` |
 | Logs and event logs (mode 0600) | `runner.logs_root()` | `runner.execute()`, `route.run_native()` |
+| Timelines `<prefix>-<stamp>.timeline.txt` (mode 0600) | `runner.logs_root()`, beside the run's log | `timeline.Timeline.attach()` (from `execute()`, `run_native()`), or `Timeline.save()` when the run made no log |
 | Extracted files | `drive_c/Games/NAME` in the prefix | `extract.extract()`, `inno.extract_inno_files()` |
 | Inno Setup's own log (unattended) | inside the prefix | Setup itself; read by `unattended.read_report()` |
 | Nothing else | - | the read-only layer writes nothing |
@@ -208,11 +214,12 @@ flowchart LR
 | `tests/test_progress.py` | `progress` (fake `/proc`), stall detector | - |
 | `tests/test_crash.py` | `progress.prefix_processes` (crash handler), `windows` (fake `xwininfo`/`xprop`: order, size and map-state filters, the newest and top window), the crash and stall notes in `runner` | `tests/test_gitfurl.py` (`RunEventHelpers`) |
 | `tests/test_gui_polish.py` | `theme`, `widgets`, window polish (window parts skipped without `xvfb-run` or tkinter) | - |
+| `tests/test_timeline.py` | `timeline` (format, folding, caps, cleaning, the file), rows from a mocked Wine run and a native unpack, `cli log` and `install --timeline` | `tests/test_gitfurl.py` (`RunEventHelpers`), `tests/test_native_run.py` (`NativeBase`) |
 | `tests/test_view.py` | `viewprefs`, the result headline and done row, the Help texts (no window) | - |
 | `tests/test_gui_stop.py` | Stop in the real window | `tests/gui_stop_driver.py` (`xvfb-run -a`) |
 | `tests/test_native_run.py` | `route.native_stops`, `route.perform_native` (stop checks, Stop during the scan and wineboot, cancel) | `tests/test_route.py` (`Base`, archive builders on `tests/farc_writer.py`) |
 | `tests/test_gui_native.py` | the window's native-route plain functions (route switches, stop texts, footer, root refusal, plan and approval, progress, end text, cleanup) | `tests/test_native_run.py` (`NativeBase`) |
-| `tests/test_gui_native_xvfb.py` | the native route in the real window: Run and the unpack, Stop, the "Run Setup instead" switch, declining the approval | `tests/gui_native_driver.py` (`xvfb-run -a`) |
+| `tests/test_gui_native_xvfb.py` | the native route in the real window: Run and the unpack, Stop, the "Run Setup instead" switch, declining the approval; the Timeline card (the plan's rows before the run, the route reason, Stop and the done line) and the library's Last run | `tests/gui_native_driver.py` (`xvfb-run -a`) |
 | `tests/test_wineboot.py` | `prefixes.wineboot_env`, `with_wineboot_env`, `wineboot_line`; `--wine-addons` on `install` and `prefix create`; the window's plan line | - |
 | `tests/test_gui_stall.py` | which crash and stall notes the window keeps on screen; the 120 s stall advice | - |
 | `tests/test_desktop.py` | `desktop`, `cli desktop-entry` | - |
