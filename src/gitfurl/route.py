@@ -40,7 +40,7 @@ from datetime import datetime
 from pathlib import Path
 
 from gitfurl import farc
-from gitfurl.prefixes import QUIET_WINEBOOT_ENV
+from gitfurl.prefixes import MENU_LINE, wineboot_env
 from gitfurl.detect import (
     CONF_LIKELY,
     ROUTE_NATIVE,
@@ -74,9 +74,10 @@ REDIST_PREFIXES = ("vcredist", "vc_redist", "dxsetup", "dxwebsetup", "dotnet", "
 MAX_LISTED = 20
 
 # Only for a prefix gitfurl creates on the native route: Wine's Mono and Gecko install dialogs
-# are turned off for wineboot, so creating the prefix needs no answer. The unpack runs no
+# are turned off for wineboot, so creating the prefix needs no answer (and Wine's menu
+# builder is off, as for every Wine process gitfurl starts). The unpack runs no
 # Windows program, so it needs neither.
-NATIVE_WINEBOOT_ENV = QUIET_WINEBOOT_ENV
+NATIVE_WINEBOOT_ENV = wineboot_env()  # also keeps Wine's menu builder off (MENU_LINE)
 # Free space kept for a prefix that is still to be created (new prefixes took about 300 to
 # 570 MB in our runs).
 PREFIX_ALLOWANCE = 768 * 1024 * 1024
@@ -343,13 +344,13 @@ class NativeInstallPlan:
             lines.extend(f"  {ln}" for ln in self.scan_lines)
         if self.create_prefix:
             argv = [self.wine or "wine", "wineboot", "--init"]
-            env = " ".join(f"{k}={v}" for k, v in NATIVE_WINEBOOT_ENV.items())
+            env = " ".join(f"{k}={shlex.quote(v)}" for k, v in NATIVE_WINEBOOT_ENV.items())
             step(f"create the prefix {self.prefix} with Wine: {env} {shlex.join(argv)} (with "
                  "WINEPREFIX and WINEDLLOVERRIDES set for that command only; the override "
                  "turns off Wine's Mono and Gecko install dialogs, so this step needs no "
                  "answer, and the prefix has no Mono or Gecko, which the unpack does not "
-                 "need); if it does not finish, the prefix is marked incomplete and gitfurl "
-                 "will not unpack into it; this is the only Wine step")
+                 f"need; {MENU_LINE}); if it does not finish, the prefix is marked incomplete "
+                 "and gitfurl will not unpack into it; this is the only Wine step")
         links = self.choice.links
         if links is not None and links.ok:
             lines.append(f"names: {links.stands_for()}; the native route reads these archives "
@@ -894,7 +895,7 @@ def perform_native(plan: NativeInstallPlan, control: NativeControl, *, memory_li
         if timeline is not None:
             timeline.add("prefix", "Creating the prefix with wineboot",
                          "it does not exist yet; Wine's Mono and Gecko dialogs are off for "
-                         "this command, so it needs no answer")
+                         f"this command, so it needs no answer; {MENU_LINE}")
         try:
             status = create(plan, memory_limit, env, should_stop=lambda: control.cancelled)
         except MemoryLimitError as exc:

@@ -12,10 +12,11 @@ import os
 import shutil
 from pathlib import Path
 
+from gitfurl import prefixes
 from gitfurl.safety import running_as_root
 
 TITLE = "Portable install (reduces changes outside this prefix)"
-MENU_OVERRIDE = {"WINEDLLOVERRIDES": "winemenubuilder.exe=d"}
+MENU_OVERRIDE = prefixes.MENU_OVERRIDE  # every gitfurl run has it now, portable or not
 
 # Host variables passed into the sandbox; everything else is cleared (--clearenv), so tokens,
 # keys and agent sockets in your environment do not reach the installer.
@@ -206,8 +207,7 @@ def describe_portable(plan, bwrap_path: str | None, installer_path: Path,
         ("  Display: the X11 or Wayland socket is allowed so the installer window can show, "
          "and the X authority cookie can be read inside; a hostile installer can use that "
          "connection. Audio is not provided."),
-        ("  Wine's menu and file-association builder is disabled (WINEDLLOVERRIDES="
-         "winemenubuilder.exe=d)."),
+        f"  {prefixes.MENU_LINE} (as in every gitfurl run).",
         "  If the prefix has to be created first, that step runs outside this wrapper.",
         ("  Stop signals bwrap's process group, not the installer's: the sandboxed programs "
          "run in a session of their own, and bwrap's --die-with-parent and private process "

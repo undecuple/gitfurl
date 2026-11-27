@@ -448,7 +448,9 @@ class NativeCliTests(Base):
         self.assertEqual(code, 0)
         self.assertEqual(before, snapshot(self.base))
         self.assertIn("step 1: create the prefix", out)
-        self.assertIn("WINEDLLOVERRIDES=mscoree,mshtml= /x/wine wineboot --init", out)
+        self.assertIn("WINEDLLOVERRIDES='mscoree,mshtml=;winemenubuilder.exe=d' /x/wine "
+                      "wineboot --init", out)
+        self.assertIn("so Wine adds no menu entries or file types to your desktop", out)
         self.assertIn("Mono and Gecko install dialogs", out)
         self.assertNotIn("a real run would stop now", out)
         self.assertIn("step 2: unpack the archives", out)
@@ -594,7 +596,7 @@ class NativeCliTests(Base):
         with no_process():
             self.assertEqual(native_prefix_create(plan, False, self.env, run), 0)
         self.assertEqual(seen["argv"], ["/x/wine", "wineboot", "--init"])
-        self.assertEqual(seen["env"]["WINEDLLOVERRIDES"], "mscoree,mshtml=")
+        self.assertEqual(seen["env"]["WINEDLLOVERRIDES"], "mscoree,mshtml=;winemenubuilder.exe=d")
         self.assertEqual(seen["env"]["WINEPREFIX"], str(self.prefix))
         self.assertTrue(seen["marker"])
         self.assertFalse((self.prefix / "gitfurl-incomplete").exists())

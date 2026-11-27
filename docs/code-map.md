@@ -118,7 +118,7 @@ flowchart TD
   D -->|native| N1["NativeInstallPlan.describe()<br/>(dry run stops here)"]
   N1 --> N2["unpack_memory_problem(), space check"]
   N2 --> N3{"approval<br/>typed yes or --yes"}
-  N3 -->|yes| N4["native_prefix_create()<br/>wineboot, mscoree/mshtml off, incomplete marker"]
+  N3 -->|yes| N4["native_prefix_create()<br/>wineboot, mscoree/mshtml and menu builder off, incomplete marker"]
   N4 --> N5["run_native() → extract.extract()<br/>farc_codecs pull pipeline, CRC-32, Stop"]
   N5 --> N6["listings: program candidates, redistributables (not run)<br/>log 0600, optional event log, optional cleanup"]
   N5 --> N7["--apply-setup-entries: setup_entries.apply_entries()<br/>system.reg and user.reg (no Wine server running), .desktop files,<br/>timeline rows (route._tl_entries)"]
@@ -235,6 +235,7 @@ flowchart LR
 | `tests/test_gui_native.py` | the window's native-route plain functions (route switches, stop texts, footer, root refusal, plan and approval, progress, end text, cleanup) | `tests/test_native_run.py` (`NativeBase`) |
 | `tests/test_gui_native_xvfb.py` | the native route in the real window: Run and the unpack, Stop, the "Run Setup instead" switch, the setup entries switch in the plan and the approval, declining the approval; the Timeline card (the plan's rows before the run, the route reason, Stop and the done line) and the library's Last run | `tests/gui_native_driver.py` (`xvfb-run -a`) |
 | `tests/test_wineboot.py` | `prefixes.wineboot_env`, `with_wineboot_env`, `wineboot_line`; `--wine-addons` on `install` and `prefix create`; the window's plan line | - |
+| `tests/test_wine_menus.py` | `prefixes.merge_dll_overrides`, `without_wine_menus`, `MENU_LINE`; the menu-builder override in `runner.build_plan` (Wine, Proton, portable), `prefixes.plan_create`, `runner.execute`, `prefix create` and `install --create-prefix` (Wine and Proton) and the dry run | - |
 | `tests/test_gui_stall.py` | which crash and stall notes the window keeps on screen; the 120 s stall advice | - |
 | `tests/test_desktop.py` | `desktop`, `cli desktop-entry` | - |
 | `tests/test_prefix_delete.py` | `prefix_delete` (refusals, `in_use`, counts, deletion with links, swaps, menu-entry matching, log and timeline), `cli prefix delete`, the window's plan and result texts | `setup_entries.shortcut_text` for the entries |

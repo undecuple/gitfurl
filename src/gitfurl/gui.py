@@ -23,6 +23,7 @@ from gitfurl.memlimit import availability as memory_availability
 from gitfurl.memlimit import describe as describe_memory
 from gitfurl.namelinks import plan_staging, propose_for, run_staged, staged_plan
 from gitfurl.prefixes import (
+    MENU_LINE,
     PrefixStopped,
     create_prefix,
     incomplete_marker,
@@ -206,6 +207,7 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
         f"prefix:      {plan.prefix}\n"
         f"working dir: {plan.cwd}\n"
         + "".join(f"env:         {k}={v}\n" for k, v in plan.env_overrides.items())
+        + f"desktop:     {MENU_LINE} (wineboot and Setup)\n"
     )
     boot = boot_line(plan.runtime, wine_addons) if not plan.prefix.is_dir() else None
     if boot:
@@ -1904,7 +1906,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             "Create prefix?",
             f"Create a new dedicated prefix at:\n{plan['path']}\n\nCommand: "
             f"{' '.join(plan['argv'])}\nRuntime: {runtime_var.get()}\n\n"
-            + (f"{boot}\n\n" if boot else "") +
+            + (f"{boot}\n\n" if boot else "") + f"{MENU_LINE}.\n\n"
             "Your ~/.wine is not used or changed."
             + (RUNTIME_DOWNLOAD_NOTE if runtime_var.get() == "proton" else ""),
             default="no",

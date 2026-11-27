@@ -313,6 +313,7 @@ class WineRunTests(RunEventHelpers, unittest.TestCase):
         tl.end("Installer exited with status 0")
         text = tl.text()
         self.assertIn("Started Setup (setup.exe) under Wine, with its own windows", text)
+        self.assertIn("so Wine adds no menu entries or file types to your desktop", text)
         self.assertIn("Setup reading the installer's data: 50 %", text)
         self.assertIn('Window opened: "Setup - Game"', text)
         self.assertIn('Window opened: "Error?"', text)  # cleaned
@@ -375,6 +376,7 @@ class WineRunTests(RunEventHelpers, unittest.TestCase):
         text = tl.text()
         self.assertIn("Creating the prefix with wineboot", text)
         self.assertIn("Prefix created" + SEP + "wineboot exited with status 0", text)
+        self.assertGreater(text.count("menu builder is off"), 1)  # wineboot and Setup
         self.assertLess(text.index("Prefix created"), text.index("Started Setup"))
 
 
@@ -437,6 +439,7 @@ class NativeRunTests(NativeBase):
         self.assertIn("Creating the prefix with wineboot", text)
         self.assertIn("Prefix created", text)
         self.assertLess(text.index("Prefix created"), text.index("Started the unpack"))
+        self.assertIn("so Wine adds no menu entries or file types to your desktop", text)
 
 
 class CliLogTests(NativeBase):
