@@ -303,6 +303,13 @@ Cross-check on 2026-11-20 between 05:14 and 05:28 UTC (Python 3.11.17, `python3 
 - Screenshots under Xvfb: the File and View menus open, the page after an unpack, the Window card in Settings, and larger text on the details page.
 - Not tested: a real desktop (the menus' look under a window manager, niri's keys), and text-size changes for every page.
 - On niri, by hand with a throwaway Tk window on 2026-11-27: an X11 window gets a title bar with only a close button, and Tk's own iconify and maximize (`-zoomed`) did nothing, so gitfurl adds no window buttons of its own.
+
+## Inno Setup LZMA2 dictionary (2026-11-27, UTC)
+
+- Cause, checked with Python 3.11's `lzma` on synthetic data (600 kB, 100 kB of other bytes, then the first 200 kB again): with a dictionary of 588 KiB (the first file's end, rounded up), asking for 1 MiB at once failed with "Corrupt input data"; asking for exactly 600,000 bytes, or giving the dictionary the whole 880 KiB, decoded correctly. The reader asks for up to 1 MiB at a time, so it decoded past the files being written.
+- `tests/test_inno.py` (setups built by `tests/inno_writer.py`; one solid LZMA2 chunk whose property byte declares 64 MiB, the second file skipped by language): the setup is extracted and the plan's memory line is the whole chunk's size (before the fix this test failed: "a data chunk could not be decompressed"); with a planned chunk end shorter than its file, the file is refused ("ended before all of its files were complete") and not kept; with the dictionary limit lowered to 512 KiB in the test, the plan is refused before anything is written.
+- `ruff==0.11.13` and the full suite with `pytest==8.3.5` on Python 3.11 (window tests under `xvfb-run -a`), 16:44-16:48 UTC: all passed. Python 3.12 was not run.
+- Not tested: the real setup where the error was seen (not run again), LZMA1 chunks with far matches (same code path, not built in a test).
 ## The single-file build (release workflow)
 `release.yml` builds one Linux program with PyInstaller. Checked on 2026-11-16 by running the workflow by hand (it builds and uploads only):
 - The checksum file matches. `cli --version` prints the release version (1.0.0 for that build) and `cli doctor` runs. The 1.1.0, 1.2.0, 1.2.1, 1.3.0 and 1.4.0 builds have not been checked this way yet.

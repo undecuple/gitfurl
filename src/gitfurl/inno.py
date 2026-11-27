@@ -2241,6 +2241,8 @@ class _ChunkPlan:
     dict_size: int  # LZMA/LZMA2 dictionary (0 for others)
     items: list = field(default_factory=list)  # (Location index, [Target]) by offset
     decoded: int = 0  # bytes of the chunk that are decoded: up to the end of its last file
+    full: int = 0  # end of the chunk's last file in the file table, written or not: the
+    # decoder never outputs more, so a dictionary of this size (up to dict_size) holds it all
     first: int = 0  # slice numbers of the chunk's first and last byte (slice layouts)
     last: int = 0
 
@@ -2375,6 +2377,13 @@ def _dict_size(raw: bytes, method: int) -> int:
             raise InnoError("a data chunk is cut short")
         return lzma2_dict_size(raw[0])
     return 0
+
+
+def _lzma_dict(declared: int, full: int) -> int:
+    """The dictionary a chunk's decoder gets: the declared size, but no more than the chunk
+    decodes to in all (rounded up to 4 KiB). Nothing past `full` is ever decoded, so every
+    match distance stays inside it."""
+    return max(4096, min(declared, -(-full // 4096) * 4096))
 
 
 def plan_inno_extract(installer: Path, prefix_name: str, env: dict[str, str] | None = None,
@@ -2555,9 +2564,11 @@ def plan_inno_extract(installer: Path, prefix_name: str, env: dict[str, str] | N
         if fd is not None:
             os.close(fd)
     held: dict[tuple[int, int], int] = {}  # bytes all of a chunk's files hold together
+    ends: dict[tuple[int, int], int] = {}  # end of a chunk's last file, written or not
     for loc in s.locations:
         k = (loc.first_slice, loc.start)
         held[k] = held.get(k, 0) + loc.size
+        ends[k] = max(ends.get(k, 0), loc.offset + loc.size)
     for key, ch in by_chunk.items():
         ch.items.sort(key=lambda it: (s.locations[it[0]].offset, s.locations[it[0]].size))
         end = 0
@@ -2572,8 +2583,8 @@ def plan_inno_extract(installer: Path, prefix_name: str, env: dict[str, str] | N
             raise ExtractRefused(f"a data chunk of {_size(ch.size)} would have to be decoded to "
                                  f"{_size(end)}, more than its files account for; the setup "
                                  "is damaged")
-        need = -(-end // 4096) * 4096
-        memory = max(memory, min(ch.dict_size, max(need, 4096)) if ch.dict_size else 0)
+        ch.full = max(end, ends.get(key, 0))
+        memory = max(memory, _lzma_dict(ch.dict_size, ch.full) if ch.dict_size else 0)
     chunks = sorted(by_chunk.values(), key=lambda c: (c.first, c.start))
     prefix = prefix_path(prefix_name, env)
     dest = prefix / "drive_c" / "Games" / prefix_name
@@ -2703,12 +2714,16 @@ def _first_bytes(inp, n: int) -> bytes:
 
 
 class _ChunkReader:
-    """A chunk's decoded bytes, read from its input CHUNK at a time; input stops at its size."""
+    """A chunk's decoded bytes, read from its input CHUNK at a time; input stops at its size.
+    An LZMA/LZMA2 chunk is decoded only up to `full` (the end of its last file), which its
+    dictionary covers; a damaged chunk can then fail, but never with a match the dictionary
+    lost."""
 
-    def __init__(self, inp, method: int, compressed: bool, need: int):
+    def __init__(self, inp, method: int, compressed: bool, full: int):
         self.inp = inp
         self.method = method if compressed else 0
         self.tail = b""
+        self.left = full
         if self.method == 0:
             self.dec = None
         elif self.method == 1:
@@ -2716,7 +2731,7 @@ class _ChunkReader:
         elif self.method == 2:
             self.dec = bz2.BZ2Decompressor()
         else:
-            self.dec = self._lzma(need)
+            self.dec = self._lzma(full)
 
     def _input(self, n: int | None = None) -> bytes:
         return self.inp.read(CHUNK if n is None else n)
@@ -2731,15 +2746,14 @@ class _ChunkReader:
             out += got
         return out
 
-    def _lzma(self, need: int):
-        cap = max(4096, -(-need // 4096) * 4096)
+    def _lzma(self, full: int):
         if self.method == 3:
             head = self._head(5)
             if len(head) < 5:
                 raise _DataError("a data chunk is cut short")
             p = head[0]
             dsize = struct.unpack_from("<I", head, 1)[0]
-            filt = {"id": lzma.FILTER_LZMA1, "dict_size": max(4096, min(dsize, cap)),
+            filt = {"id": lzma.FILTER_LZMA1, "dict_size": _lzma_dict(dsize, full),
                     "lc": p % 9, "lp": (p // 9) % 5, "pb": p // 45}
         else:
             head = self._head(1)
@@ -2749,7 +2763,7 @@ class _ChunkReader:
                 dsize = lzma2_dict_size(head[0])
             except InnoError as exc:
                 raise _DataError(str(exc)) from exc
-            filt = {"id": lzma.FILTER_LZMA2, "dict_size": max(4096, min(dsize, cap))}
+            filt = {"id": lzma.FILTER_LZMA2, "dict_size": _lzma_dict(dsize, full)}
         try:
             return lzma.LZMADecompressor(lzma.FORMAT_RAW, filters=[filt])
         except (lzma.LZMAError, ValueError) as exc:
@@ -2771,12 +2785,14 @@ class _ChunkReader:
                         return out
                 return b""
             idle = 0
-            while not self.dec.eof:
+            k = min(k, self.left)
+            while not self.dec.eof and k > 0:
                 data = self._input() if self.dec.needs_input else b""
                 if self.dec.needs_input and not data:
                     return b""
                 out = self.dec.decompress(data, max_length=k)
                 if out:
+                    self.left -= len(out)
                     return out
                 idle = idle + 1 if not data else 0
                 if idle > 2:
@@ -2963,13 +2979,12 @@ def _write_all(plan: InnoExtractPlan, fd: int, root: int, cancel, on_progress
     try:
         for ch in plan.chunks:
             stop()
-            need = max(s.locations[li].offset + s.locations[li].size for li, _ in ch.items)
             if source is None:
                 inp = _FileInput(fd, s.offset1 + ch.start + 4, ch.size)
             else:
                 inp = _SliceInput(source, ch.first, ch.last, ch.start, ch.size)
             try:
-                stream = _Stream(_ChunkReader(inp, s.compression, ch.compressed, need))
+                stream = _Stream(_ChunkReader(inp, s.compression, ch.compressed, ch.full))
                 for li, targets in ch.items:
                     stop()
                     loc = s.locations[li]

@@ -13,6 +13,7 @@ import tempfile
 import threading
 import unittest
 import zlib
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -877,6 +878,52 @@ class Extract(Base):
                 self.patch_chunk(full_spec(compression=4, files=files), 0, bytes([prop]))
                 with self.assertRaisesRegex(ExtractRefused, reason):
                     self.plan()
+        self.assertFalse(self.dest().exists())
+
+    def far_match_chunk(self) -> tuple[bytes, bytes]:
+        """A solid LZMA2 chunk declaring a 64 MiB dictionary: a.txt (600 kB) is written, b.txt
+        (skipped: German only) repeats a.txt's first bytes after 100 kB of other bytes, so its
+        matches reach back 700 kB, past the end of a.txt."""
+        rnd = random.Random(7)
+        a, filler = rnd.randbytes(600_000), rnd.randbytes(100_000)
+        files = [w.WFile("{app}\\a.txt", a),
+                 w.WFile("{app}\\b.txt", filler + a[:200_000], languages="german")]
+        self.patch_chunk(full_spec(compression=4, solid=True, files=files), 0, bytes([28]))
+        return a, filler
+
+    def test_lzma2_dictionary_covers_what_the_chunk_decodes(self):
+        # The reader decodes up to 1 MiB at a time, so it runs into b.txt; a dictionary of
+        # only a.txt's size made those far matches "Corrupt input data".
+        a, filler = self.far_match_chunk()
+        plan = self.plan()
+        self.assertEqual(plan.skipped, [("{app}\\b.txt", "not part of the default languages")])
+        self.assertEqual(plan.memory, -(-(len(a) + len(filler) + 200_000) // 4096) * 4096)
+        self.assertIn(f"memory: up to {inno._size(plan.memory)}", "\n".join(plan.describe()))
+        res = inno.extract_inno_files(plan)
+        self.assertTrue(res.ok, res.lines())
+        self.assertEqual(self.tree(), {"a.txt": a})
+
+    def test_lzma2_decoding_stops_at_the_planned_end(self):
+        # Nothing is decoded past the end the file table gives the chunk, so the dictionary
+        # always holds all of it; a file that needs more is refused, never written wrong.
+        a, filler = self.far_match_chunk()
+        plan = self.plan()
+        ch = plan.chunks[0]
+        self.assertEqual(ch.full, len(a) + len(filler) + 200_000)
+        self.assertTrue(inno.extract_inno_files(plan).ok)
+        shutil.rmtree(self.dest())
+        short = replace(plan, chunks=[replace(ch, full=len(a) - 1)])
+        res = inno.extract_inno_files(short)
+        self.assertFalse(res.ok)
+        self.assertIn("ended before all of its files were complete", "\n".join(res.lines()))
+        self.assertFalse((self.dest() / "a.txt").exists())
+
+    def test_lzma_dictionary_over_the_cap_is_refused_before_anything_is_written(self):
+        self.far_match_chunk()
+        with mock.patch.object(inno, "DICT_CAP", 512 << 10):
+            with self.assertRaisesRegex(ExtractRefused, "a data chunk uses an LZMA dictionary "
+                                                        "larger than"):
+                self.plan()
         self.assertFalse(self.dest().exists())
 
     @staticmethod
