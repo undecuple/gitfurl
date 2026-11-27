@@ -70,6 +70,11 @@ Keys: **Tab** and **Shift+Tab** move through everything you can use, in the orde
 
 If Wine is not found, an amber box on the Library and on a prefix's page says so and has a **Check again** button.
 
+### Menu and view settings
+A menu bar at the top has **File** (Choose installer..., Ctrl+O; New prefix..., Ctrl+N; Settings, Ctrl+,; Quit, Ctrl+Q), **View** (smaller, normal or larger text, also Ctrl+-, Ctrl+0 and Ctrl+=; Reduce motion; Remember window size) and **Help** (Keys, F1; About). The same view settings are in the **Window** card in Settings. Reduce motion makes the page move at once when you turn the mouse wheel instead of gliding. Remember window size starts gitfurl with the size it had when you closed it; where the window opens is up to your desktop. The view settings are kept in `$XDG_CONFIG_HOME/gitfurl/view.json` (usually `~/.config/gitfurl/view.json`, mode 0600), which holds only these settings and is written only when you change one or close the window with Remember window size on.
+
+The window uses your desktop's own title bar. On niri, X11 programs get a title bar with only a close button, and niri does not act on a program's own maximize or minimize; Help > Keys lists niri's default keys for those instead (Mod+F maximizes the column, Mod+Shift+F is full screen; niri has no minimize).
+
 ### Running an installer
 Open a prefix, then:
 1. **Installer:** type or browse to the installer file (`setup.exe`). The **Checklist** at the top of the page shows what Run needs, each with a tick or a cross and a sentence: an installer file chosen, Wine (or umu-run for proton) found, or "not needed" when the native route unpacks the archives itself, and the prefix existing or set to be created. **Run installer**, **Create now** and **Stop** sit in a bar at the bottom of the page that stays in view; when Run is off, the bar says why in words.
@@ -77,7 +82,7 @@ Open a prefix, then:
 3. Choose options (below).
 4. Click **Run installer**. A dialog repeats the plan and the warning. Nothing starts until you confirm.
 5. On the Wine/Proton route, the installer's own window opens; use it as you normally would. On the native route, Setup is not run: the footer says "Unpacking" and the status shows the progress.
-6. When it ends, gitfurl shows the exit status and where the log is.
+6. When it ends, gitfurl shows the result: a headline in bold (for example "Unpacked (Setup was not run).") and the details below it, with the exit status and where the log is. The progress line says the run has ended. After an unpack, the checklist marks it done ("Done: the files are in ...") and Run stays off, because gitfurl only unpacks into a new folder: to unpack the same installer again, choose another prefix.
 
 If the prefix does not exist and "Create the prefix if it does not exist" is on (the default), gitfurl creates it first. If creating it fails, the installer is not run.
 
@@ -142,7 +147,7 @@ The run is shown as **cancelled**, not as a success or a failure. On the command
 What may remain, because nothing is deleted: files that were already copied into the prefix, registry changes, files written elsewhere on this machine (for example in your home folder), and any program that moved itself out of the run's process group. A group stop cannot reach such a program, so complete process-tree termination is **not guaranteed**: check with `ps` if something looks left over. For Proton, stopping through `umu-run` is **unverified**: it needs umu's runtime, which could not be set up offline, so whether the runtime's own container always ends with the group is untested.
 
 ### Settings
-Shows Wine and bubblewrap versions and the platform, and the safety note.
+Shows Wine and bubblewrap versions and the platform, the safety note, and the **Window** card with the view settings (see "Menu and view settings").
 
 ## Command line (optional)
 The graphical app is the default. The command line is opt-in and uses the same code and the same approvals:
