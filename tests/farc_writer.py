@@ -1,9 +1,9 @@
 """A small FreeArc writer for the tests: archives are built in memory, as bytes.
 
-Storing, raw LZMA1 from Python's own lzma module, and test-only encoders for exe, delta, rep,
-4x4 and srep (ENCODERS), written from the same clean-room specifications as
-gitfurl/farc_codecs.py, so agreement between the two does not show agreement with FreeArc or
-srep themselves. The srep encoder borrows gitfurl's own VHASH and SipHash for those two
+Storing, raw LZMA1 from Python's own lzma module, and test-only encoders for exe, x86
+(dispack070), delta, rep, 4x4 and srep (ENCODERS), written from the same clean-room
+specifications as gitfurl/farc_codecs.py, so agreement between the two does not show agreement
+with FreeArc or srep themselves. The srep encoder borrows gitfurl's own VHASH and SipHash for those two
 checksum kinds; those are checked against published values in the tests. Chains are encoded
 left to right. The bytes are written to a temporary folder only for a test; no archive file
 is kept in the repository.
@@ -363,8 +363,204 @@ def srep_method(data: bytes, method: str = "srep") -> bytes:
     return srep_encode(data, version, kind, block=1 << 16)
 
 
+# --- x86 (FreeArc's dispack070 code filter), encode direction -----------------------------
+# A test-only encoder that mirrors gitfurl's decoder step for step, with the decoder's own
+# opcode tables (so a round trip checks the stage's mechanics, not the tables; the
+# specification's vectors made by FreeArc's encoder check those). Unlike FreeArc's encoder it
+# treats every chunk as code unless told otherwise, and it escapes any byte it cannot parse.
+
+X86_CHUNK = 16384
+_X86_ITEM = {13: 2, 14: 4, 15: 4, 16: 4, 17: 4, 18: 4}
+
+
+def _x86_target(ft: list, v: int, streams) -> None:
+    """Encode one call or jump-table target through the function table (T() reversed)."""
+    if v in ft[:255]:
+        k = ft.index(v)
+        streams[2].append(k + 1)
+        ft.insert(0, ft.pop(k))
+    else:
+        streams[2].append(0)
+        streams[17] += v.to_bytes(4, "big")
+        ft.insert(0, v)
+        ft.pop()
+
+
+def _x86_parse(pad: bytes, i: int, base: int):
+    """One instruction at i: (length, OP bytes, [(stream, item bytes as in the input)],
+    call target or None, sets NEXTFUNC), or None when the decoder would refuse it."""
+    from gitfurl.farc_codecs import X86_GROUP, X86_MODRM, X86_ONE, X86_TWO
+
+    j = i
+    c = pad[j]
+    j += 1
+    ops, items, prefix = [c], [], False
+    p = X86_ONE[c]
+    if p == 0x200:
+        prefix = True
+        c = pad[j]
+        j += 1
+        ops.append(c)
+        p = X86_ONE[c]
+        if p == 0x200:
+            return j - i, ops, items, None, False
+        if p >= 0x1000:
+            return None
+    nextfunc = c in (0xC2, 0xC3, 0xCC) and p != 0x400
+    if p == 0x400:
+        d = pad[j]
+        j += 1
+        ops.append(d)
+        p = X86_TWO[d]
+        c = -1  # not a one-byte opcode
+    elif p >= 0x80:
+        if p & 0x100:
+            items.append((13, pad[j:j + 2]))
+            j += 2
+        if p & 0x800:
+            rel = int.from_bytes(pad[j:j + 4], "little")
+            j += 4
+            return j - i, ops, items, (base + j + rel) & 0xFFFFFFFF, nextfunc
+        p &= 0x7F
+    if p < 0:
+        return None
+    if p & 0x20:
+        m = pad[j]
+        j += 1
+        ops.append(m)
+        if p & 0x40:
+            p = X86_GROUP[(m >> 3 & 7) | (c & 1) << 3 | (c & 8) << 1]
+            if p < 0:
+                return None
+        f = X86_MODRM[m]
+        if f == 2:
+            items.append((3 + (m & 7), pad[j:j + 1]))
+            j += 1
+        elif f == 3:
+            items.append((15, pad[j:j + 4]))
+            j += 4
+        elif f == 4:
+            items.append((16, pad[j:j + 4]))
+            j += 4
+        elif f:
+            s = pad[j]
+            items.append((1, pad[j:j + 1]))
+            j += 1
+            if f == 5:
+                items.append((7, pad[j:j + 1]))
+                j += 1
+            elif f == 6 or s & 7 == 5:
+                items.append((15, pad[j:j + 4]))
+                j += 4
+        p &= 3
+    width = {1: 1, 2: 2, 3: 2 if prefix else 4, 8: 4, 9: 4, 10: 1, 11: 4}.get(p, 0)
+    stream = {1: 12, 2: 13, 3: 13 if prefix else 14, 8: 16, 9: 18, 10: 11, 11: 18}.get(p)
+    if p == 11:  # a rel32 jump: stored as its absolute target
+        rel = int.from_bytes(pad[j:j + 4], "little")
+        items.append((18, ((base + j + 4 + rel) & 0xFFFFFFFF).to_bytes(4, "little")))
+        j += 4
+    elif width:
+        items.append((stream, pad[j:j + width]))
+        j += width
+    return j - i, ops, items, None, nextfunc
+
+
+def x86_block(data: bytes, base: int, tables: bool = True) -> bytes:
+    """One filtered block (the 19-dword size table and the streams) for `data` at `base`.
+    With `tables`, three or more dwords in a row that point into the block are written as a
+    jump table."""
+    streams = [bytearray() for _ in range(19)]
+    ft, nextfunc, n = [0] * 256, True, len(data)
+    pad = bytes(data) + bytes(16)
+    i = 0
+    while i < n:
+        count = 0
+        while tables and count < 256 and i + 4 * count + 4 <= n and \
+                0 <= int.from_bytes(data[i + 4 * count:i + 4 * count + 4], "little") - base < n:
+            count += 1
+        if count >= 3:
+            streams[0] += bytes([0xCE, count - 1])
+            for k in range(count):
+                _x86_target(ft, int.from_bytes(data[i + 4 * k:i + 4 * k + 4], "little"),
+                            streams)
+            i += 4 * count
+            continue
+        c = data[i]
+        if nextfunc and c != 0xCC:
+            ft.insert(0, (base + i) & 0xFFFFFFFF)
+            ft.pop()
+            nextfunc = False
+        got = _x86_parse(pad, i, base)
+        if got is not None and i + got[0] > n:  # cut by the block's end: the rest escaped
+            for b in data[i:]:
+                streams[0] += bytes([0xF1, b])
+            break
+        if got is None or c == 0xF1 or c == 0xCE:
+            streams[0] += bytes([0xF1, c])
+            i += 1
+            continue
+        length, ops, items, call, sets = got
+        streams[0] += bytes(ops)
+        for s, raw in items:
+            streams[s] += raw[::-1] if s in _X86_ITEM else raw
+        if call is not None:
+            _x86_target(ft, call, streams)
+        if sets:
+            nextfunc = True
+        i += length
+    sizes = b"".join(len(s).to_bytes(4, "little") for s in streams)
+    return sizes + b"".join(streams)
+
+
+def x86_encode(data: bytes, method: str = "dispack070", code=None, tables: bool = True,
+               chunk: int = X86_CHUNK, base: int = 0x40000000) -> bytes:
+    """The framed stage stream: the chunk size, then code blocks (runs of code chunks up to
+    the method's block size) and data or raw frames. code(piece) says whether a chunk is code
+    (default: every chunk)."""
+    from gitfurl import farc
+
+    block = farc.parse_method(method).stages[0].size
+    code = code or (lambda piece: True)
+    if not data:
+        return b""
+    out = bytearray(u32(chunk))
+    run = bytearray()
+
+    def flush():
+        nonlocal base, run
+        if run:
+            enc = x86_block(run, base, tables)
+            out.extend(u32(0xC71B3AE2) + u32(len(run)) + u32(len(enc)) + enc)
+            base = _x86_advance(base, len(run))
+            run = bytearray()
+
+    for at in range(0, len(data), chunk):
+        piece = data[at:at + chunk]
+        if code(piece):
+            if len(run) + len(piece) > block:
+                flush()
+            run += piece
+            continue
+        flush()
+        first = int.from_bytes(piece[:4], "little")
+        if len(piece) == chunk and not 0 <= first - 0xC71B3AE0 < 16:
+            out += piece
+        else:
+            out += u32(0xC71B3AE1) + u32(len(piece)) + piece
+        base = _x86_advance(base, len(piece))
+    flush()
+    return bytes(out)
+
+
+def _x86_advance(base: int, n: int) -> int:
+    base += n
+    return base - 0x80000000 if base >= 0xC0000000 else base
+
+
 ENCODERS = {
     "storing": lambda data, method: data,
+    "dispack070": x86_encode,
+    "dispack": x86_encode,
     "lzma": _lzma,
     "exe": exe_encode,
     "delta": delta_encode,

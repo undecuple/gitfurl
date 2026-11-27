@@ -1,5 +1,5 @@
-"""Streaming decoders for FreeArc method chains: storing, lzma, exe, delta, rep, 4x4 (with lzma
-inside) and srep.
+"""Streaming decoders for FreeArc method chains: storing, lzma, exe, x86, delta, rep, 4x4 (with
+lzma inside) and srep.
 
 A chain is decoded right to left: the last method in the archive's string reads the block's
 stored bytes, and the first method's output is the block's file data. Each stage here is a
@@ -86,7 +86,7 @@ def _u32_array(data: bytearray) -> array:  # pragma: no cover - see _u32s
 @dataclass(frozen=True)
 class StagePlan:
     stage: farc.Stage
-    budget: int  # lzma: dictionary; rep: window kept; delta: largest block
+    budget: int  # lzma: dictionary; rep: window kept; delta, x86: largest block
     memory: int  # bytes this stage may hold at most
     limit: int | None = None  # output this stage gives at most (None: all of its stream)
 
@@ -129,6 +129,12 @@ def stage_plan(method: farc.Method, out_size: int) -> list[StagePlan]:
             if limit is not None:
                 d = min(d, max(4096, limit))
             out.append(StagePlan(st, d, d, limit))
+        elif st.name == "x86":
+            # a code block is held whole, encoded and decoded (one that runs past the limit
+            # is refused); the encoded part is converted in place, half a stream at a time
+            b = st.size if limit is None else min(st.size, limit)
+            enc = x86_input_cap(st.size)
+            out.append(StagePlan(st, b, b + enc + enc // 2 + X86_SLACK, limit))
         elif st.name == "srep":
             budget = srep_budget(limit)
             out.append(StagePlan(st, budget, budget + srep_block_memory(st.size), limit))
@@ -1373,6 +1379,406 @@ class SrepStage(_Stage):
         return out
 
 
+# --- x86 (the code filter FreeArc calls dispack070) -----------------------------------------
+
+X86_DATA = 0xC71B3AE1  # frame tags; other values from X86_TAGS to X86_TAGS + 15 are refused
+X86_EXE = 0xC71B3AE2
+X86_TAGS = 0xC71B3AE0
+X86_BASE = 0x40000000  # address of the stream's first output byte
+X86_WRAP = 0xC0000000  # ... an address that reaches this after a frame drops by 2 GiB
+X86_STREAMS = 19
+X86_HEAD = 4 * X86_STREAMS  # a code block's table of stream sizes
+X86_ROUND = 4096  # opcode-stream bytes decoded between two checks of the output (and Stop)
+X86_SLACK = 64 << 10  # output one round may give past the block's size before it is seen
+_X86_WIDE = {13: 2, 14: 4, 15: 4, 16: 4, 17: 4, 18: 4}  # streams of 2- and 4-byte items
+
+
+def x86_input_cap(block: int) -> int:
+    """Largest encoded size of one x86 code block, for a method block size of `block`."""
+    return block + block // 4 + 1024
+
+
+# Operand kinds, from the format's tables. 0x20: a ModRM byte follows; its low two bits are
+# the immediate after it (1: 8-bit, 2: 16-bit, 3: 32-bit, or 16-bit after a 0x66 prefix);
+# 0x40: the real kind is in the group table, by the ModRM's reg field. 8-11 are the address
+# kinds (A 8, AJ 9, R1 10, R4 11; no ModRM). -1: invalid. Flags of one-byte opcodes only:
+# 0x80 marks a function's end, 0x100 an extra 16-bit item first, 0x200 the 0x66 prefix,
+# 0x400 a two-byte opcode, 0x800 the call path (E8), 0x1000 a jump table (CE), 0x2000 an
+# escaped byte (F1). x86_unfilter() uses these numbers directly (they are its hot path).
+_X_KINDS = {"-": 0, "I1": 1, "I2": 2, "I4": 3, "M": 0x20, "M+I1": 0x21, "M+I4": 0x23,
+            "G": 0x60, "A": 8, "AJ": 9, "R1": 10, "R4": 11, "E": -1}
+_X_ONE = """
+M    M    M    M    I1   I4   -    -    M    M    M    M    I1   I4   -    -
+M    M    M    M    I1   I4   -    -    M    M    M    M    I1   I4   -    -
+M    M    M    M    I1   I4   -    -    M    M    M    M    I1   I4   -    -
+M    M    M    M    I1   I4   -    -    M    M    M    M    I1   I4   -    -
+-    -    -    -    -    -    -    -    -    -    -    -    -    -    -    -
+-    -    -    -    -    -    -    -    -    -    -    -    -    -    -    -
+-    -    M    M    -    -    -    -    I4   M+I4 I1   M+I1 -    -    -    -
+R1   R1   R1   R1   R1   R1   R1   R1   R1   R1   R1   R1   R1   R1   R1   R1
+M+I1 M+I4 M+I1 M+I1 M    M    M    M    M    M    M    M    M    M    M    M
+-    -    -    -    -    -    -    -    -    -    AJ   -    -    -    -    -
+A    A    A    A    -    -    -    -    I1   I4   -    -    -    -    -    -
+I1   I1   I1   I1   I1   I1   I1   I1   I4   I4   I4   I4   I4   I4   I4   I4
+M+I1 M+I1 I2   -    M    M    M+I1 M+I4 I1   -    I2   -    -    I1   E    -
+M    M    M    M    I1   I1   -    -    M    M    M    M    M    M    M    M
+R1   R1   R1   R1   I1   I1   I1   I1   R4   R4   A    R1   -    -    -    -
+-    E    -    -    -    -    G    G    -    -    -    -    -    -    G    G
+"""
+_X_TWO = """
+E    E    E    E    E    E    -    E    -    -    E    E    E    E    E    E
+M    M    M    M    M    M    M    M    M    E    E    E    E    E    E    E
+M    M    M    M    E    E    E    E    M    M    M    M    M    M    M    M
+-    -    -    -    -    -    E    -    E    E    E    E    E    E    E    E
+M    M    M    M    M    M    M    M    M    M    M    M    M    M    M    M
+M    M    M    M    M    M    M    M    M    M    M    M    M    M    M    M
+M    M    M    M    M    M    M    M    M    M    M    M    M    M    M    M
+M+I1 M+I1 M+I1 M+I1 M    M    M    -    E    E    E    E    E    E    M    M
+R4   R4   R4   R4   R4   R4   R4   R4   R4   R4   R4   R4   R4   R4   R4   R4
+M    M    M    M    M    M    M    M    M    M    M    M    M    M    M    M
+-    -    -    M    M+I1 M    M    M    E    E    E    M    M+I1 M    E    M
+M    M    M    M    M    M    M    M    E    E    E    M    M    M    M    M
+M    M    M    M    M    M    M    M    -    -    -    -    -    -    -    -
+M    M    M    M    M    M    M    M    M    M    M    M    M    M    M    M
+M    M    M    M    M    M    M    M    M    M    M    M    M    M    M    M
+M    M    M    M    M    M    M    M    M    M    M    M    M    M    M    E
+"""
+# F6, F7, FE and FF by the ModRM's reg field: reg + 8 * (opcode bit 0) + 16 * (opcode bit 3)
+_X_GROUP = """
+M+I1 E    M    M    M    M    M    M
+M+I4 E    M    M    M    M    M    M
+M    M    E    E    E    E    E    E
+M    M    M    E    M    E    M    E
+"""
+X86_ONE = [_X_KINDS[w] for w in _X_ONE.split()]
+X86_TWO = [_X_KINDS[w] for w in _X_TWO.split()]
+X86_GROUP = [_X_KINDS[w] for w in _X_GROUP.split()]
+for _c, _flag in ((0xC2, 0x80), (0xC3, 0x80), (0xCC, 0x80), (0x9A, 0x100), (0xEA, 0x100),
+                  (0xC8, 0x100), (0xE8, 0x800)):
+    X86_ONE[_c] |= _flag
+X86_ONE[0x66], X86_ONE[0x0F], X86_ONE[0xCE], X86_ONE[0xF1] = 0x200, 0x400, 0x1000, 0x2000
+del _c, _flag
+# What a ModRM byte brings: 0 nothing, 1 a SIB (whose base field 5 adds a 32-bit
+# displacement), 2 an 8-bit displacement, 3 a 32-bit displacement, 4 a 32-bit absolute
+# address, 5 a SIB and an 8-bit displacement, 6 a SIB and a 32-bit displacement.
+X86_MODRM = bytes(
+    0 if m >> 6 == 3 else
+    (1, 5, 6)[m >> 6] if m & 7 == 4 else
+    (4 if m & 7 == 5 else 0) if m >> 6 == 0 else
+    (2, 3)[(m >> 6) - 1]
+    for m in range(256))
+
+
+def _x86_little(data: bytearray, size: int) -> None:
+    """Turn a stream of big-endian items of `size` (2 or 4) bytes little-endian, in place
+    (at most half the stream is copied meanwhile)."""
+    if len(data) % size:
+        raise CodecError("damaged x86 data (a stream does not hold whole items)")
+    for a in range(size // 2):
+        b = size - 1 - a
+        keep = data[a::size]
+        data[a::size] = data[b::size]
+        data[b::size] = keep
+        del keep
+
+
+def x86_sizes(head, total: int) -> list[int]:
+    """The 19 stream sizes from a code block's header; they must fill its `total` bytes."""
+    sizes = [int.from_bytes(head[i:i + 4], "little") for i in range(0, X86_HEAD, 4)]
+    if total < X86_HEAD or X86_HEAD + sum(sizes) != total:
+        raise CodecError("damaged x86 data (a code block's stream sizes do not add up)")
+    return sizes
+
+
+def x86_split(block) -> list[bytearray]:
+    """The 19 streams of one bare code block (its size table, then the streams)."""
+    if len(block) < X86_HEAD:
+        raise CodecError("damaged x86 data (a code block is shorter than its header)")
+    out, at = [], X86_HEAD
+    for n in x86_sizes(block[:X86_HEAD], len(block)):
+        out.append(bytearray(block[at:at + n]))
+        at += n
+    return out
+
+
+def x86_unfilter(streams: list, dlen: int, base: int, stop=None) -> bytearray:
+    """Rebuild one code block of `dlen` bytes, whose first byte is at address `base`, from its
+    19 streams (bytearrays; the 2- and 4-byte streams are made little-endian in place).
+
+    Raises CodecError on any inconsistency: a read past a stream's end, output past `dlen`
+    or short of it, a stream not used up, or an opcode the encoder never writes. Output past
+    `dlen` is seen at most X86_ROUND opcode bytes late (X86_SLACK covers it); stop() is called
+    every X86_ROUND opcode bytes."""
+    stop = stop or _no_stop
+    for i, size in _X86_WIDE.items():
+        _x86_little(streams[i], size)
+    ops, sib, idx = streams[0], streams[1], streams[2]
+    d8 = streams[3:11]
+    j8, i8, i16, i32, disp, addr = streams[11:17]
+    calls, jumps = _u32s(streams[17]), _u32s(streams[18])
+    one, two, group, modrm = X86_ONE, X86_TWO, X86_GROUP, X86_MODRM
+    ft = [0] * 256  # the function table: entry 0 is the latest target
+    push, pop = ft.insert, ft.pop
+    nextfunc = True
+    out = bytearray()
+    append = out.append
+    m32 = _M32
+    base &= m32
+    op = p_sib = p_idx = p_j8 = p_i8 = p_i16 = p_i32 = p_disp = p_addr = p_call = p_jump = 0
+    p_d8 = [0] * 8
+    n_ops = len(ops)
+    try:
+        while op < n_ops:
+            stop()
+            lim = min(n_ops, op + X86_ROUND)
+            while op < lim:
+                c = ops[op]
+                op += 1
+                p = one[c]
+                if nextfunc and c != 0xCC and c != 0xCE:
+                    pop()
+                    push(0, (base + len(out)) & m32)
+                    nextfunc = False
+                if not p:
+                    append(c)
+                    continue
+                prefix = False
+                if p >= 0x80:
+                    if p == 0x1000:  # a jump table of 1 to 256 targets
+                        for _ in range(ops[op] + 1):
+                            k = idx[p_idx]
+                            p_idx += 1
+                            if k:
+                                v = pop(k - 1)
+                            else:
+                                v = calls[p_call]
+                                p_call += 1
+                                pop()
+                            push(0, v)
+                            out += v.to_bytes(4, "little")
+                        op += 1
+                        if len(out) > dlen:
+                            break
+                        continue
+                    if p == 0x2000:  # one byte kept as it is
+                        append(ops[op])
+                        op += 1
+                        continue
+                    append(c)
+                    if p == 0x200:  # 0x66: the next byte is the opcode
+                        prefix = True
+                        c = ops[op]
+                        op += 1
+                        append(c)
+                        p = one[c]
+                        if p == 0x200:  # a second 0x66 is an opcode with no operands
+                            continue
+                        if p >= 0x1000:  # CE and F1 are not escapes here
+                            p = -1
+                    if p == 0x400:  # 0x0F: a two-byte opcode
+                        c = ops[op]
+                        op += 1
+                        append(c)
+                        p = two[c]
+                    elif p >= 0x80:
+                        if p & 0x80:
+                            nextfunc = True
+                        if p & 0x100:
+                            out += i16[p_i16:p_i16 + 2]
+                            p_i16 += 2
+                        if p & 0x800:  # E8: a call, its target through the function table
+                            k = idx[p_idx]
+                            p_idx += 1
+                            if k:
+                                v = pop(k - 1)
+                            else:
+                                v = calls[p_call]
+                                p_call += 1
+                                pop()
+                            push(0, v)
+                            out += ((v - base - len(out) - 4) & m32).to_bytes(4, "little")
+                            continue
+                        p &= 0x7F
+                    if not p:
+                        continue
+                else:
+                    append(c)
+                if p & 0x20:  # a ModRM byte
+                    if p < 0:
+                        raise CodecError("damaged x86 data (an opcode the format never "
+                                         "writes)")
+                    m = ops[op]
+                    op += 1
+                    append(m)
+                    if p & 0x40:  # a group
+                        p = group[(m >> 3 & 7) | (c & 1) << 3 | (c & 8) << 1]
+                        if p < 0:
+                            raise CodecError("damaged x86 data (an opcode the format never "
+                                             "writes)")
+                    f = modrm[m]
+                    if f:
+                        if f == 2:
+                            r = m & 7
+                            append(d8[r][p_d8[r]])
+                            p_d8[r] += 1
+                        elif f == 3:
+                            out += disp[p_disp:p_disp + 4]
+                            p_disp += 4
+                        elif f == 4:
+                            out += addr[p_addr:p_addr + 4]
+                            p_addr += 4
+                        else:
+                            s = sib[p_sib]
+                            p_sib += 1
+                            append(s)
+                            if f == 5:
+                                append(d8[4][p_d8[4]])
+                                p_d8[4] += 1
+                            elif f == 6 or s & 7 == 5:
+                                out += disp[p_disp:p_disp + 4]
+                                p_disp += 4
+                    p &= 3
+                    if not p:
+                        continue
+                if p == 1:  # I1
+                    append(i8[p_i8])
+                    p_i8 += 1
+                elif p == 3 and not prefix:  # I4
+                    out += i32[p_i32:p_i32 + 4]
+                    p_i32 += 4
+                elif p == 10:  # R1
+                    append(j8[p_j8])
+                    p_j8 += 1
+                elif p == 11:  # R4, a jump: its absolute target, made relative again
+                    v = jumps[p_jump]
+                    p_jump += 1
+                    out += ((v - base - len(out) - 4) & m32).to_bytes(4, "little")
+                elif p < 8:
+                    if p < 0:
+                        raise CodecError("damaged x86 data (an opcode the format never "
+                                         "writes)")
+                    out += i16[p_i16:p_i16 + 2]  # I2, or I4 after 0x66
+                    p_i16 += 2
+                elif p == 8:  # A
+                    out += addr[p_addr:p_addr + 4]
+                    p_addr += 4
+                else:  # AJ: kept as it is
+                    out += jumps[p_jump].to_bytes(4, "little")
+                    p_jump += 1
+            if len(out) > dlen:
+                raise CodecError("damaged x86 data (a code block gives more than its size)")
+    except IndexError:
+        raise CodecError("damaged x86 data (a stream ends early)") from None
+    used = [op, p_sib, p_idx, *p_d8, p_j8, p_i8, p_i16, p_i32, p_disp, p_addr, 4 * p_call,
+            4 * p_jump]
+    if used != [len(s) for s in streams]:
+        raise CodecError("damaged x86 data (a code block's streams do not match its "
+                         "instructions)")
+    if len(out) != dlen:
+        raise CodecError("damaged x86 data (a code block gives less than its size)")
+    return out
+
+
+class X86Stage(_Stage):
+    """The x86 code filter (FreeArc's dispack070), decode direction.
+
+    The stream: a chunk size, then frames: a code block (tag, decoded size, encoded size, the
+    19-dword size table and the streams), a data frame (tag, length, the bytes) or a raw chunk
+    (chunk-size bytes whose first dword is not a tag). A code block is held whole (encoded and
+    decoded); data and raw frames are passed on a piece at a time. Refused: a chunk size
+    below 4 or over the method's block size, a tag in the reserved range, a code block over
+    the method's block size or `block_cap` (the stage's `limit` when smaller) or encoded in
+    more than x86_input_cap(block size) bytes, a data frame that is empty or longer than the
+    chunk size (FreeArc's encoder never writes one), and a cut inside any frame. A cut exactly
+    between two frames cannot be seen here; the files' sizes and CRCs see it. With a `limit`,
+    no frame is read once that much was output.
+    """
+
+    def __init__(self, src, block_size: int, block_cap: int, chunk: int,
+                 limit: int | None = None, stop=None):
+        super().__init__(stop)
+        self.inp = _Input(src, chunk)
+        self.bsize, self.cap, self.chunk, self.limit = block_size, block_cap, chunk, limit
+        self.icap = x86_input_cap(block_size)
+        self.chunksize = 0  # 0 until read
+        self.base = X86_BASE
+        self.total = 0  # output so far
+        self.copy = 0  # bytes of the current data or raw frame still to pass on
+        self.frame = 0  # the current data or raw frame's length
+
+    def _word(self, what: str, end_ok: bool = False) -> int | None:
+        data = self.inp.exact(4)
+        if not data and end_ok:
+            return None
+        if len(data) != 4:
+            raise CodecError(f"the x86 data ended inside {what}")
+        return int.from_bytes(data, "little")
+
+    def _advance(self, n: int) -> None:
+        self.total += n
+        self.base += n
+        if self.base >= X86_WRAP:
+            self.base -= 0x80000000
+
+    def _next(self) -> bytes:
+        if self.copy:
+            piece = self.inp.some(min(self.chunk, self.copy))
+            if not piece:
+                raise CodecError("the x86 data ended inside a frame")
+            self.copy -= len(piece)
+            if not self.copy:
+                self._advance(self.frame)
+            return piece
+        if self.limit is not None and self.total >= self.limit:
+            self.done = True
+            return b""
+        if not self.chunksize:
+            size = self._word("its header", end_ok=True)
+            if size is None:
+                self.done = True
+                return b""
+            if not 4 <= size <= self.bsize:
+                raise CodecError("bad x86 header (a chunk size its method does not allow)")
+            self.chunksize = size
+        tag = self._word("a frame header", end_ok=True)
+        if tag is None:
+            self.done = True
+            return b""
+        if tag == X86_EXE:
+            dlen = self._word("a frame header")
+            elen = self._word("a frame header")
+            if dlen > self.bsize or elen > self.icap or elen < X86_HEAD:
+                raise CodecError("bad x86 code block (sizes its method does not allow)")
+            if dlen > self.cap:
+                raise CodecError("an x86 code block runs past the files' data further than "
+                                 "gitfurl decodes")
+            sizes = x86_sizes(self._need(X86_HEAD), elen)
+            streams = [self._need(n) for n in sizes]
+            out = x86_unfilter(streams, dlen, self.base, self.stop)
+            del streams
+            self._advance(dlen)
+            return out
+        if X86_TAGS <= tag < X86_TAGS + 16 and tag != X86_DATA:
+            raise CodecError("bad x86 frame (a reserved tag)")
+        if tag == X86_DATA:
+            n = self._word("a frame header")
+            if not 0 < n <= self.chunksize:
+                raise CodecError("bad x86 data frame (a length FreeArc never writes)")
+            self.copy = self.frame = n
+            return b""
+        # a raw chunk: the tag was its first four bytes
+        self.frame, self.copy = self.chunksize, self.chunksize - 4
+        if not self.copy:
+            self._advance(self.frame)
+        return tag.to_bytes(4, "little")
+
+    def _need(self, n: int) -> bytearray:
+        data = self.inp.exact(n)
+        if len(data) != n:
+            raise CodecError("the x86 data ended inside a code block")
+        return data
+
+
 def open_chain(method: farc.Method, fd: int, offset: int, compsize: int, out_size: int,
                chunk: int, stop):
     """The leftmost stage of the block's chain (read(n) gives the file data). Every decoder is
@@ -1391,6 +1797,8 @@ def open_chain(method: farc.Method, fd: int, offset: int, compsize: int, out_siz
             reader = RepStage(reader, p.budget, chunk, p.limit, stop)
         elif name == "4x4":
             reader = X4Stage(reader, p.stage.lzma, p.budget, chunk, p.limit, stop)
+        elif name == "x86":
+            reader = X86Stage(reader, p.stage.size, p.budget, chunk, p.limit, stop)
         elif name == "srep":
             reader = SrepStage(reader, p.stage.size, p.budget, chunk, p.limit, stop)
         # storing: output equals input, nothing to add

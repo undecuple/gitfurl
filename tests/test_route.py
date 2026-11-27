@@ -123,7 +123,7 @@ class ChooseRouteTests(Base):
         line = choice.line()
         self.assertIn("route: native (chosen by gitfurl)", line)
         self.assertIn("an Inno Setup installer; its payload is 2 FreeArc archives", line)
-        self.assertIn("storing, lzma, exe, delta, rep, 4x4 (with lzma inside) or srep", line)
+        self.assertIn("storing, lzma, exe, x86, delta, rep, 4x4 (with lzma inside) or srep", line)
         self.assertIn("the archives share the installer's name or its folder's", line)
         self.assertEqual(len(choice.extract.archives), 2)
 
