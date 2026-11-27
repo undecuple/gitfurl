@@ -113,6 +113,27 @@ class Base(unittest.TestCase):
 
 
 class ChooseRouteTests(Base):
+    def test_embedded_records_are_not_needed_for_native_unpack(self):
+        from gitfurl.extract import extract
+
+        files = [w.WFile("{tmp}\\records.inf", b"not a record format"),
+                 w.WFile("{tmp}\\arc.ini", b"not an INI format", flags=("do not copy",))]
+        data, _ = w.build(w.Spec(files=files, code=w.code_blob([
+            "{src}\\records.inf", "{tmp}\\arc.ini", "{src}\\data-01.bin"])))
+        self.setup.write_bytes(data)
+        self.arc("data-01.bin", ([("storing", [F("readme.txt", b"synthetic payload")])], ("",)))
+        self.make_prefix()
+        with no_process():
+            choice = self.choose()
+            self.assertEqual(choice.route, ROUTE_NATIVE, choice.line())
+            result = extract(choice.extract)
+        self.assertTrue(result.ok)
+        dest = self.prefix / "drive_c" / "Games" / "p1"
+        self.assertEqual((dest / "readme.txt").read_bytes(), b"synthetic payload")
+        self.assertEqual(sorted(p.name for p in dest.iterdir()), ["readme.txt"])
+        self.assertFalse((self.src / "records.inf").exists())
+        self.assertFalse((self.src / "arc.ini").exists())
+
     def test_inno_with_supported_archives_is_native_chosen_by_gitfurl(self):
         self.arc("NAME-01.bin", lzma_blocks())
         self.arc("NAME-02.bin", chain_blocks())

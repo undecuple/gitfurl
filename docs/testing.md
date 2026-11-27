@@ -2,6 +2,11 @@
 
 What has been run, and how to repeat it. Counts are not listed here because they go stale; run the commands.
 
+## Setup record-file warnings (2026-11-27, UTC)
+`tests/test_inno.py` and `tests/test_route.py`, synthetic setups only: a script name excused because Setup carries the file itself (a stored `{tmp}` or `dontcopy` file, any letter case, a renamed destination) when the script also uses the bare or `{tmp}` name, and explained once in the plan; a `{src}` name alone still warning when it is missing and not when it is present; external and download entries never counting as carried; unrelated `{src}` names still warning; and both native extractors writing their files without a `records.inf` or `arc.ini` beside the installer. Also read locally: the preview of an approved test setup that carries `records.inf` no longer warns about it, and still warns about its two missing archives.
+
+Not tested: running such a setup under Wine (whether its script really falls back to its own copy), and names the script builds at run time.
+
 ## Unit tests (no Wine, no installer, no network)
     nix develop -c python3 -m pytest -q      # or: PYTHONPATH=src python -m pytest -q
     ruff check .

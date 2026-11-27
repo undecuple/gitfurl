@@ -653,6 +653,70 @@ class Evaluate(unittest.TestCase):
 
 
 class Plan(Base):
+    def test_embedded_temporary_record_files(self):
+        # (code strings, warns, explained): a {src} name is excused only when the script
+        # also uses the bare or {tmp} name of a file Setup carries.
+        cases = ((["{src}\\records.inf", "records.inf"], False, True),
+                 (["{src}/records.inf", "{tmp}/records.inf"], False, True),
+                 (["records.inf"], False, False),
+                 (["{tmp}/records.inf"], False, False),
+                 (["{src}\\records.inf"], True, False))
+        for dest, flags in (("{tmp}\\ReCoRdS.inf", ()),
+                            ("{app}\\ReCoRdS.inf", ("do not copy",))):
+            for refs, warns, explained in cases:
+                with self.subTest(dest=dest, refs=refs):
+                    files = [w.WFile(dest, b"synthetic records", source="build\\other.inf",
+                                     flags=flags)]
+                    self.write(full_spec(files=files, code=w.code_blob(refs + refs)))
+                    s = inno.read_setup(self.setup)
+                    text = "\n".join(inno.summarise(s))
+                    self.assertEqual("warning: records.inf not found" in text, warns, text)
+                    self.assertEqual(text.count("ReCoRdS.inf comes with the setup itself"),
+                                     int(explained), text)
+                    self.assertFalse((self.src / "records.inf").exists())
+
+    def test_source_record_file_missing_and_present(self):
+        self.write(full_spec(code=w.code_blob(["{src}\\records.inf"])))
+        s = inno.read_setup(self.setup)
+        self.assertIn("warning: records.inf not found beside the installer",
+                      "\n".join(inno.summarise(s)))
+        (self.src / "RECORDS.inf").write_bytes(b"synthetic records")
+        self.assertNotIn("warning:", "\n".join(inno.summarise(s)))
+
+    def test_nonstored_temporary_entries_do_not_hide_missing_records(self):
+        for kind in ("external", "download"):
+            with self.subTest(kind=kind):
+                self.write(full_spec(files=[w.WFile("{tmp}\\records.inf", kind=kind)],
+                                     code=w.code_blob(["{src}\\records.inf"])))
+                text = "\n".join(inno.summarise(inno.read_setup(self.setup)))
+                self.assertIn("warning: records.inf not found beside the installer", text)
+                self.assertNotIn("comes with the setup itself", text)
+
+    def test_embedded_files_do_not_hide_unrelated_source_requirements(self):
+        files = [w.WFile("{tmp}\\records.inf", b"synthetic records"),
+                 w.WFile("{app}\\arc.ini", b"synthetic configuration"),
+                 w.WFile("{app}\\copy.inf", kind="external", source="{src}\\records.inf")]
+        self.write(full_spec(files=files, code=w.code_blob([
+            "{src}\\records.inf", "{src}\\sub\\records.inf", "{src}\\arc.ini"])))
+        s = inno.read_setup(self.setup)
+        missing = {b.name for b in inno.beside_files(s) if not b.present}
+        self.assertEqual(missing, {"records.inf", "sub\\records.inf", "arc.ini"})
+        text = "\n".join(inno.summarise(s))
+        self.assertIn("warning: records.inf", text)
+        self.assertNotIn("not needed beside the installer", text)
+
+    def test_native_inno_extraction_does_not_need_temporary_configuration(self):
+        files = [w.WFile("{app}\\readme.txt", b"synthetic payload"),
+                 w.WFile("{tmp}\\records.inf", b"not a record format"),
+                 w.WFile("{tmp}\\arc.ini", b"not an INI format", flags=("do not copy",))]
+        self.write(full_spec(files=files, code=w.code_blob([
+            "{src}\\records.inf", "{tmp}\\arc.ini"])))
+        plan = inno.plan_inno_extract(self.setup, "p1")
+        self.assertEqual(plan.file_count, 1)
+        self.assertTrue(inno.extract_inno_files(plan).ok)
+        self.assertEqual((self.dest() / "readme.txt").read_bytes(), b"synthetic payload")
+        self.assertEqual(sorted(p.name for p in self.dest().iterdir()), ["readme.txt"])
+
     def test_summary_lines(self):
         (self.src / "data-01.bin").write_bytes(b"1")
         (self.src / "data-02.bin").write_bytes(b"2")
