@@ -33,7 +33,7 @@ flowchart TB
     codecs["farc_codecs.py"]
     prefixes["prefixes.py"]
     progress["progress.py · windows.py"]
-    changes["changes.py · cleanup.py"]
+    changes["changes.py · cleanup.py · prefix_delete.py"]
   end
   subgraph shared["Shared helpers"]
     procgroup["procgroup.py"]
@@ -58,8 +58,9 @@ Arrows point from a module to the modules it imports. Modules with no gitfurl im
 ```mermaid
 flowchart LR
   app --> cli & gui
-  cli --> cleanup & desktop & detect & doctor & extract & inno & memlimit & namelinks & portable & prefixes & preflight & route & runner & safety & scan & setup_entries & timeline & unattended
-  gui --> cleanup & detect & doctor & memlimit & namelinks & portable & prefixes & preflight & route & runner & safety & scan & setup_entries & theme & timeline & unattended & viewprefs & widgets
+  cli --> cleanup & desktop & detect & doctor & extract & inno & memlimit & namelinks & portable & prefix_delete & prefixes & preflight & route & runner & safety & scan & setup_entries & timeline & unattended
+  gui --> cleanup & detect & doctor & memlimit & namelinks & portable & prefix_delete & prefixes & preflight & route & runner & safety & scan & setup_entries & theme & timeline & unattended & viewprefs & widgets
+  prefix_delete --> desktop & prefixes & procgroup & runner & timeline
   runner --> timeline
   route --> timeline
   timeline --> detect
@@ -99,6 +100,7 @@ Notes:
 | `gitfurl cli extract` | `cli._extract_command()` → `extract.plan_extract()`, `extract.extract()` | FreeArc archives beside the installer, into an existing prefix |
 | `gitfurl cli extract-inno` | `cli._extract_inno_command()` → `inno.plan_inno_extract()`, `inno.extract_inno_files()` | files Inno Setup stores for `{app}` |
 | `gitfurl cli prefix create` / `list` | `cli._prefix_command()` → `runner.runtime_env()`, `prefixes.create_prefix()`, `list_prefixes()` | Wine or Proton (`umu-run`) |
+| `gitfurl cli prefix delete` | `cli._prefix_delete_command()` → `prefix_delete.plan_delete_prefix()`, `perform_delete_prefix()` | also the library's "Delete..." (`gui.delete_clicked`, on a thread) |
 | `gitfurl cli desktop-entry` | `cli._desktop_command()` → `desktop.plan_desktop()`, `check()`, `apply()` | optional menu entry and icon in the user's data folder |
 | `gitfurl cli log` | `cli._log_command()` → `timeline.latest()`, `kept()`, `read_text()` | read-only: a prefix's latest timeline, or the list |
 | Sandbox wrapper (manual) | `tools/sandbox.sh` | bubblewrap, network off, NixOS only; not part of the app |
@@ -185,6 +187,7 @@ For `extract-inno` the source is the setup file itself: `inno.read_setup()` give
 | Extracted files | `drive_c/Games/NAME` in the prefix | `extract.extract()`, `inno.extract_inno_files()` |
 | Setup's registry values (opt-in) | `system.reg`, `user.reg` in the prefix; copies from before the change in `runner.logs_root()` (0600) | `setup_entries.apply_entries()` |
 | Setup's menu entries (opt-in, outside the prefix) | `$XDG_DATA_HOME/applications/gitfurl-NAME-*.desktop` (0644) | `setup_entries.apply_entries()` |
+| Prefix deletion log `<prefix>-<stamp>.delete.log` and timeline (mode 0600) | `runner.logs_root()` | `prefix_delete.perform_delete_prefix()` (it also removes the prefix and the menu entries gitfurl wrote for it) |
 | Inno Setup's own log (unattended) | inside the prefix | Setup itself; read by `unattended.read_report()` |
 | Nothing else | - | the read-only layer writes nothing |
 
@@ -232,6 +235,8 @@ flowchart LR
 | `tests/test_wineboot.py` | `prefixes.wineboot_env`, `with_wineboot_env`, `wineboot_line`; `--wine-addons` on `install` and `prefix create`; the window's plan line | - |
 | `tests/test_gui_stall.py` | which crash and stall notes the window keeps on screen; the 120 s stall advice | - |
 | `tests/test_desktop.py` | `desktop`, `cli desktop-entry` | - |
+| `tests/test_prefix_delete.py` | `prefix_delete` (refusals, `in_use`, counts, deletion with links, swaps, menu-entry matching, log and timeline), `cli prefix delete`, the window's plan and result texts | `setup_entries.shortcut_text` for the entries |
+| `tests/test_gui_delete_xvfb.py` | the library's "Delete..." in the real window (Cancel and OK) | `tests/gui_delete_driver.py` (`xvfb-run -a`) |
 
 Local check with the pinned versions: `ruff==0.11.13 check src tests` and `PYTHONPATH=src pytest==8.3.5 -q tests` on Python 3.11 (see [development.md](development.md)). Manual runs with real or synthetic installers go through `tools/sandbox.sh` only; they are recorded in [testing.md](testing.md).
 

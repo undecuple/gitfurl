@@ -584,12 +584,21 @@ def key_hints(page: str) -> str:
 
 
 def run_state_text(kind: str | None, stopping: bool) -> str:
-    """The footer's run state. kind is None, "prefix", "install" or "native"."""
+    """The footer's run state. kind is None, "prefix", "install", "native" or "delete"."""
     if kind is None:
         return "Idle"
     if stopping:
         return "Stopping..."
-    return {"prefix": "Creating prefix", "native": "Unpacking"}.get(kind, "Installer running")
+    return {"prefix": "Creating prefix", "native": "Unpacking",
+            "delete": "Deleting prefix"}.get(kind, "Installer running")
+
+
+def delete_result_text(plan, res) -> str:
+    """The status after a prefix was deleted: the headline, then what was removed and left."""
+    lines = res.lines(plan)
+    if res.log_path is not None:
+        lines.append(f"Local log: {res.log_path}")
+    return "\n".join([res.headline(plan), *lines])
 
 
 def run_in_thread(fn, results: queue.Queue) -> None:
@@ -974,10 +983,23 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     lib_note.pack(anchor="w", pady=(2, SP["sm"]))
     autowrap(lib_note, lib)
     make_banner(lib, (0, SP["sm"]))
+    lib_status_var = tk.StringVar()
+    lib_status = tk.Label(lib, textvariable=lib_status_var, bg=w.BG, fg=w.CYAN,
+                          font=F(T["body"]), justify="left")
+    autowrap(lib_status, lib)
+
+    def show_lib_status(*_):
+        if lib_status_var.get():
+            lib_status.pack(anchor="w", pady=(0, SP["sm"]), before=list_area)
+        else:
+            lib_status.pack_forget()
+
+    lib_status_var.trace_add("write", show_lib_status)
     list_area = tk.Frame(lib, bg=w.BG)
     list_area.pack(fill="x")
     names: list[str] = []
     cards: list = []
+    delete_buttons: dict = {}
 
     def open_prefix(name):
         if busy["on"]:
@@ -999,6 +1021,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         for child in list_area.winfo_children():
             child.destroy()
         cards.clear()
+        delete_buttons.clear()
         existing = list_prefixes()
         names[:] = sorted(set(existing) | set(extra_names))
         for i, n in enumerate(names):
@@ -1021,6 +1044,11 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             for widget in [c, c.body, r, mid, *mid.winfo_children(), *r.winfo_children()]:
                 widget.bind("<Button-1>", lambda _e, n=n: open_prefix(n), add="+")
                 widget.configure(cursor="hand2")
+            if ready:
+                db = w.PillButton(r, "Delete...", lambda n=n: delete_clicked(n), "plain",
+                                  F(T["caption"]), outer=w.PANEL, pad=(SP["md"], 4))
+                db.pack(side="right", padx=(SP["sm"], 0))
+                delete_buttons[n] = db
             last_run_button(r, n)
         refresh_plan()
 
@@ -1567,6 +1595,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                           command=choose_installer)
     file_menu.add_command(label="New prefix...", accelerator="Ctrl+N",
                           command=lambda: new_prefix())
+    file_menu.add_command(label="Delete prefix...",
+                          command=lambda: delete_clicked(selected_prefix()))
     file_menu.add_separator()
     file_menu.add_command(label="Settings", accelerator="Ctrl+,",
                           command=lambda: show("settings"))
@@ -1753,6 +1783,57 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             return
         extra_names.append(name.strip())
         open_prefix(name.strip())
+
+    def delete_clicked(name):
+        """Delete a prefix gitfurl made: plan, approval (Cancel is the default), then the
+        deletion on a thread; the library is refreshed and says what was removed."""
+        from gitfurl.prefix_delete import DeleteRefused, plan_delete_prefix, window_text
+
+        if busy["on"]:
+            messagebox.showerror("Delete prefix", "Something is running in this window. Wait "
+                                 "until it ends. Nothing was deleted.")
+            return
+        if running_as_root():
+            messagebox.showerror("Not as root", f"{ROOT_MESSAGE} Nothing was deleted.")
+            return
+        try:
+            plan = plan_delete_prefix(name)
+        except DeleteRefused as exc:
+            messagebox.showerror("Cannot delete this prefix", f"{exc}.\n\nNothing was deleted.")
+            return
+        if not messagebox.askokcancel("Delete prefix?", window_text(plan), icon="warning",
+                                      default="cancel"):
+            return
+        from gitfurl.prefix_delete import perform_delete_prefix
+
+        delete_results: queue.Queue = queue.Queue()
+        start_busy(f"Deleting the prefix {name}...", "delete")
+        lib_status_var.set(f"Deleting the prefix {name}...")
+        lib_status.configure(fg=w.CYAN)
+        run_in_thread(lambda: perform_delete_prefix(plan, how="window"), delete_results)
+
+        def wait():
+            try:
+                state, value = delete_results.get_nowait()
+            except queue.Empty:
+                root.after(200, wait)
+                return
+            end_busy()
+            if state == "error":
+                text = (f"Not deleted: {value}. Nothing was deleted."
+                        if isinstance(value, DeleteRefused) else f"Failed: {value}")
+                ok = False
+            else:
+                text, ok = delete_result_text(plan, value), value.folder_gone and not value.left
+            if name in extra_names and not (prefixes_root() / name).is_dir():
+                extra_names.remove(name)
+            lib_status_var.set(text)
+            lib_status.configure(fg=w.CYAN if ok else w.AMBER)
+            status_var.set(text)
+            status_label.configure(fg=w.CYAN if ok else w.AMBER)
+            refresh_list()
+
+        root.after(200, wait)
 
     def set_banners(wine_missing: bool):
         for slot, card in banners:
@@ -2351,6 +2432,9 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                     "timeline_show": timeline_show,
                     "open_last_run": open_last_run,
                     "refresh_list": refresh_list,
+                    "delete_clicked": delete_clicked,
+                    "delete_buttons": delete_buttons,
+                    "lib_status_var": lib_status_var,
                 }
                 driver(root, ui)
             except BaseException:  # noqa: BLE001 - reported on stderr, the exit status says it
