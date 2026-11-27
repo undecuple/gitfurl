@@ -137,7 +137,7 @@ def build_parser() -> argparse.ArgumentParser:
     inst.add_argument("--yes", action="store_true", help="approve the run without prompting")
     ext = sub.add_parser(
         "extract", help="files only: extract FreeArc archives (storing, lzma, exe, x86, delta, "
-                        "rep, 4x4 and srep) into an existing prefix without running the installer. "
+                        "rep, 4x4, srep and rolz) into an existing prefix without running the installer. "
                         "'install' picks this route itself when it can")
     ext.add_argument("installer", help="the installer; FreeArc archives beside it are read")
     ext.add_argument("--prefix", required=True, help="name of an existing dedicated prefix; "
