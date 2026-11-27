@@ -41,6 +41,7 @@ from gitfurl.runner import (
 )
 from gitfurl.safety import ROOT_MESSAGE, running_as_root
 from gitfurl.scan import DEFAULT_TIMEOUT_S as SCAN_TIMEOUT_S
+from gitfurl.timeline import approval_entry
 
 DEFAULT_PREFIX = "default"
 
@@ -97,6 +98,9 @@ def build_parser() -> argparse.ArgumentParser:
                            "a later quiet period gets a note too. Off by default. It never "
                            "stops anything")
     inst.add_argument("--progress-interval", type=float, default=10.0, metavar="SECONDS")
+    inst.add_argument("--timeline", action="store_true",
+                      help="also print the run's timeline rows as they come (what each step "
+                           "did and why); the timeline is saved next to the log either way")
     inst.add_argument("--detailed-log", action="store_true",
                       help="also write a JSON-lines event log next to the log")
     inst.add_argument("--wine-debug", metavar="CHANNELS",
@@ -161,6 +165,10 @@ def build_parser() -> argparse.ArgumentParser:
                            "are left)")
     desk.add_argument("--dry-run", action="store_true", help="show the plan; change nothing")
     desk.add_argument("--yes", action="store_true", help="approve without prompting")
+    tlog = sub.add_parser("log", help="print the timeline of a prefix's last run (read-only)")
+    tlog.add_argument("prefix", nargs="?", help="the prefix name")
+    tlog.add_argument("--all", action="store_true",
+                      help="list the timelines kept (for this prefix, or for every prefix)")
     return p
 
 
@@ -177,6 +185,8 @@ def main(argv: list[str] | None = None) -> int:
         return _extract_inno_command(args)
     if args.command == "desktop-entry":
         return _desktop_command(args)
+    if args.command == "log":
+        return _log_command(args)
     try:
         installer = validate_installer(args.installer)
         det = detect(installer)  # once; passed on
@@ -600,13 +610,15 @@ def _real_install(args, det, choice) -> int:
     print("Ctrl-C stops this run gracefully (see docs/user-guide.md for what it leaves behind).")
     if args.cleanup != "none":
         print("After the installer exits with status 0, " + clean.describe())
+    tl = _new_timeline(args, det, choice, plan.prefix, not missing, args.create_prefix)
     if not args.yes:
         refused = _confirm("Type 'yes' to run the installer: ", "Nothing was run.")
         if refused is not None:
             return refused
+    approval_entry(tl, "yes" if args.yes else "typed")
     control = RunControl()
     try:
-        options = RunOptions(
+        options = RunOptions(timeline=tl,
             on_progress=(lambda smp: print(f"[progress] {smp.line()}", flush=True))
             if args.progress else None,
             progress_interval=args.progress_interval,
@@ -618,12 +630,16 @@ def _real_install(args, det, choice) -> int:
             plan, wine, args.create_prefix, args.show_changes or args.find_exe, options=options)
         status, log_path, changes = result
     except MemoryLimitError as exc:
+        _end_timeline(tl, args.prefix, "Not run: the memory limit could not be used", str(exc))
         print(f"error: {exc}. {MEMORY_OFF_HINT}", file=sys.stderr)
         return 2
     except (RuntimeError, ValueError) as exc:
+        _end_timeline(tl, args.prefix, "Failed", str(exc))
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt as exc:
+        _end_timeline(tl, args.prefix, "Interrupted (Ctrl-C)",
+                      "the run was not completed; see the log")
         if getattr(exc, "scan_interrupted", False):
             print("interrupted during the ClamAV scan. " + "; ".join(exc.notes) + ". Nothing "
                   "was run or created.", file=sys.stderr)
@@ -643,9 +659,13 @@ def _real_install(args, det, choice) -> int:
             print(f"note: {note}")
         if args.cleanup != "none":
             print("cleanup: skipped, the run was cancelled")
+            tl.add("cleanup", "Cleanup skipped", "the run was cancelled")
+        _end_timeline(tl, args.prefix, "Cancelled.", "the run was stopped, not completed")
         if args.detailed_log:
             print(f"event log: {Path(log_path).with_suffix('.events.jsonl')}")
         print(f"local log: {log_path} (may contain your username and local paths)")
+        if tl.path is not None:
+            print(f"timeline: {tl.path}")
         sys.stdout.flush()
         return CANCELLED_STATUS
     print(f"installer exited with status {status}")
@@ -657,8 +677,13 @@ def _real_install(args, det, choice) -> int:
             print(f"cleanup: deleted {deleted} file(s)")
             for item in problems:
                 print(f"cleanup problem: {item}", file=sys.stderr)
+            _cleanup_entry(tl, deleted, problems)
         else:
             print("cleanup: skipped, the installer did not exit with status 0")
+            tl.add("cleanup", "Cleanup skipped", "the installer did not exit with status 0")
+    _end_timeline(tl, args.prefix, f"Installer exited with status {status}",
+                  "0 usually means it finished" if status == 0 else
+                  "a non-zero status does not say why; read the log")
     if changes is not None:
         if args.show_changes:
             print(changes.describe())
@@ -670,6 +695,8 @@ def _real_install(args, det, choice) -> int:
     if args.detailed_log:
         print(f"event log: {Path(log_path).with_suffix('.events.jsonl')}")
     print(f"local log: {log_path} (may contain your username and local paths)")
+    if tl.path is not None:
+        print(f"timeline: {tl.path}")
     if status != 0:
         print("A non-zero status does not by itself say why it failed; read the log.")
     sys.stdout.flush()
@@ -692,13 +719,7 @@ def _native_unused(args) -> list[str]:
 def _native_install(args, installer, det, choice) -> int:
     """The native route: Setup is not run; gitfurl unpacks the archives itself after one
     approval of the whole plan (scan, prefix creation, unpack, listings, cleanup)."""
-    from gitfurl.extract import ExtractRefused
-    from gitfurl.route import (
-        NativeInstallPlan,
-        native_prefix_create,
-        native_stops,
-        run_native,
-    )
+    from gitfurl.route import NativeInstallPlan, native_stops
 
     dry = args.dry_run
     if not dry and running_as_root():
@@ -801,10 +822,23 @@ def _native_install(args, installer, det, choice) -> int:
               file=sys.stderr)
         return 2
     print("Ctrl-C stops the unpack; files already written are kept and nothing is deleted.")
+    tl = _new_timeline(args, det, choice, xplan.prefix, not missing, args.create_prefix,
+                       xplan.target)
     if not args.yes:
         refused = _confirm("Type 'yes' to unpack the files: ", "Nothing was run or written.")
         if refused is not None:
             return refused
+    approval_entry(tl, "yes" if args.yes else "typed")
+    status = _native_steps(args, plan, xplan, scan_plan, clean, create, tl)
+    _end_timeline(tl, prefix_name, NATIVE_HEADLINES.get(status, "Not unpacked."))
+    return status
+
+
+def _native_steps(args, plan, xplan, scan_plan, clean, create, tl) -> int:
+    """The approved native run: scan, prefix creation, unpack, cleanup."""
+    from gitfurl.extract import ExtractRefused
+    from gitfurl.route import native_prefix_create, run_native
+
     scan_summary = None
     if scan_plan is not None:
         from gitfurl.scan import decide, run_scan
@@ -816,10 +850,14 @@ def _native_install(args, installer, det, choice) -> int:
                   file=sys.stderr)
             return 130
         if not proceed:
+            tl.add("note", "The ClamAV scan stopped the run", scan_summary)
             print(f"error: {scan_summary}", file=sys.stderr)
             return 1
+        tl.add("note", "ClamAV scan passed", scan_summary)
         print(f"[note] {scan_summary}", flush=True)
     if create:
+        tl.add("prefix", "Creating the prefix with wineboot",
+               "it does not exist yet; Wine's Mono and Gecko dialogs are off for this command")
         from gitfurl.memlimit import MemoryLimitError as _MemErr
 
         try:
@@ -841,9 +879,12 @@ def _native_install(args, installer, det, choice) -> int:
             print("Nothing was unpacked.", file=sys.stderr)
             return 1
         if status != 0:
+            tl.add("prefix", f"Creating the prefix failed (wine exited {status})",
+                   "so nothing was unpacked")
             print(f"error: creating the prefix failed (wine exited {status}). Nothing was "
                   "unpacked.", file=sys.stderr)
             return 1
+        tl.add("prefix", "Prefix created", "wineboot exited with status 0")
         problem = xplan.problem()
         if problem:
             print(f"error: {problem}. The prefix was created; nothing was written in it.",
@@ -854,8 +895,9 @@ def _native_install(args, installer, det, choice) -> int:
             plan, on_line=(lambda text: print(f"[progress] {text}", flush=True))
             if args.progress else None,
             detailed_log=args.detailed_log, progress_interval=args.progress_interval,
-            scan_summary=scan_summary)
+            scan_summary=scan_summary, timeline=tl)
     except ExtractRefused as exc:
+        tl.add("note", "The unpack did not start", f"{exc}. {exc.outcome()}")
         print(f"error: {exc}. {exc.outcome()}", file=sys.stderr)
         return 1
     except KeyboardInterrupt as exc:
@@ -875,10 +917,82 @@ def _native_install(args, installer, det, choice) -> int:
             print(f"cleanup: deleted {deleted} file(s)")
             for item in problems:
                 print(f"cleanup problem: {item}", file=sys.stderr)
+            _cleanup_entry(tl, deleted, problems)
         else:
             print("cleanup: skipped, the unpack did not complete")
+            tl.add("cleanup", "Cleanup skipped", "the unpack did not complete")
     if res.events_path is not None:
         print(f"event log: {res.events_path}")
     print(f"local log: {res.log_path} (may contain your username and local paths)")
+    if tl.path is not None:
+        print(f"timeline: {tl.path}")
     sys.stdout.flush()
     return res.status
+
+
+# ---- the timeline (gitfurl.timeline) --------------------------------------------------------
+
+NATIVE_HEADLINES = {0: "Unpacked (Setup was not run).",
+                    130: "Stopped. Files already written are kept; nothing was deleted.",
+                    1: "The unpack ended with an error, or did not start."}
+
+
+def _new_timeline(args, det, choice, prefix: Path, exists: bool, create: bool, target=None):
+    from gitfurl.timeline import Timeline, plan_entries
+
+    tl = Timeline(on_line=(lambda line: print(f"[timeline] {line}", flush=True))
+                  if getattr(args, "timeline", False) else None)
+    plan_entries(tl, det, choice, prefix, exists, create, target)
+    return tl
+
+
+def _end_timeline(tl, prefix_name: str, what: str, why: str = "") -> None:
+    """The outcome row; the file is made now when the run made no log of its own."""
+    tl.save(logs_root(), prefix_name)
+    tl.end(what, why)
+
+
+def _cleanup_entry(tl, deleted: int, problems) -> None:
+    tl.add("cleanup", f"Cleanup: deleted {deleted} file(s)"
+           + (f", {len(problems)} problem(s)" if problems else ""),
+           "the run completed and you chose to delete the installer afterwards")
+
+
+def _log_command(args) -> int:
+    """Print a prefix's latest timeline, or list the timelines kept. Reads files only."""
+    from gitfurl.timeline import kept, latest, read_text
+
+    if args.prefix is not None:
+        try:
+            validate_prefix_name(args.prefix)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+    root = logs_root()
+    if args.all:
+        found = kept(root, args.prefix)
+        if not found:
+            print(f"no timelines kept in {root}" + (f" for {args.prefix}" if args.prefix else ""))
+            return 0
+        for path in found:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                continue
+            print(f"{path}  ({size} bytes)")
+        return 0
+    if args.prefix is None:
+        print("error: name a prefix (or use --all to list every timeline kept)", file=sys.stderr)
+        return 1
+    path = latest(root, args.prefix)
+    if path is None:
+        print(f"no timeline for {args.prefix} in {root} (a run writes one next to its log)")
+        return 1
+    try:
+        text = read_text(path)
+    except OSError as exc:
+        print(f"error: {path} could not be read ({exc.strerror or exc})", file=sys.stderr)
+        return 1
+    print(f"timeline: {path}")
+    print(text)
+    return 0

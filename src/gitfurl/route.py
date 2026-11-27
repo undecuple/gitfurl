@@ -432,11 +432,13 @@ def _rate_text(done: int, total: int, elapsed: float) -> str:
 def run_native(plan: NativeInstallPlan, cancel=None, on_line=None, detailed_log: bool = False,
                progress_interval: float = 10.0, env: dict[str, str] | None = None,
                scan_summary: str | None = None, clock=time.monotonic,
-               on_progress=None) -> NativeResult:
+               on_progress=None, timeline=None) -> NativeResult:
     """Unpack an approved native plan. The prefix must exist. Starts no process.
 
     `on_line(text)` receives throttled progress lines and `on_progress(done, total, elapsed)`
-    the same samples as numbers (both on this thread; there is no progress thread). Raises
+    the same samples as numbers (both on this thread; there is no progress thread).
+    `timeline` (a gitfurl.timeline.Timeline) gets a row for each step and is saved next to
+    the log. Raises
     ExtractRefused before anything is written (nothing was created then
     except, rarely, empty folders the refusal lists); afterwards every problem is in the
     result. A Ctrl-C while files are written ends the unpack (status 130); files already
@@ -481,6 +483,7 @@ def run_native(plan: NativeInstallPlan, cancel=None, on_line=None, detailed_log:
             on_line(_rate_text(done, total, now - t0))
         if on_progress is not None:
             on_progress(done, total, now - t0)
+        _tl_unpack_progress(timeline, done, total, now - t0)
 
     result = None
     try:
@@ -497,8 +500,11 @@ def run_native(plan: NativeInstallPlan, cancel=None, on_line=None, detailed_log:
             event("start", route=ROUTE_NATIVE, prefix=str(plan.prefix),
                   destination=str(xplan.dest), archives=[ap.path.name for ap in xplan.archives],
                   total_bytes=xplan.total_size, files=xplan.file_count)
+            on_event = _tl_unpack_start(timeline, xplan, log_dir / f"{plan.prefix_name}-{stamp}",
+                                        log_path)
             try:
-                result = extract(xplan, cancel, progress)
+                result = extract(xplan, cancel, progress,
+                                 **({"on_event": on_event} if on_event else {}))
             except BaseException as exc:
                 started = isinstance(exc, KeyboardInterrupt) and os.path.lexists(xplan.dest)
                 if started:
@@ -521,6 +527,7 @@ def run_native(plan: NativeInstallPlan, cancel=None, on_line=None, detailed_log:
 
             try:
                 status = 130 if result.stopped else 0 if result.ok else 1
+                _tl_unpack_end(timeline, xplan, result)
                 lines = list(result.lines())
                 if result.ok:
                     lines.extend(listings(xplan, plan.prefix_name))
@@ -548,6 +555,91 @@ def run_native(plan: NativeInstallPlan, cancel=None, on_line=None, detailed_log:
         if events:
             events.close()
     return NativeResult(status, result, log_path, events_path, lines)
+
+
+# ---- timeline rows for the unpack (gitfurl.timeline); nothing without a timeline -----------
+
+def _tl_unpack_start(tl, xplan, stem: Path, log_path: Path):
+    """Attach the timeline file beside the log, add the start rows, and return the
+    on_event handler for extract() (None without a timeline)."""
+    if tl is None:
+        return None
+    from gitfurl.timeline import SUFFIX, shown, size_text
+
+    tl.log_path = log_path
+    tl.attach(Path(f"{stem}{SUFFIX}"))
+    n = len(xplan.archives)
+    tl.add("files", f"Destination: {xplan.target}",
+           f"a new folder in the prefix ({shown(str(xplan.dest), 200)}); it must not exist "
+           "yet, and no file is overwritten")
+    tl.add("start", "Started the unpack with gitfurl's own reader",
+           f"{n} archive{'s' if n != 1 else ''}, {xplan.file_count} files, "
+           f"{size_text(xplan.total_size)} to write; no Windows program runs")
+    run = {"key": None}
+
+    def on_event(kind, ap, *details):
+        name = shown(ap.path.name, 80)
+        blocks = len(ap.archive.blocks)
+        if kind == "archive":
+            tl.add("archive", f"Opened {name}: {len(ap.files)} files in {blocks} data "
+                   f"block{'s' if blocks != 1 else ''}",
+                   "its index was read again and matches the plan")
+            run["key"] = None
+            return
+        k, blk, files = details
+        kind_text = blk.method.kind  # gitfurl's own stage names, never the archive's text
+        key = run["key"]
+        if key is None or key[1] != ap.path.name or key[2] != kind_text:
+            run["key"] = key = ("blocks", ap.path.name, kind_text, k)
+            run["files"] = 0
+        run["files"] += files
+        first = key[3] + 1
+        span = f"Data block {k + 1}" if first == k + 1 else f"Data blocks {first}-{k + 1}"
+        many = "s" if run["files"] != 1 else ""
+        tl.add("archive", f"{span} of {blocks} in {name}: {kind_text}",
+               f"{run['files']} file{many}; decoded by gitfurl's own decoders", fold=key)
+
+    return on_event
+
+
+def _tl_unpack_progress(tl, done: int, total: int, elapsed: float) -> None:
+    if tl is None:
+        return
+    from gitfurl.timeline import progress_text, size_text
+
+    rate = done / elapsed if elapsed > 0 else 0
+    tl.progress(progress_text("Unpacking", done, total),
+                f"{size_text(int(rate))}/s" if rate else "")
+
+
+def _tl_unpack_end(tl, xplan, result) -> None:
+    if tl is None:
+        return
+    from gitfurl.timeline import size_text
+
+    tl.add("files", f"{result.files} files written ({size_text(result.bytes_written)}), "
+           "each one CRC-32 checked",
+           "every CRC-32 matched the archive's index" if not result.crc_errors else
+           "the files that did not match were removed again")
+    if result.crc_errors:
+        tl.add("skip", f"{len(result.crc_errors)} files removed again",
+               "their CRC-32 did not match the archive's index")
+    if result.not_removed:
+        tl.add("skip", f"{len(result.not_removed)} damaged files could not be removed",
+               "they failed the CRC-32 check; see the log")
+    if result.incomplete:
+        tl.add("skip", "One file was left incomplete (kept)",
+               "the unpack ended while it was being written")
+    if result.error:
+        tl.add("note", "The unpack ended with an error", result.error)
+    if result.stopped:
+        tl.add("note", "The unpack stopped", "Stop was asked for; files already written are "
+               "kept and nothing was deleted")
+    if result.ok:
+        redist = sum(1 for parts, name in written_files(xplan) if is_redist(parts, name))
+        if redist:
+            tl.add("skip", f"{redist} redistributable installer{'s' if redist != 1 else ''} "
+                   "unpacked but not run", "gitfurl never runs what it unpacks; they are listed")
 
 
 def native_prefix_create(plan: NativeInstallPlan, memory_limit: bool,
@@ -656,7 +748,8 @@ def perform_native(plan: NativeInstallPlan, control: NativeControl, *, memory_li
                    scan_plan=None, scan_result=None, allow_scan_hit: bool = False,
                    on_progress=None, on_note=None, detailed_log: bool = False,
                    progress_interval: float = 3.0, env: dict[str, str] | None = None,
-                   create=native_prefix_create, run=run_native) -> NativeOutcome:
+                   create=native_prefix_create, run=run_native,
+                   timeline=None) -> NativeOutcome:
     """Run an approved native plan, in the command line's order: the ClamAV scan (if any),
     the prefix creation (if asked), then the unpack. Meant for a worker thread.
 
@@ -681,7 +774,11 @@ def perform_native(plan: NativeInstallPlan, control: NativeControl, *, memory_li
                                       "created.")
         proceed, summary = decide(result, allow_scan_hit)
         if not proceed:
+            if timeline is not None:
+                timeline.add("note", "The ClamAV scan stopped the run", summary)
             raise ScanBlocked(summary, result)
+        if timeline is not None:
+            timeline.add("note", "ClamAV scan passed", summary)
         if on_note is not None:
             on_note(summary)
     xplan = plan.extract
@@ -689,6 +786,10 @@ def perform_native(plan: NativeInstallPlan, control: NativeControl, *, memory_li
         if control.cancelled:
             return NativeOutcome(130, "Stopped before the prefix was created. Nothing was "
                                       "unpacked.", scan_summary=summary)
+        if timeline is not None:
+            timeline.add("prefix", "Creating the prefix with wineboot",
+                         "it does not exist yet; Wine's Mono and Gecko dialogs are off for "
+                         "this command, so it needs no answer")
         try:
             status = create(plan, memory_limit, env, should_stop=lambda: control.cancelled)
         except MemoryLimitError as exc:
@@ -705,6 +806,8 @@ def perform_native(plan: NativeInstallPlan, control: NativeControl, *, memory_li
         if status != 0:
             return NativeOutcome(1, f"creating the prefix failed (wine exited {status}). "
                                     "Nothing was unpacked.", scan_summary=summary)
+        if timeline is not None:
+            timeline.add("prefix", "Prefix created", "wineboot exited with status 0")
         problem = xplan.problem()
         if problem:
             return NativeOutcome(1, f"{problem}. The prefix was created; nothing was written "
@@ -716,7 +819,8 @@ def perform_native(plan: NativeInstallPlan, control: NativeControl, *, memory_li
     try:
         res = run(plan, cancel=control.event, detailed_log=detailed_log,
                   progress_interval=progress_interval, env=env, scan_summary=summary,
-                  on_progress=on_progress)
+                  on_progress=on_progress,
+                  **({"timeline": timeline} if timeline is not None else {}))
     except ExtractRefused as exc:
         if exc.stopped:
             return NativeOutcome(130, "Stopped before the unpack. Nothing was unpacked.",

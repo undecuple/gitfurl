@@ -52,6 +52,9 @@ def scenario(root, ui, name):
     rows = ui["plan_checklist_rows"]()
     assert "not needed" in rows["runtime"][1], rows
     if name == "unpack":
+        settle(root)
+        preview = ui["timeline_box"].get("1.0", "end")
+        assert "Route: native" in preview and "Nothing has run yet" in preview, preview
         answers["Unpack this installer?"] = True
         ui["run_clicked"]()
         assert dialogs[-1] == "Unpack this installer?", dialogs
@@ -70,6 +73,7 @@ def scenario(root, ui, name):
         assert ui["run_btn"]._state == "disabled"
         assert [ui["menubar"].entrycget(i, "label") for i in (0, 1, 2)] == [
             "File", "View", "Help"], "menu bar"
+        check_timeline(root, ui)
     elif name == "stop":
         answers["Unpack this installer?"] = True
         ui["run_clicked"]()
@@ -80,6 +84,10 @@ def scenario(root, ui, name):
         assert dialogs[-1] == "Stop the unpack?", dialogs
         pump(root, lambda: "Stopped." in texts(), "the stopped result", 30)
         assert "Files already written are kept" in texts(), texts()
+        settle(root)
+        shown = ui["timeline_box"].get("1.0", "end")
+        assert "You pressed Stop" in shown, shown
+        assert shown.strip().splitlines()[-1].split("  ", 1)[1].startswith("Stopped."), shown
     elif name == "setup_instead":
         ui["setup_var"].set(True)
         ui["refresh_plan"]()
@@ -100,6 +108,33 @@ def scenario(root, ui, name):
     else:
         raise AssertionError(f"unknown scenario {name}")
     assert not errors, errors
+
+
+def check_timeline(root, ui):
+    """The Timeline panel after the unpack: the route and its reason, every step, and the
+    done line last; then the library's Last run shows the same saved timeline."""
+    settle(root)
+    shown = ui["timeline_box"].get("1.0", "end").strip()
+    assert "Route: native (gitfurl unpacks the archives itself; gitfurl chose it)" in shown, shown
+    assert "gitfurl can unpack them itself" in shown, shown  # the route's reason
+    assert "You approved the plan" in shown, shown
+    assert "Opened NAME-01.bin" in shown and "files written" in shown, shown
+    last = shown.splitlines()[-1]
+    assert last.split("  ", 1)[1].startswith("Unpacked (Setup was not run)."), last
+    tl = ui["timeline"]["tl"]
+    assert tl.ended and tl.path is not None and tl.path.stat().st_mode & 0o777 == 0o600
+    ui["show"]("library")
+    settle(root)
+    assert "default" in ui["timeline"]["buttons"], ui["timeline"]["buttons"]
+    ui["timeline"]["buttons"]["default"]._click(None)
+    settle(root)
+    win, box = ui["timeline"]["last_run"]["default"]
+    saved = box.get("1.0", "end")
+    assert "Route: native" in saved and "Unpacked (Setup was not run)." in saved, saved
+    assert str(box.cget("state")) == "disabled"  # read-only
+    win.destroy()
+    ui["show"]("details")
+    settle(root)
 
 
 def main() -> int:

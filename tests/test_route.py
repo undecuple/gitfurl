@@ -618,7 +618,7 @@ class NativeCliTests(Base):
 
         real = ex.extract
 
-        def late(plan, cancel=None, on_progress=None):
+        def late(plan, cancel=None, on_progress=None, on_event=None):
             real(plan, cancel, on_progress)
             raise KeyboardInterrupt
 
@@ -663,7 +663,7 @@ class NativeCliTests(Base):
 
         real = ex.extract
 
-        def interrupting(plan, cancel=None, on_progress=None):
+        def interrupting(plan, cancel=None, on_progress=None, on_event=None):
             def hook(done, total):
                 raise KeyboardInterrupt
             return real(plan, cancel, hook)

@@ -157,9 +157,12 @@ class InstallRunTests(unittest.TestCase):
                     mock.patch("shutil.which", return_value="/x/wine"), \
                     patched_runs(done) as run:
                 code, out, _ = run_cli("install", "--no-memory-limit", str(f), "--prefix", "p1", "--yes")
-            logs = list((Path(state) / "gitfurl" / "logs").iterdir())
+            logs = list((Path(state) / "gitfurl" / "logs").glob("*.log"))
             self.assertEqual(len(logs), 1)
             self.assertEqual(logs[0].stat().st_mode & 0o777, 0o600)
+            timeline = logs[0].with_name(logs[0].name[:-4] + ".timeline.txt")
+            self.assertEqual(timeline.stat().st_mode & 0o777, 0o600)
+            self.assertIn("Installer exited with status 3", timeline.read_text())
             text = logs[0].read_text()
             self.assertIn("exit status 3", text)
             self.assertNotIn("hunter2", text)
@@ -742,9 +745,10 @@ class ProgressTests(unittest.TestCase):
                     mock.patch("shutil.which", return_value="/x/wine"), \
                     patched_runs(done):
                 _, out, _ = run_cli("install", "--no-memory-limit", str(f), "--prefix", "p1", "--yes")
-            names = [p.name for p in (Path(state) / "gitfurl" / "logs").iterdir()]
-        self.assertEqual(len(names), 1)
+            names = sorted(p.name for p in (Path(state) / "gitfurl" / "logs").iterdir())
+        self.assertEqual(len(names), 2)  # the log and the timeline (always on); no event log
         self.assertTrue(names[0].endswith(".log"))
+        self.assertTrue(names[1].endswith(".timeline.txt"))
         self.assertNotIn("[progress]", out)
 
     def test_cli_rejects_bad_wine_debug(self):
