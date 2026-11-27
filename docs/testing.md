@@ -368,6 +368,12 @@ Not tested: a real Setup under Wine or Proton finding its archives through the l
 - Run on 2026-11-27 (UTC), on `feat/native-registry`: `ruff==0.11.13` (no findings) and the full suite with `pytest==8.3.5`, window tests under `xvfb-run -a`, at `nice -n 19`: Python 3.11, 19:05-19:09, 918 passed, 4 skipped; Python 3.12, 19:09-19:13, 918 passed, 4 skipped (the skips are the x86 vector tests that need `GITFURL_X86_VECTORS`).
 - Not tested: a prefix made by real Wine, a real Wine server or a real second gitfurl process being detected (only injected checks and a fake `/proc`), a real mount inside a prefix (only written mount tables), a race outside the one swap the test makes, very large prefixes (the count stops at 1,000,000 entries), and File > Delete prefix... in the real window (only the library's button was driven).
 
+## FreeArc index CRC opt-in (2026-11-27, UTC)
+
+Synthetic fixtures only, from `tests/farc_writer.py`; temporary prefixes are plain folders. `tests/test_farc_bad_crc.py` covers default refusals, index and footer CRC exceptions, warning values and file CRC removal, damaged lengths, offsets and varints, footer candidate precedence, the index recheck, CLI parsing and dry runs, declined approval, native logs and timeline rows (mode 0600), interruption after unpack, and the window's route helper.
+
+Not tested: a real archive with a bad index CRC (the approved test archive is to be tried next, in the sandbox), real installers, Wine, and the window's switch on a real display (only its route helper was called).
+
 ## The single-file build (release workflow)
 `release.yml` builds one Linux program with PyInstaller. Checked on 2026-11-16 by running the workflow by hand (it builds and uploads only):
 - The checksum file matches. `cli --version` prints the release version (1.0.0 for that build) and `cli doctor` runs. The 1.1.0, 1.2.0, 1.2.1, 1.3.0 and 1.4.0 builds have not been checked this way yet.

@@ -144,6 +144,10 @@ def build_parser() -> argparse.ArgumentParser:
                      "files go to C:\\Games\\PREFIX in it")
     ext.add_argument("--dry-run", action="store_true", help="show the plan and change nothing")
     ext.add_argument("--yes", action="store_true", help="approve without prompting")
+    for command in (inst, ext):
+        command.add_argument("--accept-bad-index-crc", action="store_true",
+                             help="read FreeArc indexes with a bad index or footer CRC, with "
+                                  "a warning; each file's CRC is still checked. Default: off")
     ixt = sub.add_parser(
         "extract-inno", help="extract the files an Inno Setup installer holds for its program "
                              "folder into a prefix, without running the installer")
@@ -211,7 +215,8 @@ def main(argv: list[str] | None = None) -> int:
         det = detect(installer)  # once; passed on
         links = propose_for(installer) if args.link_names else None
         choice = choose_route(installer, args.prefix or DEFAULT_PREFIX, det, args.route,
-                              setup_options=_native_unused(args), links=links)
+                              setup_options=_native_unused(args), links=links,
+                              accept_bad_index_crc=args.accept_bad_index_crc)
     except ValueError as exc:
         print(f"error: {exc}. Nothing was run.", file=sys.stderr)
         return 1
@@ -517,7 +522,8 @@ def _extract_command(args) -> int:
         return 1
     try:
         installer = validate_installer(args.installer)
-        plan = plan_extract(installer, args.prefix)
+        plan = plan_extract(installer, args.prefix,
+                            accept_bad_index_crc=args.accept_bad_index_crc)
     except ValueError as exc:  # ExtractRefused is a ValueError
         print(f"error: {exc}. Nothing was written.", file=sys.stderr)
         return 1
@@ -540,7 +546,27 @@ def _extract_command(args) -> int:
         if refused is not None:
             return refused
     try:
-        result = extract(plan)
+        if plan.warnings:
+            from gitfurl.route import NativeInstallPlan, RouteChoice, run_native
+            from gitfurl.timeline import Timeline, approval_entry, archive_warning_entries
+
+            tl = Timeline()
+            archive_warning_entries(tl, plan)
+            approval_entry(tl, "yes" if args.yes else "typed")
+            choice = RouteChoice("native", "you", (), plan)
+            native = NativeInstallPlan(installer, args.prefix, plan.prefix, choice, False)
+            try:
+                run = run_native(native, timeline=tl)
+                tl.end("Extraction ended", "complete" if run.status == 0 else
+                       "stopped" if run.status == 130 else "see the log for errors")
+            finally:
+                tl.close()
+            print(f"log: {run.log_path}")
+            for line in run.lines:
+                print(line)
+            return run.status
+        else:
+            result = extract(plan)
     except ExtractRefused as exc:
         print(f"error: {exc}. {exc.outcome()}", file=sys.stderr)
         return 1

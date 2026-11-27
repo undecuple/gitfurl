@@ -13,7 +13,8 @@ creates anything, never runs anything, and never follows a symlink. Only the ind
 is decompressed (when it is stored with `lzma`), and only up to MAX_CONTROL_BLOCK bytes.
 
 What it refuses (FarcError): anything that is not a regular file; a file with no footer in
-its last FOOTER_SCAN bytes; an index whose CRC-32 does not match; an index that is
+its last FOOTER_SCAN bytes; an index whose CRC-32 does not match (unless explicitly
+accepted with a warning); an index that is
 encrypted or stored with a method other than a single `storing` or `lzma`; counts and sizes over
 the caps below (bytes read, bytes decoded, name length, and the total length of the
 folder-and-name paths, which a shared folder name could otherwise multiply); and offsets,
@@ -152,6 +153,7 @@ class Archive:
     locked: bool
     blocks: list[DataBlock] = field(default_factory=list)
     entries: list[Entry] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
     @property
     def total_size(self) -> int:
@@ -475,8 +477,11 @@ def _pread(fd: int, size: int, pos: int, n: int) -> bytes:
 
 
 class _Reader:
-    def __init__(self, fd: int, size: int, index_limit: int | None = None):
+    def __init__(self, fd: int, size: int, index_limit: int | None = None, *,
+                 accept_bad_index_crc: bool = False):
         self.fd, self.size = fd, size
+        self.accept_bad_index_crc = accept_bad_index_crc
+        self.warnings: list[str] = []
         # Caps are read here, not at import, so a caller (or a test) can lower them.
         self.index_limit = MAX_INDEX_TOTAL if index_limit is None \
             else min(index_limit, MAX_INDEX_TOTAL)
@@ -517,9 +522,23 @@ class _Reader:
             if compsize != origsize:
                 raise FarcError("archive structure damaged (index sizes do not agree)")
             data = raw
-        if len(data) != origsize or zlib.crc32(data) != crc:
+        if len(data) != origsize:
             raise FarcError("archive structure damaged (index failed its CRC check)")
+        self.check_crc("index", crc, zlib.crc32(data))
         return _Buf(data)
+
+
+    def check_crc(self, what: str, stored: int, computed: int) -> None:
+        if stored == computed:
+            return
+        if not self.accept_bad_index_crc:
+            raise FarcError(f"archive structure damaged ({what} failed its CRC check); "
+                            "use --accept-bad-index-crc to read it anyway")
+        self.warnings.append(
+            f"The archive's {what} failed its CRC check "
+            f"(stored {stored:08X}, computed {computed:08X}). "
+            "You chose to read it anyway; each file is still checked against its own CRC, "
+            "and a file that fails is not kept.")
 
 
 def has_signature(path: Path) -> bool:
@@ -538,7 +557,8 @@ def has_signature(path: Path) -> bool:
         os.close(fd)
 
 
-def read_archive(path: Path, index_limit: int | None = None) -> Archive:
+def read_archive(path: Path, index_limit: int | None = None, *,
+                 accept_bad_index_crc: bool = False) -> Archive:
     """Read the index of one archive. Raises FarcError (only) for anything it cannot read."""
     path = Path(path)
     try:
@@ -547,12 +567,13 @@ def read_archive(path: Path, index_limit: int | None = None) -> Archive:
         reason = getattr(exc, "strerror", None) or "bad path"
         raise FarcError(f"the file could not be opened ({reason})") from exc
     try:
-        return read_fd(fd, path, index_limit)
+        return read_fd(fd, path, index_limit, accept_bad_index_crc=accept_bad_index_crc)
     finally:
         os.close(fd)
 
 
-def read_fd(fd: int, path: Path, index_limit: int | None = None) -> Archive:
+def read_fd(fd: int, path: Path, index_limit: int | None = None, *,
+            accept_bad_index_crc: bool = False) -> Archive:
     """Read the index of an archive from a file descriptor the caller already opened.
 
     Used so that the file whose signature was checked is the same file whose index is read.
@@ -566,12 +587,15 @@ def read_fd(fd: int, path: Path, index_limit: int | None = None) -> Archive:
         raise FarcError(f"the file could not be read ({exc.strerror or exc})") from exc
     if not stat.S_ISREG(st.st_mode):
         raise FarcError("not a regular file")
-    return _read(_Reader(fd, st.st_size, index_limit), Path(path))
+    return _read(_Reader(fd, st.st_size, index_limit,
+                         accept_bad_index_crc=accept_bad_index_crc), Path(path))
 
 
-def _footer_descriptor(tail: bytes) -> tuple[int, int, str, int, int, int]:
+def _footer_descriptor(tail: bytes, reader: _Reader | None = None
+                       ) -> tuple[int, int, str, int, int, int]:
     """Find the footer's descriptor: the last signature in `tail` whose CRC-32 matches.
 
+    With the opt-in, a parsed descriptor with a bad CRC is used only if none matches.
     Returns (offset in tail, type, method, origsize, compsize, crc).
     """
     end, seen = len(tail) - 4, False
@@ -586,8 +610,34 @@ def _footer_descriptor(tail: bytes) -> tuple[int, int, str, int, int, int]:
             b.u32()
             return at, b.varint(), b.cstr(), b.varint(), b.varint(), b.u32()
         end = at + len(SIGNATURE) - 1
+    if seen and reader is not None and reader.accept_bad_index_crc:
+        # Prefer a CRC-valid descriptor exactly as before. Only if there is none, take
+        # the last signature whose complete descriptor fields parse. Do not try another
+        # candidate if reading its blocks later fails.
+        end = len(tail) - 4
+        while True:
+            at = tail.rfind(SIGNATURE, 0, end)
+            if at < 0:
+                break
+            d = tail[at:]
+            try:
+                b = _Buf(d[:-4])
+                b.u32()
+                fields = b.varint(), b.cstr(), b.varint(), b.varint(), b.u32()
+                kind, _, orig, comp, _ = fields
+                dpos = reader.size - len(tail) + at
+                if b.pos != len(b.data) or kind != FOOTER_BLOCK or not 0 < comp <= dpos \
+                        or orig <= 0:
+                    raise FarcError("archive structure damaged (unexpected footer descriptor)")
+            except FarcError:
+                end = at + len(SIGNATURE) - 1
+                continue
+            reader.check_crc("footer descriptor", int.from_bytes(d[-4:], "little"),
+                             zlib.crc32(d[:-4]))
+            return (at, *fields)
     if seen:
-        raise FarcError("archive structure damaged (footer descriptor failed its CRC check)")
+        raise FarcError("archive structure damaged (footer descriptor failed its CRC check); "
+                        "use --accept-bad-index-crc to read it anyway")
     raise FarcError("no FreeArc footer found at the end of the file")
 
 
@@ -597,7 +647,7 @@ def _read(r: _Reader, path: Path) -> Archive:
         raise FarcError("too small to be a FreeArc archive")
     scan = min(size, FOOTER_SCAN)
     tail = _pread(r.fd, size, size - scan, scan)
-    at, btype, method_text, origsize, compsize, crc = _footer_descriptor(tail)
+    at, btype, method_text, origsize, compsize, crc = _footer_descriptor(tail, r)
     dpos = size - scan + at
     if btype != FOOTER_BLOCK or origsize <= 0 or compsize <= 0 or compsize > dpos:
         raise FarcError("archive structure damaged (unexpected footer descriptor)")
@@ -632,6 +682,7 @@ def _read(r: _Reader, path: Path) -> Archive:
     if not dirs:
         raise FarcError("archive structure damaged (no directory block)")
     _check_overlap(regions + [(b.offset, b.compsize) for b in arc.blocks])
+    arc.warnings = list(r.warnings)
     return arc
 
 
@@ -760,4 +811,5 @@ def summarise(arc: Archive) -> list[str]:
         more = ", ..." if len(unsafe) > MAX_EXAMPLES else ""
         lines.append(f"{_n(len(unsafe), 'name', 'names')} would not be safe to extract "
                      f"as stored: {shown}{more}")
+    lines.extend(f"warning: {warning}" for warning in arc.warnings)
     return lines

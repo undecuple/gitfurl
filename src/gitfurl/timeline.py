@@ -346,10 +346,19 @@ def skip_entries(tl: Timeline, choice, target: str | None = None,
                "Setup does all of its own steps")
 
 
+def archive_warning_entries(tl: Timeline, plan) -> None:
+    """Index CRC exceptions explicitly chosen for this extraction plan."""
+    for ap in plan.archives:
+        for warning in ap.archive.warnings:
+            tl.add("note", f"Archive warning: {shown(ap.path.name, 80)}", warning)
+
+
 def plan_entries(tl: Timeline, det, choice, prefix: Path, exists: bool, create: bool,
                  target: str | None = None, setup_entries: bool = False) -> None:
     detection_entries(tl, det)
     route_entries(tl, choice)
+    if choice is not None and choice.extract is not None:
+        archive_warning_entries(tl, choice.extract)
     prefix_entry(tl, prefix, exists, create)
     skip_entries(tl, choice, target, setup_entries)
 
