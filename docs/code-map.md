@@ -159,7 +159,7 @@ flowchart LR
   EP --> RC
   RC --> NP["route.NativeInstallPlan"]
   NP -->|approval| X["extract.extract()"]
-  X -->|"farc_codecs.open_chain(): storing · lzma · exe · delta · rep · 4x4 · srep"| F["files under drive_c/Games/PREFIX<br/>O_EXCL | O_NOFOLLOW, dir fds"]
+  X -->|"farc_codecs.open_chain(): storing · lzma · exe · x86 · delta · rep · 4x4 · srep"| F["files under drive_c/Games/PREFIX<br/>O_EXCL | O_NOFOLLOW, dir fds"]
   X --> L["log (0600), event log, ExtractResult"]
 ```
 
@@ -199,6 +199,7 @@ flowchart LR
 | `tests/test_farc.py` | `farc` index reader, `detect` with archives | `tests/farc_writer.py` |
 | `tests/test_extract.py` | `extract`, `cli extract` | `tests/farc_writer.py` |
 | `tests/test_codecs.py` | `farc_codecs` (lzma, exe, delta, rep, 4x4, srep, VHASH, SipHash, AES), chains through `extract` | `tests/farc_writer.py` |
+| `tests/test_farc_x86.py` | `farc_codecs` x86 stage (blocks, framing, damage, caps, memory), its method strings, chains and an extraction; the specification's vectors when `GITFURL_X86_VECTORS` is set | `tests/farc_writer.py` |
 | `tests/test_inno.py` | `inno` reader, `[Code]` scan, preflight, `extract-inno`, `detect` and `cli` lines | `tests/inno_writer.py` |
 | `tests/test_unattended.py` | `unattended`, its CLI and window options | - |
 | `tests/test_portable.py` | `portable`, `runner` wrapping, window option | - |

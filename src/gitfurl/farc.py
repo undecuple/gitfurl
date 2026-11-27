@@ -4,8 +4,8 @@ What it reads: the footer block at the end of the file and the directory blocks 
 to (the archive's own index), with bounded reads. From those it reports the files, their
 sizes, where the archive starts (the size of a self-extracting program before it, if any),
 whether the archive is locked, and for each data block whether its method is one gitfurl
-decodes (a chain of `storing`, `lzma`, `exe`, `delta`, `rep`, `4x4` (with `lzma` inside) and
-`srep` stages) or a method gitfurl does not handle.
+decodes (a chain of `storing`, `lzma`, `exe`, `x86`, `delta`, `rep`, `4x4` (with `lzma`
+inside) and `srep` stages) or a method gitfurl does not handle.
 
 What it never does (extraction is in extract.py, which uses this reader): it never
 extracts, decodes or verifies file data, never writes or
@@ -58,6 +58,10 @@ SREP_BLOCK_MAX = 64 << 20  # an srep block size option above this is refused
 # Names under which installers' configuration files register srep; the stream's own header
 # decides whether it is one gitfurl reads.
 SREP_NAMES = frozenset(["srep", "srep64", "srep_new", "srep_old"])
+# The x86 code filter's names in FreeArc's method strings (FreeArc's own name for it is
+# dispack; gitfurl calls it x86 and never shows these).
+X86_NAMES = frozenset(["dispack070", "dispack"])
+X86_DEFAULT = 8 << 20  # its block size when the method names none
 MAX_EXAMPLES = 3  # unsafe names shown in a summary
 MAX_KINDS = 4  # chains of supported methods named in a summary (besides storing and lzma)
 NAME_LIMIT = 80  # characters of one name shown in a summary
@@ -88,9 +92,9 @@ class FarcError(ValueError):
 class Stage:
     """One method of a supported chain, by gitfurl's own name (never the archive's text)."""
 
-    name: str  # "storing", "lzma", "exe", "delta", "rep", "4x4" or "srep"
+    name: str  # "storing", "lzma", "exe", "x86", "delta", "rep", "4x4" or "srep"
     lzma: dict | None = None  # lzma, and the lzma inside 4x4: dict_size, lc, lp, pb
-    # delta: block size; rep: window size; 4x4: piece size named in its fields (0: none);
+    # delta, x86: block size; rep: window size; 4x4: piece size named in its fields (0: none);
     # srep: largest block accepted (from the method's parameters)
     size: int = 0
 
@@ -324,6 +328,24 @@ def _parse_srep(params: list[str]) -> tuple[Stage | None, str]:
     return Stage("srep", size=block), ""
 
 
+def _parse_x86(params: list[str]) -> tuple[Stage | None, str]:
+    """The x86 code filter's parameters, left to right: `x` (a flag decoding does not use),
+    `b<size>` or `<size>` (the block size; a later one wins)."""
+    block = X86_DEFAULT
+    for p in params:
+        if p == "x":
+            continue
+        size = _parse_mem(p[1:] if p.startswith("b") else p)
+        if size is None:
+            return None, "x86 settings gitfurl does not understand"
+        block = size
+    if block == 0:
+        return None, "x86 settings gitfurl does not understand"
+    if block > DICT_CAP:
+        return None, f"an x86 block size over the {DICT_CAP >> 20} MiB limit"
+    return Stage("x86", size=block), ""
+
+
 def _parse_stage(text: str) -> tuple[Stage | None, str]:
     params = text.split(":")
     name, rest = params[0], params[1:]
@@ -331,6 +353,8 @@ def _parse_stage(text: str) -> tuple[Stage | None, str]:
         return _parse_4x4(rest)
     if name in SREP_NAMES:
         return _parse_srep(rest)
+    if name in X86_NAMES:
+        return _parse_x86(rest)
     if name == "storing":
         return (Stage("storing"), "") if not rest else (None, KIND_OTHER)
     if name == "exe":
@@ -351,8 +375,8 @@ def _parse_stage(text: str) -> tuple[Stage | None, str]:
 
 
 def parse_method(text: str) -> Method:
-    """Classify one compressor string: a chain of storing, lzma, exe, delta, rep, 4x4 and srep
-    stages, or unsupported. Never raises; the string itself is not kept."""
+    """Classify one compressor string: a chain of storing, lzma, exe, x86, delta, rep, 4x4 and
+    srep stages, or unsupported. Never raises; the string itself is not kept."""
     encrypted = any(c in text.lower() for c in _CIPHERS)
 
     def no(reason: str) -> Method:
