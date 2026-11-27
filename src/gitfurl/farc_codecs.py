@@ -1,5 +1,5 @@
 """Streaming decoders for FreeArc method chains: storing, lzma, exe, x86, delta, rep, 4x4 (with
-lzma inside) and srep.
+lzma inside), srep and rolz (in farc_rolz.py).
 
 A chain is decoded right to left: the last method in the archive's string reads the block's
 stored bytes, and the first method's output is the block's file data. Each stage here is a
@@ -27,7 +27,7 @@ from array import array
 from dataclasses import dataclass
 from itertools import accumulate
 
-from gitfurl import farc
+from gitfurl import farc, farc_rolz
 
 EXE_ROUND = 262144  # the exe filter converts the stream in rounds of this many bytes
 EXE_SLACK = 64  # bytes decoded past the files' end for each exe stage to the left (it needs 5)
@@ -138,6 +138,10 @@ def stage_plan(method: farc.Method, out_size: int) -> list[StagePlan]:
         elif st.name == "srep":
             budget = srep_budget(limit)
             out.append(StagePlan(st, budget, budget + srep_block_memory(st.size), limit))
+        elif st.name == "rolz":
+            # the window comes from the data; one over `budget` is refused before it is used
+            w = rolz_window(limit)
+            out.append(StagePlan(st, w, farc_rolz.memory_for(w), limit))
         else:  # storing
             out.append(StagePlan(st, 0, 0, limit))
         if st.name == "exe" and limit is not None:
@@ -145,6 +149,14 @@ def stage_plan(method: farc.Method, out_size: int) -> list[StagePlan]:
         elif st.name not in _SIZE_KEEPING:
             limit = None
     return out
+
+
+def rolz_window(limit: int | None) -> int:
+    """The largest rolz window accepted: WINDOW_CAP, or the files' size (rounded up to 1 KiB,
+    as the window is) when that is smaller and the rolz output reaches the files unchanged."""
+    if limit is None:
+        return farc_rolz.WINDOW_CAP
+    return min(farc_rolz.WINDOW_CAP, max(1024, -(-limit // 1024) * 1024))
 
 
 def _rep_match_cap(window: int) -> int:
@@ -1779,6 +1791,40 @@ class X86Stage(_Stage):
         return data
 
 
+class RolzStage(_Stage):
+    """The rolz method (see farc_rolz.py). It reads the block's stored bytes at random (each
+    record's index is at its end), so it is always the chain's last method and reads the
+    archive itself. `window` is the largest window accepted (the plan's); with a `limit`, more
+    output than that is refused."""
+
+    def __init__(self, fd: int, offset: int, size: int, window: int, chunk: int,
+                 limit: int | None = None, stop=None):
+        super().__init__(stop)
+        self.fd, self.offset, self.size = fd, offset, size
+        self.gen = farc_rolz.decode_block(self._read, size, window, stop, chunk, limit)
+
+    def _read(self, off: int, n: int) -> bytes:
+        if off < 0 or n < 0 or off + n > self.size:
+            raise farc_rolz.RolzError("damaged data (a read past the end of the block)")
+        try:
+            data = os.pread(self.fd, n, self.offset + off)
+        except OSError as exc:
+            raise CodecError(f"the archive could not be read ({exc.strerror or exc})") from exc
+        if len(data) != n:
+            raise CodecError("the archive could not be read completely (did it change?)")
+        return data
+
+    def _next(self) -> bytes:
+        try:
+            return next(self.gen)
+        except StopIteration:
+            self.done = True
+            return b""
+        except farc_rolz.RolzError as exc:
+            self.done = True
+            raise CodecError(f"rolz stage: {exc}") from None
+
+
 def open_chain(method: farc.Method, fd: int, offset: int, compsize: int, out_size: int,
                chunk: int, stop):
     """The leftmost stage of the block's chain (read(n) gives the file data). Every decoder is
@@ -1801,5 +1847,9 @@ def open_chain(method: farc.Method, fd: int, offset: int, compsize: int, out_siz
             reader = X86Stage(reader, p.stage.size, p.budget, chunk, p.limit, stop)
         elif name == "srep":
             reader = SrepStage(reader, p.stage.size, p.budget, chunk, p.limit, stop)
+        elif name == "rolz":
+            if not isinstance(reader, Source):
+                raise StartError("rolz can only read the stored data (the last method)")
+            reader = RolzStage(fd, offset, compsize, p.budget, chunk, p.limit, stop)
         # storing: output equals input, nothing to add
     return reader

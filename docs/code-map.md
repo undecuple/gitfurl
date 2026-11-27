@@ -30,7 +30,7 @@ flowchart TB
     runner["runner.py: run_tracked() → run_with_prefix() → execute()"]
     native["route.run_native() → extract.extract()"]
     innox["inno.extract_inno_files()"]
-    codecs["farc_codecs.py"]
+    codecs["farc_codecs.py · farc_rolz.py"]
     prefixes["prefixes.py"]
     progress["progress.py · windows.py"]
     changes["changes.py · cleanup.py · prefix_delete.py"]
@@ -171,7 +171,7 @@ flowchart LR
   EP --> RC
   RC --> NP["route.NativeInstallPlan"]
   NP -->|approval| X["extract.extract()"]
-  X -->|"farc_codecs.open_chain(): storing · lzma · exe · x86 · delta · rep · 4x4 · srep"| F["files under drive_c/Games/PREFIX<br/>O_EXCL | O_NOFOLLOW, dir fds"]
+  X -->|"farc_codecs.open_chain(): storing · lzma · exe · x86 · delta · rep · 4x4 · srep · rolz"| F["files under drive_c/Games/PREFIX<br/>O_EXCL | O_NOFOLLOW, dir fds"]
   X --> L["log (0600), event log, ExtractResult"]
 ```
 
@@ -216,6 +216,7 @@ flowchart LR
 | `tests/test_farc.py` | `farc` index reader, `detect` with archives | `tests/farc_writer.py` |
 | `tests/test_extract.py` | `extract`, `cli extract` | `tests/farc_writer.py` |
 | `tests/test_codecs.py` | `farc_codecs` (lzma, exe, delta, rep, 4x4, srep, VHASH, SipHash, AES), chains through `extract` | `tests/farc_writer.py` |
+| `tests/test_farc_rolz.py` | `farc_rolz` (tables, bit reader, container, tokens and special blocks, the x86 call stage, records, damage, caps) and the rolz stage in `farc_codecs` (method strings, plan, chains from a file, Stop, an extraction) | `tests/rolz_writer.py`, `tests/farc_writer.py` |
 | `tests/test_farc_x86.py` | `farc_codecs` x86 stage (blocks, framing, damage, caps, memory), its method strings, chains and an extraction; the specification's vectors when `GITFURL_X86_VECTORS` is set | `tests/farc_writer.py` |
 | `tests/test_inno.py` | `inno` reader, `[Code]` scan, preflight, `extract-inno`, `detect` and `cli` lines | `tests/inno_writer.py` |
 | `tests/test_unattended.py` | `unattended`, its CLI and window options | - |
@@ -244,5 +245,5 @@ Local check with the pinned versions: `ruff==0.11.13 check src tests` and `PYTHO
 ## What this map does not show
 
 - The internal structure of `gui.py` (about 1,760 lines: pages, dialogs and the run loop in one `main()` closure). Its pages are named in the [user guide](user-guide.md); the map shows only its calls into the core.
-- Decoder internals of `farc_codecs.py` and the record layouts of `inno.py`: they follow the clean-room specifications, which are not in the repository.
+- Decoder internals of `farc_codecs.py` and `farc_rolz.py` and the record layouts of `inno.py`: they follow the clean-room specifications, which are not in the repository.
 - Timing: which calls happen on Tk's thread and which on the worker thread beyond the sequence above.

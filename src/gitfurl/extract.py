@@ -1,7 +1,7 @@
 """Native extraction of FreeArc archives, without running the installer.
 
-Methods decoded: storing, lzma, exe, x86, delta, rep, 4x4 (with lzma inside) and srep, alone
-or chained (farc_codecs.py).
+Methods decoded: storing, lzma, exe, x86, delta, rep, 4x4 (with lzma inside), srep and rolz,
+alone or chained (farc_codecs.py, farc_rolz.py).
 
 Off unless asked for, per run, after an approval that shows the plan. gitfurl reads each
 FreeArc archive beside the installer itself (gitfurl.farc) and writes the files into a new
@@ -170,7 +170,7 @@ class ExtractPlan:
 
     def describe(self) -> list[str]:
         lines = [
-            ("NATIVE EXTRACTION (FreeArc: storing, lzma, exe, x86, delta, rep, 4x4 and srep): "
+            ("NATIVE EXTRACTION (FreeArc: storing, lzma, exe, x86, delta, rep, 4x4, srep and rolz): "
             "gitfurl reads the archives itself."),
             f"  {EXTRACTS_ONLY}",
             (f"  destination: {self.target} (in the prefix: {self.dest}); it must not exist "
@@ -283,7 +283,8 @@ def plan_extract(installer: Path, prefix_name: str,
             raise ExtractRefused(f"{name} uses {farc.KIND_OTHER} "
                                  f"({len(arc.unsupported)} of {len(arc.blocks)} data blocks); "
                                  "only storing, lzma, exe, x86, delta, rep, 4x4 (with "
-                                 "lzma inside) and srep, alone or chained, can be extracted")
+                                 "lzma inside), srep and rolz, alone or chained, can be "
+                                 "extracted")
         ap = ArchivePlan(path, arc, [], [])
         for entry in arc.entries:
             parts = farc.relative_parts(entry.path)

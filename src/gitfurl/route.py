@@ -6,7 +6,7 @@ and writes nothing. The route is:
 
   native  when the installer is Inno Setup (or is itself a FreeArc archive), every FreeArc
           archive beside it reads cleanly, uses only storing, lzma, exe, x86, delta, rep,
-          4x4 (lzma inside) and srep, and holds only names gitfurl can write safely, and (for the
+          4x4 (lzma inside), srep and rolz, and holds only names gitfurl can write safely, and (for the
           automatic choice) the archives are linked to the installer (its setup script names
           them all, or they share its name) and no option that only a Setup run uses was
           given. Setup is then NOT run at all: gitfurl
@@ -52,7 +52,7 @@ from gitfurl.detect import (
 
 ROUTE_CHOICES = ("auto", "native", "wine")
 
-METHODS_TEXT = "storing, lzma, exe, x86, delta, rep, 4x4 (with lzma inside) or srep"
+METHODS_TEXT = "storing, lzma, exe, x86, delta, rep, 4x4 (with lzma inside), srep or rolz"
 
 SKIPPED_TEXT = (
     "Setup is not run. Skipped: Setup's own files (for example its uninstaller and small extra "
