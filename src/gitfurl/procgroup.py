@@ -73,3 +73,61 @@ def wineserver_for(wine: str) -> str | None:
             return str(beside)
     found = shutil.which("wineserver")
     return found if found and os.path.isabs(found) else None
+
+
+def wine_server_dir(prefix: Path, tmp: str = "/tmp") -> Path:
+    """The folder a Wine server for `prefix` works in: <tmp>/.wine-<uid>/server-<dev>-<inode>,
+    from the prefix folder's device and inode numbers (hex), as Wine names it. Reads the
+    prefix folder's metadata only."""
+    st = os.stat(prefix)
+    return Path(tmp) / f".wine-{os.getuid()}" / f"server-{st.st_dev:x}-{st.st_ino:x}"
+
+
+def prefix_server_running(prefix: Path, proc: str = "/proc", tmp: str = "/tmp") -> str | None:
+    """Why a Wine server for `prefix` seems to be running, or None. Read-only.
+
+    It looks for a process whose working folder is the prefix's server folder (a Wine server
+    works from there) and for a lock held on that folder's lock file (/proc/locks). A
+    left-over socket of a server that has ended is not counted. Processes of other users
+    cannot be looked at; their servers use other folders anyway.
+    """
+    try:
+        sdir = wine_server_dir(Path(prefix), tmp)
+    except OSError:
+        return None
+    if not os.path.isdir(sdir):
+        return None
+    want = str(sdir)
+    try:
+        entries = os.listdir(proc)
+    except OSError:
+        entries = []
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            if os.readlink(f"{proc}/{entry}/cwd") == want:
+                return f"process {entry} works in this prefix's Wine server folder ({sdir})"
+        except OSError:
+            continue
+    try:
+        st = os.lstat(sdir / "lock")
+    except OSError:
+        return None
+    try:
+        with open(f"{proc}/locks", encoding="ascii", errors="replace") as fh:
+            locks = fh.read(1 << 20).splitlines()
+    except OSError:
+        return None
+    for line in locks:
+        fields = line.split()
+        if "->" in fields or len(fields) < 6:
+            continue
+        try:
+            major, minor, inode = fields[5].split(":")
+            if (int(major, 16), int(minor, 16), int(inode)) == \
+                    (os.major(st.st_dev), os.minor(st.st_dev), st.st_ino):
+                return f"the lock file of this prefix's Wine server is held ({sdir / 'lock'})"
+        except ValueError:
+            continue
+    return None

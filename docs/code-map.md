@@ -58,14 +58,15 @@ Arrows point from a module to the modules it imports. Modules with no gitfurl im
 ```mermaid
 flowchart LR
   app --> cli & gui
-  cli --> cleanup & desktop & detect & doctor & extract & inno & memlimit & namelinks & portable & prefixes & preflight & route & runner & safety & scan & timeline & unattended
-  gui --> cleanup & detect & doctor & memlimit & namelinks & portable & prefixes & preflight & route & runner & safety & scan & theme & timeline & unattended & viewprefs & widgets
+  cli --> cleanup & desktop & detect & doctor & extract & inno & memlimit & namelinks & portable & prefixes & preflight & route & runner & safety & scan & setup_entries & timeline & unattended
+  gui --> cleanup & detect & doctor & memlimit & namelinks & portable & prefixes & preflight & route & runner & safety & scan & setup_entries & theme & timeline & unattended & viewprefs & widgets
   runner --> timeline
   route --> timeline
   timeline --> detect
   namelinks --> detect & extract & inno
   widgets --> pixelfont & theme
-  route --> changes & detect & extract & farc & inno & memlimit & prefixes & runner & scan
+  route --> changes & detect & extract & farc & inno & memlimit & prefixes & runner & scan & setup_entries
+  setup_entries --> desktop & detect & inno & procgroup & route
   runner --> changes & memlimit & portable & prefixes & preflight & procgroup & progress & scan & unattended & windows
   windows --> detect
   detect --> farc & inno
@@ -83,6 +84,7 @@ flowchart LR
 Notes:
 - `detect` ↔ `inno` is a cycle by design: `detect.detect()` calls `inno.read_fd()` on the open file (top-level import), and `inno.py` imports `detect.clean` inside a function, so loading either module first works. `inno` also imports `extract` and `prefixes` inside functions.
 - `inno` imports `extract` to reuse its folder handling (`_Tree`, `_make_dest`, name checks) and the `ExtractPlan` checks.
+- `route` and `setup_entries` import each other inside functions only (`route.run_native()` calls `setup_entries.apply_entries`; `setup_entries` uses `route.written_files`), so loading either module first works.
 - `route` imports `runner` only for `logs_root()`; the Wine fallback is run by `cli.py` through `runner`. The native route starts no process except `wineboot` (and `clamscan` with `--scan`).
 
 ## Entry points
@@ -116,6 +118,7 @@ flowchart TD
   N3 -->|yes| N4["native_prefix_create()<br/>wineboot, mscoree/mshtml off, incomplete marker"]
   N4 --> N5["run_native() → extract.extract()<br/>farc_codecs pull pipeline, CRC-32, Stop"]
   N5 --> N6["listings: program candidates, redistributables (not run)<br/>log 0600, optional event log, optional cleanup"]
+  N5 --> N7["--apply-setup-entries: setup_entries.apply_entries()<br/>system.reg and user.reg (no Wine server running), .desktop files,<br/>timeline rows (route._tl_entries)"]
   D -->|wine or proton| W0{"--dry-run?"}
   W0 -->|yes| W1["build_plan() and the plan lines:<br/>portable, unattended, scan, memory, detection,<br/>preflight (with route.setup_unpacked())"]
   W0 -->|no| W2["_real_install(): build_plan(), plan_cleanup()"]
@@ -180,6 +183,8 @@ For `extract-inno` the source is the setup file itself: `inno.read_setup()` give
 | Timelines `<prefix>-<stamp>.timeline.txt` (mode 0600) | `runner.logs_root()`, beside the run's log | `timeline.Timeline.attach()` (from `execute()`, `run_native()`), or `Timeline.save()` when the run made no log |
 | Staging folders of links (mode 0700, removed after the run) | `namelinks.staging_root()` / PREFIX-DATE-TIME-PID | `namelinks.Staging.create()`, `remove()` (`--link-names` on the Setup route) |
 | Extracted files | `drive_c/Games/NAME` in the prefix | `extract.extract()`, `inno.extract_inno_files()` |
+| Setup's registry values (opt-in) | `system.reg`, `user.reg` in the prefix; copies from before the change in `runner.logs_root()` (0600) | `setup_entries.apply_entries()` |
+| Setup's menu entries (opt-in, outside the prefix) | `$XDG_DATA_HOME/applications/gitfurl-NAME-*.desktop` (0644) | `setup_entries.apply_entries()` |
 | Inno Setup's own log (unattended) | inside the prefix | Setup itself; read by `unattended.read_report()` |
 | Nothing else | - | the read-only layer writes nothing |
 
@@ -220,9 +225,10 @@ flowchart LR
 | `tests/test_view.py` | `viewprefs`, the result headline and done row, the Help texts (no window) | - |
 | `tests/test_gui_stop.py` | Stop in the real window | `tests/gui_stop_driver.py` (`xvfb-run -a`) |
 | `tests/test_namelinks.py` | `namelinks` (mapping, staging folder and its removal), the route with links, `cli install --link-names`, the window's plain functions | `tests/inno_writer.py`, `tests/farc_writer.py` |
+| `tests/test_setup_entries.py` | `setup_entries` (constants, Wine's registry format and edits, plan, apply, menu entries), `procgroup.prefix_server_running`, `route.run_native` with the entries and their timeline rows, `cli install --apply-setup-entries` (also with `--timeline`) | `tests/test_route.py` (`Base`), `tests/inno_writer.py` (`WReg`, `WIcon`), `tests/farc_writer.py` |
 | `tests/test_native_run.py` | `route.native_stops`, `route.perform_native` (stop checks, Stop during the scan and wineboot, cancel) | `tests/test_route.py` (`Base`, archive builders on `tests/farc_writer.py`) |
 | `tests/test_gui_native.py` | the window's native-route plain functions (route switches, stop texts, footer, root refusal, plan and approval, progress, end text, cleanup) | `tests/test_native_run.py` (`NativeBase`) |
-| `tests/test_gui_native_xvfb.py` | the native route in the real window: Run and the unpack, Stop, the "Run Setup instead" switch, declining the approval; the Timeline card (the plan's rows before the run, the route reason, Stop and the done line) and the library's Last run | `tests/gui_native_driver.py` (`xvfb-run -a`) |
+| `tests/test_gui_native_xvfb.py` | the native route in the real window: Run and the unpack, Stop, the "Run Setup instead" switch, the setup entries switch in the plan and the approval, declining the approval; the Timeline card (the plan's rows before the run, the route reason, Stop and the done line) and the library's Last run | `tests/gui_native_driver.py` (`xvfb-run -a`) |
 | `tests/test_wineboot.py` | `prefixes.wineboot_env`, `with_wineboot_env`, `wineboot_line`; `--wine-addons` on `install` and `prefix create`; the window's plan line | - |
 | `tests/test_gui_stall.py` | which crash and stall notes the window keeps on screen; the 120 s stall advice | - |
 | `tests/test_desktop.py` | `desktop`, `cli desktop-entry` | - |

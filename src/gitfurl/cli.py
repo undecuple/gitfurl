@@ -87,6 +87,11 @@ def build_parser() -> argparse.ArgumentParser:
                            "mapping: Setup runs from a staging folder of symbolic links that "
                            "gitfurl makes and deletes afterwards (your files are not renamed), "
                            "and the route check counts the archives as named. Default: off")
+    inst.add_argument("--apply-setup-entries", action="store_true",
+                      help="native route only: after a complete unpack, also add the registry "
+                           "values and menu entries the setup itself declares that gitfurl can "
+                           "apply exactly (written without Wine; the plan lists each one and "
+                           "each skipped entry)")
     inst.add_argument("--unattended", action="store_true",
                       help="Wine route only. Inno Setup installers only: run without the installer's wizard and "
                            "windows (Inno's /VERYSILENT switches), install to C:\\Games\\PREFIX "
@@ -206,6 +211,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     if choice.route == ROUTE_NATIVE:
         return _native_install(args, installer, det, choice, links)
+    if args.apply_setup_entries:
+        print("--apply-setup-entries does not apply to the Wine/Proton route: Setup runs and "
+              "writes its own registry entries and shortcuts")
     if not args.dry_run:
         return _real_install(args, det, choice, links)
     try:
@@ -815,10 +823,16 @@ def _native_install(args, installer, det, choice, links=None) -> int:
 
         scan_lines = describe_scan_plan(scan_plan) if dry else \
             describe_scan_plan(scan_plan, database_info(scan_plan.clamscan))
+    entries = None
+    if args.apply_setup_entries:
+        from gitfurl.setup_entries import plan_setup_entries
+
+        entries = plan_setup_entries(installer, xplan)
     plan = NativeInstallPlan(installer, prefix_name, xplan.prefix, choice, create, wine,
                              scan_lines,
                              clean.describe() if args.cleanup != "none" else None,
-                             _native_unused(args), memory_check=not args.no_memory_limit)
+                             _native_unused(args), memory_check=not args.no_memory_limit,
+                             setup_entries=entries)
     if dry:
         print("DRY RUN: nothing was executed, created or changed.")
     for line in plan.describe():
@@ -870,7 +884,9 @@ def _native_install(args, installer, det, choice, links=None) -> int:
     tl = _new_timeline(args, det, choice, xplan.prefix, not missing, args.create_prefix,
                        xplan.target)
     if not args.yes:
-        refused = _confirm("Type 'yes' to unpack the files: ", "Nothing was run or written.")
+        refused = _confirm("Type 'yes' to unpack the files" + (
+            " and add the setup entries listed above" if entries is not None else "") + ": ",
+            "Nothing was run or written.")
         if refused is not None:
             return refused
     approval_entry(tl, "yes" if args.yes else "typed")
@@ -987,7 +1003,8 @@ def _new_timeline(args, det, choice, prefix: Path, exists: bool, create: bool, t
 
     tl = Timeline(on_line=(lambda line: print(f"[timeline] {line}", flush=True))
                   if getattr(args, "timeline", False) else None)
-    plan_entries(tl, det, choice, prefix, exists, create, target)
+    plan_entries(tl, det, choice, prefix, exists, create, target,
+                 bool(getattr(args, "apply_setup_entries", False)))
     return tl
 
 

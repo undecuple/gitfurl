@@ -242,6 +242,12 @@ SETUP_INSTEAD_NOTE = ("Off by default: when the installer's payload is FreeArc a
                       "what is skipped). Turn this on to have Setup run and do all of its own "
                       "steps.")
 
+SETUP_ENTRIES_TITLE = "Add the setup's registry entries and shortcuts (native route)"
+SETUP_ENTRIES_NOTE = ("Off by default. After a complete unpack, gitfurl also writes the "
+                      "registry values and menu entries the setup itself declares, where it "
+                      "can do so exactly, without running Wine. The plan lists each one and "
+                      "each skipped entry. On the Wine/Proton route Setup writes its own.")
+
 # The native plan's text names command-line options; the window names its own switches.
 WINDOW_WORDS = (
     ("run it with: gitfurl cli install <file> --prefix ",
@@ -358,9 +364,10 @@ def native_plan_text(plan, det, *, memory_lines=(), preflight: str = "",
 
 def native_plan_for(installer, choice, *, create_ok: bool, memory_on: bool, wine=None,
                     scan_plan=None, db_info=None, cleanup_text=None, avail=None,
-                    meminfo: str = "/proc/meminfo"):
+                    meminfo: str = "/proc/meminfo", setup_entries: bool = False, env=None):
     """(route.NativeInstallPlan, its stops, memory lines) for the window, built the way the
-    command line builds them. Reads files and free space only; starts nothing."""
+    command line builds them. Reads files and free space only; starts nothing.
+    setup_entries: the setup's registry entries and shortcuts switch is on."""
     from gitfurl.route import NativeInstallPlan, native_stops
 
     xplan = choice.extract
@@ -377,9 +384,14 @@ def native_plan_for(installer, choice, *, create_ok: bool, memory_on: bool, wine
                          wine=wine if create else None, scope_problem=scope_problem,
                          memory_check=memory_on, meminfo=meminfo)
     scan_lines = scanmod.describe_scan_plan(scan_plan, db_info) if scan_plan is not None else []
+    entries = None
+    if setup_entries:
+        from gitfurl.setup_entries import plan_setup_entries
+
+        entries = plan_setup_entries(installer, xplan, env)
     plan = NativeInstallPlan(installer, xplan.prefix_name, xplan.prefix, choice, create,
                              wine if create else None, scan_lines, cleanup_text, [],
-                             memory_check=memory_on)
+                             memory_check=memory_on, setup_entries=entries)
     return plan, stops, memory_lines
 
 
@@ -688,6 +700,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     addons_var = tk.BooleanVar(value=False)  # Wine's Mono and Gecko dialogs: off
     setup_var = tk.BooleanVar(value=False)  # "Run Setup instead": off, so the route is automatic
     link_var = tk.BooleanVar(value=False)  # link the archives under the expected names: off
+    entries_var = tk.BooleanVar(value=False)  # the setup's registry entries and shortcuts: off
     route_cache: dict = {}
     progress_var = tk.StringVar(value="Shown while an installer runs: payload read, rate, rough ETA.")
     pending = {"cleanup": None, "control": None, "proton": False}
@@ -1128,6 +1141,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         lambda p: w.Switch(p, setup_var, command=lambda: refresh_plan()))
     row(c, LINK_NAMES_TITLE, LINK_NAMES_NOTE,
         lambda p: w.Switch(p, link_var, command=lambda: refresh_plan()))
+    row(c, SETUP_ENTRIES_TITLE, SETUP_ENTRIES_NOTE,
+        lambda p: w.Switch(p, entries_var, command=lambda: refresh_plan()))
     row(c, UNATTENDED_TITLE, UNATTENDED_NOTE,
         lambda p: w.Switch(p, unattended_var, command=lambda: refresh_plan()))
     row(c, "Show what the installer changed on my system",
@@ -1340,7 +1355,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         what is skipped) and the approval."""
         det_, choice, _err = current_route()
         tl = tlmod.Timeline()
-        tlmod.plan_entries(tl, det_, choice, prefix_path, exists, create, target)
+        tlmod.plan_entries(tl, det_, choice, prefix_path, exists, create, target,
+                           entries_var.get())
         tlmod.approval_entry(tl, "window")
         tl_state.update(tl=tl, version=-1, prefix=selected_prefix(), preview=False,
                         run_key=timeline_key())
@@ -1371,7 +1387,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             return
         preview = tlmod.Timeline()
         target = choice.extract.target if choice is not None and choice.extract else None
-        tlmod.plan_entries(preview, det_, choice, path, path.is_dir(), create_var.get(), target)
+        tlmod.plan_entries(preview, det_, choice, path, path.is_dir(), create_var.get(), target,
+                           entries_var.get())
         preview.add("note", "Nothing has run yet",
                     "these rows start the run's timeline once you approve the plan")
         tl_state.update(tl=preview, preview=True, preview_key=key, version=-1)
@@ -1650,7 +1667,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                 plan, stops, mem_lines = native_plan_for(
                     validate_installer(installer_var.get().strip()), native,
                     create_ok=create_var.get(), memory_on=memory_var.get(),
-                    wine=wine_path["value"])
+                    wine=wine_path["value"], setup_entries=entries_var.get())
         except Exception as exc:  # noqa: BLE001 - shown in the checklist; nothing runs
             native, preview_error = None, f"The plan could not be made: {exc}"
         if preview_error is not None:
@@ -1951,7 +1968,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         plan, stops, mem_lines = native_plan_for(
             installer, choice, create_ok=create_var.get(), memory_on=memory_var.get(),
             wine=wine_path["value"], scan_plan=scan_plan, db_info=db,
-            cleanup_text=clean.describe() if cleanup_var.get() != "none" else None)
+            cleanup_text=clean.describe() if cleanup_var.get() != "none" else None,
+            setup_entries=entries_var.get())
         if stops:
             messagebox.showerror("Cannot run", "\n\n".join(native_stop_text(s) for s in stops)
                                  + "\n\nNothing was run, created or written.")
@@ -2310,6 +2328,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                     "scan_switch": scan_switch,
                     "scan_reason": scan_reason,
                     "setup_var": setup_var,
+                    "entries_var": entries_var,
                     "addons_var": addons_var,
                     "changes_var": changes_var,
                     "plan_checklist_rows": lambda: {k: (bool(f.winfo_manager()), m.cget("text"))

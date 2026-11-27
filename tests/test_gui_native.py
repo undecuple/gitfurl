@@ -139,6 +139,23 @@ class NativePlanTests(NativeBase):
         self.assertIn(gui.NATIVE_ADDONS_LINE, on)  # the switch is on but not used here
         self.assertNotIn("--wine-addons", on)
 
+    def test_setup_entries_switch(self):
+        self.make_prefix()
+        det, choice = self.native()
+        plan, _s, _m = gui.native_plan_for(self.setup, choice, create_ok=True,
+                                           memory_on=False, meminfo=self.meminfo())
+        self.assertIsNone(plan.setup_entries)  # off by default
+        self.assertNotIn("add the registry entries", gui.native_plan_text(plan, det))
+        plan, _s, _m = gui.native_plan_for(self.setup, choice, create_ok=True,
+                                           memory_on=False, meminfo=self.meminfo(),
+                                           setup_entries=True, env=self.env)
+        text = gui.native_plan_text(plan, det)
+        self.assertIn("add the registry entries and menu entries the setup declares", text)
+        # this fake installer has no setup data: the plan says so and holds nothing
+        self.assertIn("setup data could not be read", text)
+        self.assertTrue(plan.setup_entries.empty)
+        self.assertIn("(native route)", gui.SETUP_ENTRIES_TITLE)
+
 
 class ProgressAndEndTests(unittest.TestCase):
     def test_sample(self):
