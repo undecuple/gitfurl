@@ -15,6 +15,7 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ### Fixed
 - **The window is named gitfurl, not Tk.** The window now has the class gitfurl (WM_CLASS "gitfurl", "Gitfurl") instead of Tk's default "Tk", and the desktop entry from `gitfurl cli desktop-entry` says `StartupWMClass=Gitfurl`, so a dock or task bar can match the window to the entry and show its name and icon. Checked under Xvfb (xprop and a window test); not checked on a real desktop;
+- **Inno Setup LZMA and LZMA2 chunks with matches past the files being written.** The decoder's dictionary was capped at the end of the last file being written, but data is decoded up to 1 MiB at a time, so decoding ran on into the chunk's next files (skipped ones too); a match there reaching back further than the cap failed as "Corrupt input data" (seen on one LZMA2 chunk that declares 64 MiB). The dictionary now covers the chunk up to the end of its last file in the file table, written or not (never more than the declared size, and the 1 GiB limit stays), nothing past that end is decoded, and the plan's memory line counts the same size. Tested with synthetic setups built by the tests; the real setup where it was seen was not run again;
 - **A test that failed by chance.** The test that checks only one log is read counted every file opened in the whole process, so a thread left from another test could make it fail (it did once, in CI on main). It now counts only the opens made on its own thread.
 
 ## [1.4.0] - 2026-11-26
