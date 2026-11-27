@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build gitfurl's optional native decoder module (gitfurl._codecs, the cm stage) with maturin
+# Build gitfurl's optional native decoder module (gitfurl._codecs: the cm and rolz stages) with maturin
 # and put it beside the sources, so `PYTHONPATH=src` finds it. Needs cargo, rustc and maturin
 # (`nix develop .#native`). Writes only native/gitfurl-codecs/target/ and
 # src/gitfurl/_codecs.abi3.so (both ignored by git); cargo uses the network only when it has

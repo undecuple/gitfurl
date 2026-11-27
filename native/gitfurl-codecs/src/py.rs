@@ -1,5 +1,12 @@
-//! The Python module `gitfurl._codecs`: the cm-stage decoder for gitfurl's farc_codecs.
+//! The Python module `gitfurl._codecs`: the cm-stage and rolz-stage decoders for gitfurl's
+//! farc_codecs.
 //!
+//! rolz: `rolz_block(read, size, budget, chunk, limit, stop)` gives an iterator of the block's
+//! output pieces; it decodes with the interpreter released and calls `read(offset, n)` (one
+//! packet at a time) and `stop()` with it held. Refusals raise `RolzError` with the same text
+//! as gitfurl.farc_rolz; an exception from `read` or `stop` is raised as it is.
+//!
+//! cm:
 //! Decoding runs with the interpreter released, on up to `threads` threads (one job each).
 //! The compressed bytes come either from a `bytes` object, or through a Python callable
 //! `read(offset, n) -> bytes` that each worker calls (with the interpreter held) a chunk at a
@@ -16,12 +23,20 @@ use pyo3::types::PyBytes;
 
 use crate::cm::input::Fetch;
 use crate::cm::{self, CmError as Error, JobSpan};
+use crate::rolz::{self, RolzError as RzError};
 
 create_exception!(
     _codecs,
     CmError,
     PyValueError,
     "Damaged cm-stage data, or a variant gitfurl does not decode."
+);
+
+create_exception!(
+    _codecs,
+    RolzError,
+    PyValueError,
+    "Damaged rolz-stage data, or more than gitfurl allows (the text says which)."
 );
 
 /// Jobs one cm_decode_jobs call may decode (each holds up to 512 MiB of output).
@@ -191,9 +206,149 @@ fn cm_job_count(data: &[u8]) -> PyResult<usize> {
     Ok(spans.len())
 }
 
+// --- rolz ---------------------------------------------------------------------------------------
+
+/// The block's bytes through Python callables, with the first Python error kept.
+struct PySource<'a> {
+    read: &'a Py<PyAny>,
+    stop: Option<&'a Py<PyAny>>,
+    err: &'a mut Option<PyErr>,
+}
+
+impl PySource<'_> {
+    fn keep(&mut self, e: PyErr) -> RzError {
+        self.err.get_or_insert(e);
+        RzError::External
+    }
+}
+
+impl rolz::Source for PySource<'_> {
+    fn read(&mut self, off: u64, n: usize) -> Result<Vec<u8>, RzError> {
+        let got = Python::attach(|py| -> PyResult<Vec<u8>> {
+            let got = self.read.call1(py, (off, n))?;
+            let b = got.bind(py).cast::<PyBytes>().map_err(PyErr::from)?;
+            Ok(b.as_bytes().to_vec())
+        });
+        match got {
+            Ok(v) if v.len() == n => Ok(v),
+            Ok(_) => Err(RzError::Data("damaged data (a short read)".into())),
+            Err(e) => Err(self.keep(e)),
+        }
+    }
+
+    fn stop(&mut self) -> Result<(), RzError> {
+        let Some(stop) = self.stop else {
+            return Ok(());
+        };
+        match Python::attach(|py| stop.call0(py).map(|_| ())) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(self.keep(e)),
+        }
+    }
+}
+
+fn rz_err(e: RzError, kept: Option<PyErr>) -> PyErr {
+    match e {
+        RzError::Data(m) => RolzError::new_err(m.into_owned()),
+        RzError::Memory => {
+            pyo3::exceptions::PyMemoryError::new_err("not enough memory for the rolz stage")
+        }
+        RzError::External => kept.unwrap_or_else(|| RolzError::new_err(e.to_string())),
+    }
+}
+
+/// The output of one rolz block, a piece at a time (an iterator of bytes).
+#[pyclass(module = "gitfurl._codecs")]
+struct RolzBlock {
+    inner: rolz::Block,
+    read: Py<PyAny>,
+    stop: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl RolzBlock {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__<'py>(&mut self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyBytes>>> {
+        let mut kept = None;
+        let inner = &mut self.inner;
+        let (read, stop) = (&self.read, self.stop.as_ref());
+        let r = py.detach(|| {
+            let mut src = PySource {
+                read,
+                stop,
+                err: &mut kept,
+            };
+            inner.next_piece(&mut src)
+        });
+        match r {
+            Ok(Some(piece)) => Ok(Some(PyBytes::new(py, &piece))),
+            Ok(None) => Ok(None),
+            Err(e) => Err(rz_err(e, kept)),
+        }
+    }
+
+    /// (window, size, crc, main LZ bytes, table LZ bytes) of the last finished record.
+    #[getter]
+    fn last_record(&self) -> Option<(u64, u64, u32, u64, u64)> {
+        self.inner
+            .last
+            .map(|r| (r.window, r.size, r.crc, r.main, r.tables))
+    }
+}
+
+/// The rolz block of `size` bytes read through `read(offset, n)`; `budget` is the largest
+/// window accepted, `limit` the most output accepted.
+#[pyfunction]
+#[pyo3(signature = (read, size, budget, chunk = 1 << 20, limit = None, stop = None))]
+fn rolz_block(
+    read: Py<PyAny>,
+    size: u64,
+    budget: u64,
+    chunk: usize,
+    limit: Option<u64>,
+    stop: Option<Py<PyAny>>,
+) -> RolzBlock {
+    RolzBlock {
+        inner: rolz::Block::new(size, budget, chunk, limit),
+        read,
+        stop,
+    }
+}
+
+/// The whole output of a rolz block held in memory.
+#[pyfunction]
+#[pyo3(signature = (data, budget, chunk = 1 << 20, limit = None))]
+fn rolz_decode<'py>(
+    py: Python<'py>,
+    data: &[u8],
+    budget: u64,
+    chunk: usize,
+    limit: Option<u64>,
+) -> PyResult<Bound<'py, PyBytes>> {
+    let out = py
+        .detach(|| rolz::decode(data, budget, chunk, limit))
+        .map_err(|e| rz_err(e, None))?;
+    Ok(PyBytes::new(py, &out))
+}
+
+/// Bytes one rolz record may hold at most, for a window of `window` bytes.
+#[pyfunction]
+fn rolz_memory_for(window: u64) -> u64 {
+    rolz::memory_for(window)
+}
+
 #[pymodule]
 fn _codecs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("CmError", m.py().get_type::<CmError>())?;
+    m.add("RolzError", m.py().get_type::<RolzError>())?;
+    m.add("ROLZ_WINDOW_CAP", rolz::WINDOW_CAP)?;
+    m.add_class::<RolzBlock>()?;
+    m.add_function(wrap_pyfunction!(rolz_block, m)?)?;
+    m.add_function(wrap_pyfunction!(rolz_decode, m)?)?;
+    m.add_function(wrap_pyfunction!(rolz_memory_for, m)?)?;
     m.add("HEADER_LEN", cm::HEADER_LEN)?;
     m.add("MAX_JOB", cm::MAX_JOB)?;
     m.add_class::<CmOutput>()?;

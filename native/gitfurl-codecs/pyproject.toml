@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "gitfurl-codecs"
 version = "0.1.0"
-description = "gitfurl's optional native decoders (the cm stage)"
+description = "gitfurl's optional native decoders (the cm and rolz stages)"
 requires-python = ">=3.11"
 license = "GPL-3.0-or-later"
 
