@@ -2005,13 +2005,59 @@ def _name_parts(name: str) -> list[str] | None:
     return parts
 
 
+def _temporary_files(s: Setup) -> dict[str, str]:
+    """Names Setup carries for {tmp}, including dontcopy files its script can extract.
+
+    This is an inventory, not a walk of ExtractTemporaryFile calls: [Code] supplies string
+    constants only. Use destination names, since a custom destination can rename a source.
+    """
+    out = {}
+    for fe in s.files:
+        if fe.kind != FILE_STORED:
+            continue
+        dest = fe.dest.replace("/", "\\")
+        if dest.casefold().startswith("{tmp}\\"):
+            name = dest[6:]
+        elif "do not copy" in fe.flags:
+            name = dest.rsplit("\\", 1)[-1]
+        else:
+            continue
+        parts = _name_parts(name)
+        if parts is not None:
+            name = "\\".join(parts)
+            out.setdefault(name.casefold(), name)
+    return out
+
+
+def _code_file_name(text: str) -> str:
+    """A literal relative name in [Code], with its source or temporary constant removed."""
+    name = text.replace("/", "\\")
+    if name.casefold().startswith(("{src}\\", "{tmp}\\")):
+        return name[6:].casefold()
+    return name.lstrip("\\").casefold()
+
+
+def _carried_names(s: Setup) -> dict[str, str]:
+    """Script names that would look like files beside the installer but that Setup carries
+    itself: a stored {tmp} or dontcopy file whose name the [Code] also uses bare or with
+    {tmp}. A {src} name alone is not enough, since the script may then really read it from
+    beside the installer."""
+    temporary = _temporary_files(s)
+    local = set()
+    for text in s.code.strings:
+        if not text.replace("/", "\\").casefold().startswith("{src}\\"):
+            local.add(_code_file_name(text))
+    return {k: v for k, v in temporary.items() if k in local}
+
+
 def beside_files(s: Setup, folder: Path | None = None) -> list[BesideFile]:
     """Files the setup names beside itself ({src}\\...), checked against the folder.
 
     Sources: external [Files] entries (reliable) and [Code] string constants (a pattern scan;
     names built at run time are missed). Names with wildcards or other constants are left out.
     Names in subfolders are looked up up to MAX_SUBFOLDERS levels down; deeper ones are listed
-    as not checked.
+    as not checked. Script names carried by Setup for its temporary folder are excluded;
+    an explicit external [Files] source still requires a file beside the installer.
     """
     folder = Path(folder) if folder is not None else s.path.parent
     listings: dict[Path, tuple[dict[str, str], dict[str, str]]] = {}
@@ -2069,7 +2115,10 @@ def beside_files(s: Setup, folder: Path | None = None) -> list[BesideFile]:
         if fe.kind == FILE_EXTERNAL:
             add(fe.source, "[Files] external entry", "skip if source does not exist" in fe.flags,
                 False)
+    carried = _carried_names(s)
     for text in s.code.strings:
+        if _code_file_name(text) in carried:
+            continue
         if text.casefold().startswith(("{src}\\", "{src}/")):
             add(text, "[Code] string", False, False)
         elif re.fullmatch(r"\\?[^\\/{}:*?]+", text) and text.casefold().endswith(_ARCHIVE_EXT):
@@ -2169,6 +2218,16 @@ def summarise(s: Setup, folder: Path | None = None) -> list[str]:
         lines.append(f"redistributable files: {_n(len(redist_files), 'file', 'files')}, for "
                      f"example {_clean(redist_files[0].dest)}; skipped by gitfurl's extraction")
     beside = beside_files(s, folder)
+    external = {b.name.casefold() for b in beside if b.source == "[Files] external entry"}
+    candidates = {_code_file_name(text) for text in s.code.strings
+                  if text.replace("/", "\\").casefold().startswith("{src}\\")
+                  or (re.fullmatch(r"\\?[^\\/{}:*?]+", text)
+                      and text.casefold().endswith(_ARCHIVE_EXT))}
+    carried = [name for key, name in _carried_names(s).items()
+               if key in candidates and key not in external]
+    for name in carried[:LISTED]:
+        lines.append(f"{_clean(name)} comes with the setup itself (extracted to its "
+                     "temporary folder), so it is not needed beside the installer")
     missing = [b for b in beside if b.checked and not b.present and not b.optional]
     for b in beside:
         state = "present" if b.present else "missing"
