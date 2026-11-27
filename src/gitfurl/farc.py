@@ -5,7 +5,7 @@ to (the archive's own index), with bounded reads. From those it reports the file
 sizes, where the archive starts (the size of a self-extracting program before it, if any),
 whether the archive is locked, and for each data block whether its method is one gitfurl
 decodes (a chain of `storing`, `lzma`, `exe`, `x86`, `delta`, `rep`, `4x4` (with `lzma`
-inside), `srep` and `rolz` stages) or a method gitfurl does not handle.
+inside), `srep`, cm and `rolz` stages) or a method gitfurl does not handle.
 
 What it never does (extraction is in extract.py, which uses this reader): it never
 extracts, decodes or verifies file data, never writes or
@@ -63,6 +63,11 @@ SREP_NAMES = frozenset(["srep", "srep64", "srep_new", "srep_old"])
 # dispack; gitfurl calls it x86 and never shows these).
 X86_NAMES = frozenset(["dispack070", "dispack"])
 X86_DEFAULT = 8 << 20  # its block size when the method names none
+# The external method gitfurl calls the cm stage (a context-mixing LZ in independent jobs of
+# up to 512 MiB, decoded by gitfurl's optional native module). This is the archive's text for
+# it; it is kept only here and never shown.
+CM_NAMES = frozenset(["magic2"])
+
 # The external method gitfurl calls rolz (an LZ with reduced-offset matches, an x86 stage and
 # long-range copies, in records of its own container). This is the archive's text for it; it
 # is kept only here and never shown.
@@ -97,7 +102,7 @@ class FarcError(ValueError):
 class Stage:
     """One method of a supported chain, by gitfurl's own name (never the archive's text)."""
 
-    name: str  # "storing", "lzma", "exe", "x86", "delta", "rep", "4x4", "srep" or "rolz"
+    name: str  # "storing", "lzma", "exe", "x86", "delta", "rep", "4x4", "srep", "cm" or "rolz"
     lzma: dict | None = None  # lzma, and the lzma inside 4x4: dict_size, lc, lp, pb
     # delta, x86: block size; rep: window size; 4x4: piece size named in its fields (0: none);
     # srep: largest block accepted (from the method's parameters)
@@ -361,6 +366,9 @@ def _parse_stage(text: str) -> tuple[Stage | None, str]:
         return _parse_srep(rest)
     if name in X86_NAMES:
         return _parse_x86(rest)
+    if name in CM_NAMES:  # it takes no parameters in the archive's text
+        return (Stage("cm"), "") if not rest else (None, "cm stage settings gitfurl does not "
+                                                          "understand")
     if name in ROLZ_NAMES:  # it takes no parameters in the archive's text
         return (Stage("rolz"), "") if not rest else (None, "rolz settings gitfurl does not "
                                                             "understand")
@@ -385,9 +393,10 @@ def _parse_stage(text: str) -> tuple[Stage | None, str]:
 
 def parse_method(text: str) -> Method:
     """Classify one compressor string: a chain of storing, lzma, exe, x86, delta, rep, 4x4, srep
-    and rolz stages, or unsupported. rolz reads its stored data at random (its index is at the
-    end), so it must be the last method, the one that reads the block. Never raises; the string
-    itself is not kept."""
+    cm and rolz stages, or unsupported. The cm stage reads the block's stored bytes (its jobs
+    are found by their lengths in that data) and rolz reads its stored data at random (its index
+    is at the end), so each must be the last method, the one that reads the block. Never raises;
+    the string itself is not kept."""
     encrypted = any(c in text.lower() for c in _CIPHERS)
 
     def no(reason: str) -> Method:
@@ -409,6 +418,8 @@ def parse_method(text: str) -> Method:
         if stage is None:
             return no(reason)
         stages.append(stage)
+    if any(st.name == "cm" for st in stages[:-1]):
+        return no("the cm stage only as the last method of a chain")
     if any(st.name == "rolz" for st in stages[:-1]):
         return no("rolz only as the last method of a chain")
     single = stages[0].lzma if len(stages) == 1 and stages[0].name == "lzma" else None

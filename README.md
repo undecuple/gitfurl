@@ -21,7 +21,7 @@
 
 gitfurl is a graphical app (with an optional command line) for running a Windows installer on Linux through Wine. **You supply the installer.** Gitfurl does not find, download or include any.
 
-When the installer's payload is FreeArc archives that gitfurl can read (storing, lzma, exe, x86, delta, rep, 4x4 with lzma inside, and srep), gitfurl unpacks them itself and does not run Setup. Otherwise Setup runs under Wine, or under Proton through umu-run. The plan names the route and says why.
+When the installer's payload is FreeArc archives that gitfurl can read (storing, lzma, exe, x86, delta, rep, 4x4 with lzma inside, srep, and the cm stage with gitfurl's optional native module), gitfurl unpacks them itself and does not run Setup. Otherwise Setup runs under Wine, or under Proton through umu-run. The plan names the route and says why.
 
 Each run gets a timeline: one line per step, saying what it did and why. It shows in the window's Timeline card, under "Last run" in the library, and with `gitfurl cli log PREFIX`.
 

@@ -34,12 +34,44 @@ jobs:
       - name: install dev tools
         run: python -m pip install pytest==8.3.5 ruff==0.11.13
       - name: shellcheck
-        run: shellcheck tools/sandbox.sh docker/entrypoint.sh .githooks/pre-commit
+        run: shellcheck tools/sandbox.sh tools/build_codecs.sh docker/entrypoint.sh .githooks/pre-commit
       - name: lint
         run: ruff check .
       # Tests use mocks only. They need no Wine and no installer.
       - name: test
         run: PYTHONPATH=src python -m pytest -q
+
+  # The optional native decoder module (native/gitfurl-codecs, the cm stage): Rust checks and
+  # tests, then the Python suite again with the module built (one Python suffices: abi3).
+  native:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+      - name: Rust toolchain (pinned; rustup is on the runner)
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --component clippy,rustfmt
+          rustup default 1.99.1
+      - name: window test needs a virtual display and tkinter
+        run: sudo apt-get update && sudo apt-get install -y xvfb python3-tk
+      - name: install build and test tools
+        run: python -m pip install maturin==1.15.0 pytest==8.3.5
+      - name: cargo fmt, clippy and test
+        working-directory: native/gitfurl-codecs
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo clippy --locked --features python --all-targets -- -D warnings
+          cargo test --locked
+      - name: build the native module with maturin
+        run: sh tools/build_codecs.sh
+      - name: test with the native module
+        run: |
+          PYTHONPATH=src python -c "from gitfurl import farc_codecs as f; assert f.cm_available()"
+          PYTHONPATH=src python -m pytest -q
 
   secrets:
     runs-on: ubuntu-latest
