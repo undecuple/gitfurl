@@ -88,6 +88,8 @@ Optional: `python -m gitfurl cli desktop-entry` (or `gitfurl cli desktop-entry` 
 | Topic | Where |
 |---|---|
 | What it is for, every option, screenshots, the command line | [docs/user-guide.md](docs/user-guide.md) |
+| Every command and option on one page, with recipes | [docs/cli.md](docs/cli.md) |
+| What happens to an installer, stage by stage, on both routes | [docs/pipeline.md](docs/pipeline.md) |
 | What it does and does not do; who it is for | [docs/scope.md](docs/scope.md) |
 | Tested setups, known issues | [docs/status.md](docs/status.md) |
 | How the core, app and progress reading fit together | [docs/architecture.md](docs/architecture.md), [docs/code-map.md](docs/code-map.md) (diagrams) |

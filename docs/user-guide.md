@@ -199,7 +199,7 @@ What may remain, because nothing is deleted: files that were already copied into
 Shows Wine and bubblewrap versions and the platform, the safety note, and the **Window** card with the view settings (see "Menu and view settings").
 
 ## Command line (optional)
-The graphical app is the default. The command line is opt-in and uses the same code and the same approvals:
+The graphical app is the default. The command line is opt-in and uses the same code and the same approvals. Every command and option, with recipes, is on one page in [cli.md](cli.md); what happens at each stage of a run is in [pipeline.md](pipeline.md).
 
     gitfurl cli doctor
     gitfurl cli install /path/to/setup.exe --dry-run --prefix NAME
