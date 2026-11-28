@@ -137,6 +137,19 @@ class InstallScriptTests(unittest.TestCase):
         self.assertEqual(self.calls(), [])  # installing runs nothing
         self.assert_tmp_empty()
 
+    def test_sums_with_the_notice_files(self):
+        # A release's SHA256SUMS also has lines for THIRD_PARTY.md and BUNDLED.txt.
+        body = self.publish("one")
+        d = self.srv / "latest/download"
+        sums = (d / "SHA256SUMS").read_text()
+        (d / "SHA256SUMS").write_text(
+            sums + "1" * 64 + "  THIRD_PARTY.md\n" + "2" * 64 + "  BUNDLED.txt\n")
+        r = self.run_script()
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(f"Checked: {ASSET} matches SHA256SUMS", r.stdout)
+        self.assertEqual(self.target.read_bytes(), body)
+        self.assert_tmp_empty()
+
     def test_xdg_bin_home_and_dir(self):
         xdg = self.base / "xdg bin"
         r = self.run_script(env=self.env(XDG_BIN_HOME=str(xdg)))
