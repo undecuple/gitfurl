@@ -379,8 +379,12 @@ class CliTests(Base):
 
     def test_portable_is_refused_with_a_mapping(self):
         inst = self.make()
-        code, _, err = run_cli("install", str(inst), "--prefix", "p1", "--dry-run", "--route",
-                               "wine", "--link-names", "--portable", "--no-memory-limit")
+        # bwrap is faked: without it the portable check refuses first (as on a runner
+        # without bubblewrap), and this test is about the mapping.
+        with mock.patch("gitfurl.portable.find_bwrap", return_value="/x/bwrap"):
+            code, _, err = run_cli("install", str(inst), "--prefix", "p1", "--dry-run",
+                                   "--route", "wine", "--link-names", "--portable",
+                                   "--no-memory-limit")
         self.assertEqual(code, 1)
         self.assertIn("cannot be combined with --portable", err)
 
