@@ -322,7 +322,7 @@ class Vectors(unittest.TestCase):
         self.assertEqual((h["privileges"], h["compression"], h["password"]), (2, 4, False))
         self.assertEqual(h["strings"]["app name"], "A")
         self.assertEqual(h["strings"]["architectures allowed"], "x64compatible")
-        self.assertEqual(e["languages"], [inno.Language("english", 0x0409)])
+        self.assertEqual(e["languages"], [inno.Language("english", 0x0409, "English")])
         self.assertEqual(e["custom messages"][0].language, -1)
         self.assertEqual((e["types"][0].name, e["types"][0].kind), ("full", 1))
         self.assertEqual((e["components"][0].name, e["components"][0].options), ("main", 1))

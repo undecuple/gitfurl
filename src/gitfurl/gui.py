@@ -120,14 +120,19 @@ UNATTENDED_NOTE = ("Off by default. For Inno Setup installers, gitfurl starts Se
                    "switches. Refused for installers that are not Inno Setup.")
 
 
-def unattended_for(installer, prefix: str, enabled: bool, now=None):
+def unattended_for(installer, prefix: str, enabled: bool, now=None, choices=None):
     """The UnattendedPlan for the window, or None when off. Reads the installer's headers
-    only. Raises ValueError when the installer is not Inno Setup."""
+    only. Raises ValueError when the installer is not Inno Setup. `choices` (a
+    setup_choices.Picked) adds Inno's switches for the answers in the Setup's choices card."""
     if not enabled:
         return None
     from gitfurl.unattended import plan_unattended
 
-    return plan_unattended(prefix, detect(installer), now)
+    plan = plan_unattended(prefix, detect(installer), now)
+    if choices is not None and choices.switches():
+        plan = replace(plan, choice_args=tuple(choices.switches()),
+                       choices_line=choices.record())
+    return plan
 
 
 def memory_limit_problem(enabled: bool, avail=None, meminfo: str = "/proc/meminfo") -> str | None:
@@ -168,10 +173,10 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
                   proton_path: str | None = None, portable: bool = False,
                   scan: bool = False, memory_limit: bool = False, unattended: bool = False,
                   now=None, wine_addons: bool = False,
-                  link_names: bool = False) -> tuple[str, str | None]:
+                  link_names: bool = False, choices=None) -> tuple[str, str | None]:
     """Return (preview text, error). No side effects: the scan is described, never run; the
     memory limit lines read files only; with link_names the staging folder and its links are
-    described, never made."""
+    described, never made. `choices`: the Setup's choices card (a setup_choices.Picked)."""
     if not installer.strip():
         return "", "Choose an installer file."
     if not prefix.strip():
@@ -183,7 +188,7 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
                           runtime=runtime, proton_path=proton_path, portable=portable,
                           scan=scan_plan, memory_limit=memory_limit,
                           unattended=unattended_for(validate_installer(installer.strip()),
-                                                    prefix.strip(), unattended, now),
+                                                    prefix.strip(), unattended, now, choices),
                           wine_addons=wine_addons)
         portable_lines = []
         if portable:
@@ -218,6 +223,8 @@ def describe_plan(installer: str, prefix: str, runtime: str = "wine",
         text += "\n".join(link_lines) + "\n"
     if plan.unattended is not None:
         text += "\n".join(plan.unattended.describe(plan.prefix)) + "\n"
+    if choices is not None:
+        text += "\n".join(choices.lines()) + "\n"
     if scan_plan is not None:
         text += "\n".join(scanmod.describe_scan_plan(scan_plan)) + "\n"
     text += "\n".join(describe_memory(memory_limit, memory_availability() if memory_limit
@@ -467,10 +474,12 @@ def native_plan_text(plan, det, *, memory_lines=(), preflight: str = "",
 
 def native_plan_for(installer, choice, *, create_ok: bool, memory_on: bool, wine=None,
                     scan_plan=None, db_info=None, cleanup_text=None, avail=None,
-                    meminfo: str = "/proc/meminfo", setup_entries: bool = False, env=None):
+                    meminfo: str = "/proc/meminfo", setup_entries: bool = False, env=None,
+                    choices=None):
     """(route.NativeInstallPlan, its stops, memory lines) for the window, built the way the
     command line builds them. Reads files and free space only; starts nothing.
-    setup_entries: the setup's registry entries and shortcuts switch is on."""
+    setup_entries: the setup's registry entries and shortcuts switch is on. choices: the
+    Setup's choices card (a setup_choices.Picked)."""
     from gitfurl.route import NativeInstallPlan, native_stops
 
     xplan = choice.extract
@@ -491,10 +500,11 @@ def native_plan_for(installer, choice, *, create_ok: bool, memory_on: bool, wine
     if setup_entries:
         from gitfurl.setup_entries import plan_setup_entries
 
-        entries = plan_setup_entries(installer, xplan, env)
+        entries = plan_setup_entries(installer, xplan, env,
+                                     choice=choices.entry_choice() if choices else None)
     plan = NativeInstallPlan(installer, xplan.prefix_name, xplan.prefix, choice, create,
                              wine if create else None, scan_lines, cleanup_text, [],
-                             memory_check=memory_on, setup_entries=entries)
+                             memory_check=memory_on, setup_entries=entries, choices=choices)
     return plan, stops, memory_lines
 
 
@@ -1412,6 +1422,17 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     plan_box = text_box(c.body, 5)
     plan_box.pack(fill="x")
 
+    # ---- Setup's choices: the questions Setup's wizard would ask (gitfurl.choices_panel) ----
+    from gitfurl.choices_panel import ChoicesPanel
+    from gitfurl.setup_choices import window_mode
+
+    heading(det, "Setup's choices  (Inno Setup; the script's defaults are set)")
+    c = w.RoundCard(det)
+    c.pack(fill="x")
+    choices_panel = ChoicesPanel(c.body, bg=w.PANEL, fg=FG, muted=w.MUTED, font=F(T["body"]),
+                                 small=F(T["caption"]), on_change=lambda: refresh_plan())
+    choices_panel.frame.pack(fill="x")
+
     heading(det, "Progress")
     c = w.RoundCard(det)
     c.pack(fill="x")
@@ -1550,6 +1571,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         tl = tlmod.Timeline()
         tlmod.plan_entries(tl, det_, choice, prefix_path, exists, create, target,
                            entries_var.get())
+        tlmod.choices_entry(tl, choices_panel.picked())
         tlmod.approval_entry(tl, "window")
         tl_state.update(tl=tl, version=-1, prefix=selected_prefix(), preview=False,
                         run_key=timeline_key())
@@ -1886,11 +1908,14 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         native, preview_error = None, None
         try:
             native = native_choice() if prefix_error is None else None
+            choices_panel.update(installer_var.get().strip(), window_mode(
+                native is not None, entries_var.get(), unattended_var.get()))
             if native is not None:
                 plan, stops, mem_lines = native_plan_for(
                     validate_installer(installer_var.get().strip()), native,
                     create_ok=create_var.get(), memory_on=memory_var.get(),
-                    wine=wine_path["value"], setup_entries=entries_var.get())
+                    wine=wine_path["value"], setup_entries=entries_var.get(),
+                    choices=choices_panel.picked())
         except Exception as exc:  # noqa: BLE001 - shown in the checklist; nothing runs
             native, preview_error = None, f"The plan could not be made: {exc}"
         if preview_error is not None:
@@ -1916,7 +1941,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             text, err = describe_plan(installer_var.get(), name, runtime, proton_dir(),
                                       portable_var.get(), scan_var.get(), memory_var.get(),
                                       unattended_var.get(), wine_addons=addons_var.get(),
-                                      link_names=link_var.get())
+                                      link_names=link_var.get(),
+                                      choices=choices_panel.picked())
             set_text(plan_box, text or (err or ""))
             rows = plan_checklist(installer_problem(installer_var.get()), prefix_error, exists,
                                   create_var.get(), runtime, bool(tool), err,
@@ -2128,10 +2154,12 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         from datetime import datetime
 
         now = datetime.now()  # one time stamp: the approved text names the same Inno log
+        picked = choices_panel.picked()
         text, err = describe_plan(installer_var.get(), selected_prefix(), runtime_var.get(),
                                   proton_dir(), portable_var.get(), scan_var.get(),
                                   memory_var.get(), unattended_var.get(), now,
-                                  wine_addons=addons_var.get(), link_names=link_var.get())
+                                  wine_addons=addons_var.get(), link_names=link_var.get(),
+                                  choices=picked)
         err = err or memory_limit_problem(memory_var.get())
         if err:
             messagebox.showerror("Cannot run", err)
@@ -2153,7 +2181,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                           portable=portable_var.get(), scan=scan_plan,
                           memory_limit=memory_var.get(),
                           unattended=unattended_for(validate_installer(installer_var.get().strip()),
-                                                    selected_prefix(), unattended_var.get(), now),
+                                                    selected_prefix(), unattended_var.get(), now,
+                                                    picked),
                           wine_addons=addons_var.get())
         try:  # the same staging folder as in the approved text (same time stamp)
             staging, _lines, links = window_links(
@@ -2224,7 +2253,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         pending["portable"] = plan.portable
         options = RunOptions(on_progress=ui_updates.put, progress_interval=3.0,
                              detailed_log=detail_var.get(), control=control,
-                             on_note=note_received, stall_after_s=WINDOW_STALL_S)
+                             on_note=note_received, stall_after_s=WINDOW_STALL_S,
+                             choices_line=picked.record() if picked and picked.applied else None)
         if scan_plan is not None:
             status_var.set("Scanning the installer with ClamAV first...")
         options = replace(options, timeline=timeline_begin(plan.prefix, not missing, create))
@@ -2249,7 +2279,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             installer, choice, create_ok=create_var.get(), memory_on=memory_var.get(),
             wine=wine_path["value"], scan_plan=scan_plan, db_info=db,
             cleanup_text=clean.describe() if cleanup_var.get() != "none" else None,
-            setup_entries=entries_var.get())
+            setup_entries=entries_var.get(), choices=choices_panel.picked())
         if stops:
             messagebox.showerror("Cannot run", "\n\n".join(native_stop_text(s) for s in stops)
                                  + "\n\nNothing was run, created or written.")
@@ -2640,6 +2670,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                     "delete_clicked": delete_clicked,
                     "delete_buttons": delete_buttons,
                     "lib_status_var": lib_status_var,
+                    "choices_panel": choices_panel,
                 }
                 driver(root, ui)
             except BaseException:  # noqa: BLE001 - reported on stderr, the exit status says it

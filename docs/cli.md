@@ -57,6 +57,10 @@ The **Route** column says where an option has an effect: **both**, **native** (g
 | `--wine-addons` | When gitfurl creates the prefix with the wine runtime, let Wine show its Mono and Gecko dialogs. | off | Setup |
 | `--portable` | Run Setup in bwrap: only the prefix writable, no network, no menu entries. Wine runtime only; not with `--link-names`. Makes the automatic route Setup. | off | Setup |
 | `--unattended` | Inno Setup only: run without the wizard (`/VERYSILENT` and friends), into `C:\Games\PREFIX`, and read Inno's log afterwards. Makes the automatic route Setup. | off | Setup |
+| `--language NAME` | Inno Setup: the language to pick (its `[Languages]` name). On a terminal gitfurl otherwise asks; with `--yes` or no terminal it takes the script's default. See [Setup's choices](user-guide.md#setups-choices-inno-setup). | asked | Setup with `--unattended`; native with `--apply-setup-entries` |
+| `--type NAME` | Inno Setup: the setup type, for example `full` or `custom`. | asked | as `--language` |
+| `--components A,!B` | Inno Setup: components to select (`A`) or deselect (`!B`); the others keep the script's default. | asked | as `--language` |
+| `--tasks X,!Y` | Inno Setup: tasks to check (`X`) or uncheck (`!Y`); the others keep the script's default. | asked | as `--language` |
 | `--wine-debug CHANNELS` | Set `WINEDEBUG` for the run, for example `err+all`. Makes the automatic route Setup. | not set | Setup |
 | `--show-changes` | After the run, list what Setup changed (files, registry keys). Makes the automatic route Setup. | off | Setup |
 | `--find-exe` | After the run, guess which new program was installed. | off | Setup |
@@ -99,7 +103,8 @@ The files Inno Setup itself holds for the program folder (`{app}`) go into `C:\G
 | `INSTALLER` | The Inno Setup installer (setup.exe). | required | native |
 | `--prefix NAME` | An existing dedicated prefix. | required | native |
 | `--dry-run` | Show the plan and change nothing. | off | native |
-| `--yes` | Approve without typing `yes`. | off | native |
+| `--yes` | Approve without typing `yes`, and take the script's defaults for Setup's choices. | off | native |
+| `--language NAME`, `--type NAME`, `--components A,!B`, `--tasks X,!Y` | As for `install`: they decide which of Inno Setup's own files that name components, tasks or languages are extracted. | asked | native |
 
 ### `gitfurl cli prefix create NAME`
 
@@ -184,6 +189,12 @@ This reads an index or footer whose CRC-32 is wrong, with a warning. Each file i
     gitfurl cli install setup.exe --prefix mygame2 --create-prefix --accept-bad-index-crc --keep-bad-file-crc
 
 Warning: gitfurl cannot tell a damaged file from an archive with wrong checksums. With `--keep-bad-file-crc` every kept file is listed with its stored and computed CRC-32, and `--cleanup` is skipped so the installer stays. Both options are off by default and last for one run.
+
+**Answer Setup's questions in advance** (Inno Setup, run without its wizard).
+
+    gitfurl cli install setup.exe --prefix mygame --create-prefix --unattended --type custom --components 'main,!music' --tasks '!desktopicon'
+
+Quote a value with `!` so the shell leaves it alone. Without these options, gitfurl asks on a terminal: a number for the language and the setup type, `y` or `n` for each component and task. Enter keeps the script's default. Questions that Setup builds in its own code cannot be seen or answered.
 
 **Unpack into another folder.**
 

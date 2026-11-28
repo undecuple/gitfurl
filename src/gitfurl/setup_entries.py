@@ -17,8 +17,10 @@ it can apply exactly, and, after the approval of a plan that lists every value a
              did not write is never replaced.
 
 Skipped, and listed with the reason: entries with a Check function, [Code] calls, a language
-condition (when the setup has more than one language), components or tasks that are not the
-defaults, a Windows version limit, constants outside the small table below ({code:...},
+condition (when the setup has more than one language and no language was chosen), components
+or tasks that are not chosen (the user's answers to Setup's questions, see
+gitfurl.setup_choices, or else the script's defaults; without answers every [Icons] entry with
+a condition is skipped), a Windows version limit, constants outside the small table below ({code:...},
 {reg:...}, {param:...} and the like), roots other than HKLM, HKCU, HKCR (and HKA when the
 setup's privileges settle it). Deletion flags and uninstall flags are not applied, only listed.
 [Run] entries are not touched here (they stay listed, never run).
@@ -612,7 +614,8 @@ def _reg_value(e, ctx: Context, choice, languages: int, setup) -> RegValue | str
         return "calls [Code] (BeforeInstall or AfterInstall)"
     if e.cond.check:
         return f"has a Check function ({clean(e.cond.check, 40)})"
-    if e.cond.languages and languages > 1:
+    answered = getattr(choice, "answered", False)
+    if e.cond.languages and languages > 1 and not answered:
         return "depends on the language Setup picks"
     notes: list[str] = []
     if e.cond.components or e.cond.tasks or e.cond.languages:
@@ -621,7 +624,8 @@ def _reg_value(e, ctx: Context, choice, languages: int, setup) -> RegValue | str
             return why
         if not selected:
             return why
-        notes.append("part of the default components or tasks (as gitfurl reads them)")
+        notes.append("part of your choices (components, tasks or language)" if answered else
+                     "part of the default components or tasks (as gitfurl reads them)")
     if e.below_nt:
         return "limited to Windows versions below one it names"
     if _ver_major(e.min_nt) > 10:
@@ -731,7 +735,8 @@ def shortcut_text(name: str, prefix: Path, prefix_name: str, target: str,
     return "\n".join(lines)
 
 
-def _plan_shortcuts(setup, xplan, ctx: Context, env, plan: SetupEntriesPlan) -> None:
+def _plan_shortcuts(setup, xplan, ctx: Context, env, plan: SetupEntriesPlan, choice=None
+                    ) -> None:
     from gitfurl.desktop import DesktopRefused, _missing_dirs, _ours_entry, _read_nofollow
     from gitfurl.desktop import data_home
     from gitfurl.route import written_files
@@ -764,7 +769,12 @@ def _plan_shortcuts(setup, xplan, ctx: Context, env, plan: SetupEntriesPlan) -> 
         if ic.hooks:
             skip("calls [Code] (BeforeInstall or AfterInstall)")
             continue
-        if ic.cond.conditional:
+        if ic.cond.conditional and choice is not None and not ic.cond.check:
+            selected, why = choice.decide(ic.cond)  # the user's answers decide
+            if not selected:
+                skip(why)
+                continue
+        elif ic.cond.conditional:
             what = ", ".join(f"{k}: {clean(v, 40)}" for k, v in (
                 ("Components", ic.cond.components), ("Tasks", ic.cond.tasks),
                 ("Languages", ic.cond.languages), ("Check", ic.cond.check)) if v)
@@ -842,12 +852,15 @@ def _plan_shortcuts(setup, xplan, ctx: Context, env, plan: SetupEntriesPlan) -> 
         plan.new_dirs = _missing_dirs(apps / "x")
 
 
-def plan_setup_entries(installer: Path, xplan, env: dict[str, str] | None = None
-                       ) -> SetupEntriesPlan:
+def plan_setup_entries(installer: Path, xplan, env: dict[str, str] | None = None,
+                       choice=None) -> SetupEntriesPlan:
     """What --apply-setup-entries would write for this native plan (gitfurl.extract
     ExtractPlan). Reads the setup's header, a few names in the prefix and the first bytes of
     its system.reg only; writes nothing. Never raises for an installer it cannot read (the
-    plan then says so and holds nothing to write)."""
+    plan then says so and holds nothing to write). `choice`: the user's answers to Setup's
+    questions (gitfurl.inno.Choices.answer); they then decide the [Registry] and [Icons]
+    entries whose conditions name components, tasks or languages. None: the script's
+    defaults decide [Registry] entries and every conditional [Icons] entry is skipped."""
     from gitfurl import inno
 
     facts = prefix_facts(xplan.prefix, env)
@@ -858,7 +871,8 @@ def plan_setup_entries(installer: Path, xplan, env: dict[str, str] | None = None
         plan.notes.append("the installer's setup data could not be read "
                           f"({clean(str(exc), 120)}); there is nothing to add")
         return plan
-    choice = inno.default_choice(setup)
+    answers = choice
+    choice = answers if answers is not None else inno.default_choice(setup)
     ctx = Context(xplan.target, facts.arch, _mode64(setup, facts.arch), _admin(setup),
                   facts.user)
     if setup.registry and not facts.reg_files:
@@ -876,7 +890,7 @@ def plan_setup_entries(installer: Path, xplan, env: dict[str, str] | None = None
                 plan.skipped.append(f"{label}: {got}")
             else:
                 plan.values.append(got)
-    _plan_shortcuts(setup, xplan, ctx, env, plan)
+    _plan_shortcuts(setup, xplan, ctx, env, plan, answers)
     if (setup.registry or setup.icons) and choice.notes and plan.values:
         plan.notes.extend(choice.notes)
     return plan

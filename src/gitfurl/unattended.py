@@ -12,6 +12,8 @@ Switches used (Inno Setup's "Setup Command Line Parameters"):
   /NORESTART         never restart, even if the installer asks for it
   /DIR="x:\\dir"     the install folder
   /LOG="file"        a log of what Setup did
+  /LANG=, /TYPE=, /COMPONENTS=, /TASKS=  the user's answers to Setup's questions, when
+                     gitfurl asked them (gitfurl.setup_choices); !name leaves a task unchecked
 
 A setup script can still show its own windows or ignore these switches; that is not known
 until it runs. Nothing here runs anything: it builds arguments and reads one file afterwards.
@@ -57,9 +59,14 @@ class UnattendedRefused(ValueError):
 class UnattendedPlan:
     target: str  # a Windows path inside the prefix, e.g. C:\Games\my-game
     log_name: str  # file name of Inno Setup's log, directly in the prefix's drive_c
+    # Inno's own /LANG=, /TYPE=, /COMPONENTS=, /TASKS= for the user's answers to Setup's
+    # questions (gitfurl.setup_choices), and their one-line record; empty: the defaults
+    choice_args: tuple[str, ...] = ()
+    choices_line: str = ""
 
     def args(self) -> list[str]:
-        return [*INNO_SWITCHES, f"/DIR={self.target}", f"/LOG=C:\\{self.log_name}"]
+        return [*INNO_SWITCHES, *self.choice_args, f"/DIR={self.target}",
+                f"/LOG=C:\\{self.log_name}"]
 
     def log_path(self, prefix: Path) -> Path:
         return prefix / "drive_c" / self.log_name
@@ -75,7 +82,10 @@ class UnattendedPlan:
             f"  switches: {' '.join(self.args())}",
             f"  install folder: {self.target} (in the prefix: {self.folder(prefix)})",
             f"  Inno Setup's log: {self.log_path(prefix)} (read after the run)",
-            ("  the setup script picks every other choice (components, tasks) with its "
+            ("  your answers to Setup's choices are passed with Inno's own switches (above); "
+             "a script can still show its own windows or ignore these switches"
+             if self.choices_line else
+             "  the setup script picks every other choice (components, tasks) with its "
              "defaults; a script can still show its own windows or ignore these switches"),
         ]
 

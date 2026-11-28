@@ -369,6 +369,16 @@ def plan_entries(tl: Timeline, det, choice, prefix: Path, exists: bool, create: 
     skip_entries(tl, choice, target, setup_entries)
 
 
+def choices_entry(tl: Timeline, picked) -> None:
+    """Setup's questions and the answers (a gitfurl.setup_choices.Picked, or None)."""
+    if picked is None:
+        return
+    from gitfurl.setup_choices import MODE_TEXT
+
+    tl.add("plan", "Setup's choices: " + ("answered" if picked.applied else "shown only"),
+           f"{picked.record()}; {picked.how}; {MODE_TEXT[picked.mode]}")
+
+
 def approval_entry(tl: Timeline, how: str) -> None:
     """how: "window" (the approval dialog), "typed" (a typed yes) or "yes" (--yes)."""
     if how == "yes":
