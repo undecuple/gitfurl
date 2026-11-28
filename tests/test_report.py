@@ -27,7 +27,7 @@ except ImportError:  # python -m unittest tests.test_report
     from tests.test_native_run import NativeBase
     from tests.test_route import no_process
 
-from gitfurl import cli, report
+from gitfurl import __version__, cli, report
 from gitfurl.gui import support_report_view
 
 USER, REAL, HOST, MID = "zorkuser", "Quuxbert Vromm", "glimmerhost", "0f1e2d3c4b5a69788796a5b4c3d2e1f0"
@@ -165,7 +165,8 @@ class ScrubTests(Fixture):
         self.assertTrue(text.startswith(
             "gitfurl support report \u2014 scrubbed: software names, file names, checksums, "
             "user, host and paths replaced; sizes rounded. Nothing was sent anywhere.\n"))
-        for kept in ("gitfurl: 1.4.0", "wine: wine-11.0", "umu-run: not found",
+        self.assertIn(f"\ngitfurl: {__version__}\n", text)
+        for kept in ("wine: wine-11.0", "umu-run: not found",
                      "route: wine (you chose it); reason: you chose the route",
                      "runtime: wine", "inno setup data format: 6.7.0", "exit status: 0",
                      "crc-32 mismatches logged: 1 kept",
