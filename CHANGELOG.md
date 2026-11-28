@@ -4,6 +4,8 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+- Native-route plans suggest reviewing an available numbered archive-name mapping, describe mapped names without a stale Setup-only missing-file warning, and no longer deny the registry entries and shortcuts that the plan schedules after extraction. Checksum exceptions remain opt-in.
+
 ### Changed
 - **Build-only dry run of the release workflow.** Starting `release.yml` by hand (`gh workflow run release.yml --ref main`) runs the same build and smoke test and uploads the program, `THIRD_PARTY.md`, `BUNDLED.txt` and `SHA256SUMS` as a workflow artifact. The draft-release job now runs only for a pushed version tag (`github.event_name == 'push'`), so a run started by hand never creates a release, tag or draft, even on a tag, and the notify workflow does not run. The tag-triggered path is unchanged apart from the new assets.
 - Docs: refreshed code map; new pages for the installer pipeline and the command line.

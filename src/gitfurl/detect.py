@@ -287,6 +287,50 @@ def decide(det: Detection) -> Verdict:
                                         "is chosen by gitfurl.route")])
 
 
+def evidence_lines(ev: Evidence, choice=None) -> list[str]:
+    """Render observations in their route context without changing the detection.
+
+    Missing source names describe what Setup would look for. On the native route Setup
+    does not run, and a chosen name mapping reads the original archive directly.
+    """
+    if ev.format != "Inno Setup" or choice is None or choice.route != ROUTE_NATIVE:
+        return ev.lines
+    links = choice.links
+    mapped = links.links if links is not None and links.ok else ()
+    # Display text is not an identity: cleaning and shortening can make different source
+    # names look alike (including a name with no mapping). Only annotate an unambiguous,
+    # unchanged name; the chosen mapping is still stated in the route for the others.
+    usable = []
+    ambiguous = False
+    for name, target in mapped:
+        shown = clean(name, inno.SHOW)
+        prefix = f"file beside the installer: {shown}: missing"
+        if shown == name and sum(line.startswith(prefix) for line in ev.lines) == 1:
+            usable.append((prefix, shown, target))
+        else:
+            ambiguous = True
+    lines = []
+    for line in ev.lines:
+        if line.startswith("warning:") and line.endswith(
+                "not found beside the installer; a silent run is likely to stop on "
+                "the script's own error window"):
+            lines.append("note: the source-file names above describe Setup's requirements; "
+                         "Setup is not run, and the native unpack reads only the archives "
+                         "listed in its plan")
+            continue
+        for prefix, shown, target in usable:
+            if line.startswith(prefix):
+                line = (f"file beside the installer: {shown}: supplied by "
+                        f"{clean(target, inno.SHOW)} (read directly; no link is made)"
+                        + line[len(prefix):])
+                break
+        lines.append(line)
+    if ambiguous:
+        lines.append("note: shortened or ambiguous source names are left as observed above; "
+                     "the chosen mapping is listed in the route")
+    return lines
+
+
 def describe(det: Detection, choice=None) -> str:
     """Plain text for the plan preview and the approval dialog.
 
@@ -300,7 +344,7 @@ def describe(det: Detection, choice=None) -> str:
     elif det.evidence:
         for ev in det.evidence:
             lines.append(f"  {ev.format}: {ev.confidence}. {ev.detail}; {ev.where}")
-            lines.extend(f"    {line}" for line in ev.lines)
+            lines.extend(f"    {line}" for line in evidence_lines(ev, choice))
     else:
         lines.append("  no known format recognised (this says nothing about whether it runs)")
     lines.append("  the data inside any payload is not decoded or guessed; for FreeArc only "

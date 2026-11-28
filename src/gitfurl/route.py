@@ -272,7 +272,15 @@ def choose_route(installer: Path, prefix_name: str, det: Detection, requested: s
                                   _with_links(script_names(installer), links) if inno else None,
                                   has_script=inno)
     if unlinked and requested == "auto":
-        return wine(unlinked, "to unpack them anyway, use --route native")
+        advice = ["to unpack them anyway, use --route native"]
+        if inno and links is None:
+            from gitfurl.namelinks import propose_for
+
+            proposal = propose_for(installer)
+            if proposal.ok:
+                advice.insert(0, "a numbered name mapping is available; review the plan "
+                              "with --link-names to use it for this installer (off by default)")
+        return wine(unlinked, *advice)
     if linked:
         linked = _linked_text(linked, links)
     what = "a FreeArc archive" if is_arc and not inno else "an Inno Setup installer"
@@ -380,7 +388,15 @@ class NativeInstallPlan:
                 lines.append("still missing, no counterpart in the folder (not needed for the "
                              "unpack): " + ", ".join(clean(n, 60) for n in links.unmatched[:6]))
         step("unpack the archives with gitfurl's own reader (no Windows program runs):")
-        lines.extend(f"  {ln}" for ln in self.extract.describe())
+        unpack_lines = self.extract.describe()
+        if self.setup_entries is not None:
+            from gitfurl.extract import EXTRACTS_ONLY
+
+            unpack_lines = [ln.replace(EXTRACTS_ONLY,
+                "This step extracts files only. The setup entries listed below "
+                "are added only after a complete unpack; the installer itself is not run.")
+                            for ln in unpack_lines]
+        lines.extend(f"  {ln}" for ln in unpack_lines)
         step("list program candidates and redistributable installers found in the new folder "
              "(nothing is run)")
         if self.setup_entries is not None:
