@@ -575,6 +575,25 @@ def split_result(text: str) -> tuple[str, str]:
     return head.strip(), rest.strip()
 
 
+REPORT_NONE = ("There is no saved run to report yet: a run's files are written once you "
+               "approve its plan and it starts.")
+
+
+def support_report_view(source, names=(), wine_version=None, umu=None, **kw):
+    """The window's support report as (notice, text, shareable): the same text
+    `gitfurl cli report` prints for the same run (gitfurl.report.build_report). When no report
+    can be made, the reason, and shareable is False (no Copy or Save is offered then)."""
+    from gitfurl import report
+
+    if source is None:
+        return "No support report was made.", REPORT_NONE, False
+    try:
+        rep = report.build_report(source, names=names, wine_version=wine_version, umu=umu, **kw)
+    except (report.ReportRefused, ValueError, OSError) as exc:
+        return "No support report was made.", f"{exc}", False
+    return report.WINDOW_NOTICE, rep.text, True
+
+
 RUN_ENDED = "The last run has ended; its result is above."
 DONE_REASON = ("Done: this installer was unpacked into this prefix. To unpack it again, choose "
                "another prefix (New prefix in the library or the File menu).")
@@ -1505,6 +1524,77 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         root.clipboard_clear()
         root.clipboard_append(text)
 
+    def current_run_file():
+        """The current run's saved timeline or log (None before a run has saved one)."""
+        tl = tl_state["tl"]
+        if tl is None or tl_state.get("preview"):
+            return None
+        return tl.path or tl.log_path
+
+    def open_support_report(source):
+        """The scrubbed support report, read-only, first; Copy and Save need a press."""
+        from gitfurl import report
+
+        try:
+            det_, choice, _err = current_route()
+            names = report.plan_names(det_, choice)
+        except Exception:  # noqa: BLE001 - extra names only remove more; none is fine
+            names = []
+        wine, umu = wine_path.get("version"), bool(wine_path["umu"])  # from the doctor
+        notice, text, shareable = support_report_view(source, names, wine, umu)
+        win = tk.Toplevel(root)
+        win.title("Support report")
+        win.configure(bg=w.BG)
+        win.geometry("860x560")
+        top_row = tk.Frame(win, bg=w.BG)
+        top_row.pack(fill="x", padx=SP["lg"], pady=(SP["lg"], 0))
+        label(top_row, "Support report", T["lead"], True).pack(side="left")
+        done_var = tk.StringVar(win, "")
+
+        def copy():
+            copy_text(text)
+            done_var.set("Copied to the clipboard. Nothing was sent anywhere.")
+
+        def save():
+            path = filedialog.asksaveasfilename(parent=win, title="Save the support report",
+                                                initialfile="gitfurl-support-report.txt",
+                                                defaultextension=".txt")
+            if not path:
+                return
+            try:
+                report.write_report(Path(path), text)
+            except FileExistsError:
+                messagebox.showerror("Save the support report", "That file exists (or is a "
+                                     "link); nothing was written. Choose a new name.", parent=win)
+                return
+            except OSError as exc:
+                messagebox.showerror("Save the support report", "The file could not be "
+                                     f"written ({exc.strerror or exc}).", parent=win)
+                return
+            done_var.set(f"Saved to {short_path(Path(path))} (readable only by you). Nothing "
+                         "was sent anywhere.")
+
+        buttons = {}
+        if shareable:
+            buttons["save"] = w.PillButton(top_row, "Save…", save, "plain", F(T["caption"]),
+                                           pad=(SP["md"], 4))
+            buttons["copy"] = w.PillButton(top_row, "Copy", copy, "plain", F(T["caption"]),
+                                           pad=(SP["md"], 4))
+            buttons["save"].pack(side="right", padx=(SP["sm"], 0))
+            buttons["copy"].pack(side="right")
+        note = label(win, notice, T["body"], False, w.YELLOW if shareable else w.MUTED,
+                     justify="left", anchor="w")
+        note.pack(fill="x", padx=SP["lg"], pady=(SP["sm"], 0))
+        autowrap(note, win)
+        label(win, "", T["caption"], False, w.MUTED, textvariable=done_var).pack(
+            anchor="w", padx=SP["lg"])
+        box = text_box(win, 22)
+        box.pack(fill="both", expand=True, padx=SP["lg"], pady=SP["lg"])
+        set_text(box, text)
+        tl_state["report"] = {"win": win, "text": text, "notice": notice, "box": box,
+                              "buttons": buttons, "copy": copy, "done": done_var}
+        return win
+
     def open_log(path):
         """The run's own log, read-only: its last 512 KiB, never through a link."""
         if path is None:
@@ -1535,6 +1625,13 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     label(tl_top, "TIMELINE", T["caption"], True, w.MUTED).pack(side="left", padx=SP["xs"])
     tl_copy = w.PillButton(tl_top, "Copy", lambda: copy_text("\n".join(tl_state["lines"])),
                            "plain", F(T["caption"]), pad=(SP["md"], 4))
+    # Both open the scrubbed report read-only first; copying or saving takes a press there.
+    tl_report = w.PillButton(tl_top, "Copy support report",
+                             lambda: open_support_report(current_run_file()), "plain",
+                             F(T["caption"]), pad=(SP["md"], 4))
+    tl_report_save = w.PillButton(tl_top, "Save…",
+                                  lambda: open_support_report(current_run_file()), "plain",
+                                  F(T["caption"]), pad=(SP["md"], 4))
     tl_log = w.PillButton(tl_top, "Open full log",
                           lambda: open_log(tl_state["tl"].log_path if tl_state["tl"] else None),
                           "plain", F(T["caption"]), pad=(SP["md"], 4))
@@ -1542,6 +1639,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                              "ghost", F(T["caption"]), pad=(SP["sm"], 2))
     tl_toggle.pack(side="right", padx=(SP["sm"], 0))
     tl_log.pack(side="right", padx=(SP["sm"], 0))
+    tl_report_save.pack(side="right", padx=(SP["sm"], 0))
+    tl_report.pack(side="right", padx=(SP["sm"], 0))
     tl_copy.pack(side="right")
     tl_slot = tk.Frame(det, bg=w.BG, height=1)
     tl_slot.pack(fill="x")
@@ -1648,8 +1747,14 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         log = tlmod.log_for(path)
         copy = w.PillButton(top_row, "Copy", lambda: copy_text(text), "plain", F(T["caption"]),
                             pad=(SP["md"], 4))
+        rep = w.PillButton(top_row, "Copy support report", lambda: open_support_report(path),
+                           "plain", F(T["caption"]), pad=(SP["md"], 4))
+        rep_save = w.PillButton(top_row, "Save…", lambda: open_support_report(path),
+                                "plain", F(T["caption"]), pad=(SP["md"], 4))
         w.PillButton(top_row, "Open full log", lambda: open_log(log), "plain", F(T["caption"]),
                      pad=(SP["md"], 4)).pack(side="right", padx=(SP["sm"], 0))
+        rep_save.pack(side="right", padx=(SP["sm"], 0))
+        rep.pack(side="right", padx=(SP["sm"], 0))
         copy.pack(side="right")
         label(win, short_path(path), T["caption"], False, w.MUTED).pack(
             anchor="w", padx=SP["lg"], pady=(SP["xs"], 0))
@@ -2072,6 +2177,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         report = run_doctor()
         wine_path["value"] = shutil.which("wine")
         wine_path["umu"] = shutil.which("umu-run")
+        wine_path["version"] = report["wine"].version if not report["wine"].problem else None
         wr, br = report["wine"], report["bwrap"]
         set_banners(bool(wr.problem))
         for child in env_rows.winfo_children():
@@ -2666,6 +2772,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                     "timeline_box": tl_box,
                     "timeline_show": timeline_show,
                     "open_last_run": open_last_run,
+                    "open_support_report": open_support_report,
                     "refresh_list": refresh_list,
                     "delete_clicked": delete_clicked,
                     "delete_buttons": delete_buttons,

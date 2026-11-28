@@ -23,6 +23,7 @@ flowchart LR
   prefix --> pl["list"]
   prefix --> pd["delete NAME"]
   c --> log["log [PREFIX]<br/>the last run's timeline (read-only)"]
+  c --> rep["report [PREFIX]<br/>a scrubbed support report (read-only)"]
   c --> desk["desktop-entry<br/>add or remove gitfurl's menu entry"]
 ```
 
@@ -140,6 +141,20 @@ No options. Read-only: versions of `wine`, `bwrap`, `umu-run`, `innoextract` and
 |---|---|---|
 | `PREFIX` | Print this prefix's latest timeline. | needed unless `--all` |
 | `--all` | List the timelines kept, for this prefix or for every prefix. | off |
+
+### `gitfurl cli report [PREFIX]`
+
+A support report of a run: its log, timeline and detailed log with the software's name, file names, checksums, your user and host names and paths replaced by placeholders, and sizes rounded. It is printed, or written to a new file. Nothing is sent anywhere; read it before you share it. See [Getting help: a support report](user-guide.md#getting-help-a-support-report).
+
+| Option | What it does | Default |
+|---|---|---|
+| `PREFIX` | Report this prefix's latest run. | needed unless `--log` |
+| `--run STAMP` | The run with this stamp (`YYYYMMDD-HHMMSS`, as in the log's name). | latest |
+| `--all-runs` | Every run of the prefix that is kept. | off |
+| `--log FILE` | A log or timeline file given directly, with the other files of its run. | not set |
+| `--exact-sizes` | Keep exact sizes and byte counts. Exact sizes can identify the software. | rounded |
+| `-o FILE`, `--output FILE` | Write to a new file (mode 0600). An existing file, or a link there, is refused. | print |
+| `--show-removed` | Also list what was replaced, by category and count, never the values. | off |
 
 ### `gitfurl cli desktop-entry`
 

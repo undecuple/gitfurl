@@ -180,6 +180,7 @@ def check_timeline(root, ui):
     assert last.split("  ", 1)[1].startswith("Unpacked (Setup was not run)."), last
     tl = ui["timeline"]["tl"]
     assert tl.ended and tl.path is not None and tl.path.stat().st_mode & 0o777 == 0o600
+    check_support_report(root, ui, tl.path)
     ui["show"]("library")
     settle(root)
     assert "default" in ui["timeline"]["buttons"], ui["timeline"]["buttons"]
@@ -189,9 +190,51 @@ def check_timeline(root, ui):
     saved = box.get("1.0", "end")
     assert "Route: native" in saved and "Unpacked (Setup was not run)." in saved, saved
     assert str(box.cget("state")) == "disabled"  # read-only
+    button(win, "Copy support report")
+    button(win, "Save…")
     win.destroy()
     ui["show"]("details")
     settle(root)
+
+
+def check_support_report(root, ui, path):
+    """The Timeline card's "Copy support report": the scrubbed report shown read-only first,
+    the same text as the command line's helper for this run; Copy and Save... only on a press."""
+    import os
+    import shutil
+
+    from gitfurl import report
+
+    root.clipboard_clear()
+    root.clipboard_append("before")
+    button(root, "Copy support report")._click(None)
+    settle(root)
+    shown = ui["timeline"]["report"]
+    assert shown["notice"] == report.WINDOW_NOTICE, shown["notice"]
+    assert str(shown["box"].cget("state")) == "disabled"
+    assert root.clipboard_get() == "before", "copied before a press"
+    expected = gui.support_report_view(path, wine_version="wine-9.0",
+                                       umu=shutil.which("umu-run") is not None)[1]
+    assert shown["text"] == expected, (shown["text"], expected)
+    assert shown["box"].get("1.0", "end-1c") == expected
+    assert shown["text"].startswith(report.HEADER.format(sizes=report.SIZES_ROUNDED))
+    for gone in ("NAME-01", "NAME game", "Game.exe", os.environ["HOME"]):
+        assert gone not in shown["text"], gone
+    shown["buttons"]["copy"]._click(None)
+    settle(root)
+    assert root.clipboard_get() == expected
+    target = os.path.join(os.environ["HOME"], "report.txt")
+    filedialog.asksaveasfilename = lambda **_k: target
+    shown["buttons"]["save"]._click(None)
+    settle(root)
+    assert os.stat(target).st_mode & 0o777 == 0o600
+    with open(target, encoding="utf-8") as fh:
+        assert fh.read() == expected
+    shown["buttons"]["save"]._click(None)  # the file exists now: refused, not replaced
+    settle(root)
+    assert errors and "exists" in errors[-1], errors
+    errors.clear()
+    shown["win"].destroy()
 
 
 def main() -> int:
