@@ -143,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
                         "'install' picks this route itself when it can")
     ext.add_argument("installer", help="the installer; FreeArc archives beside it are read")
     ext.add_argument("--prefix", required=True, help="name of an existing dedicated prefix; "
-                     "files go to C:\\Games\\PREFIX in it")
+                     "files go to C:\\Games\\PREFIX in it (or the folder --dest names)")
     ext.add_argument("--dry-run", action="store_true", help="show the plan and change nothing")
     ext.add_argument("--yes", action="store_true", help="approve without prompting")
     for command in (inst, ext):
@@ -155,6 +155,15 @@ def build_parser() -> argparse.ArgumentParser:
                                   "the archive instead of removing it; its size must still "
                                   "match, and nothing is overwritten. Only for an installer "
                                   "you trust. This run only. Default: off")
+        command.add_argument("--dest", metavar="WINPATH", default=None,
+                             help="native route only: unpack into this new folder on the "
+                                  "prefix's drive C:, for example 'C:\\Games\\My Game' (or "
+                                  "C:/Games/My Game). It must not exist yet; folders above it "
+                                  "are created. Not C:\\ itself, nothing in C:\\windows, "
+                                  "C:\\users or C:\\ProgramData, and in C:\\Program Files (or "
+                                  "its x86 twin) only a folder that is new directly below it. "
+                                  "On the Wine/Proton route Setup picks its folder. Default: "
+                                  "C:\\Games\\PREFIX")
     ixt = sub.add_parser(
         "extract-inno", help="extract the files an Inno Setup installer holds for its program "
                              "folder into a prefix, without running the installer")
@@ -218,13 +227,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "log":
         return _log_command(args)
     try:
+        if args.dest is not None:
+            from gitfurl.extract import parse_destination
+
+            parse_destination(args.dest)  # refused whatever the route, before anything is read
         installer = validate_installer(args.installer)
         det = detect(installer)  # once; passed on
         links = propose_for(installer) if args.link_names else None
         choice = choose_route(installer, args.prefix or DEFAULT_PREFIX, det, args.route,
                               setup_options=_native_unused(args), links=links,
                               accept_bad_index_crc=args.accept_bad_index_crc,
-                              keep_bad_file_crc=args.keep_bad_file_crc)
+                              keep_bad_file_crc=args.keep_bad_file_crc, dest=args.dest)
     except ValueError as exc:
         print(f"error: {exc}. Nothing was run.", file=sys.stderr)
         return 1
@@ -233,6 +246,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.keep_bad_file_crc:
         print("--keep-bad-file-crc does not apply to the Wine/Proton route: Setup runs and "
               "checks its own files")
+    if args.dest is not None:
+        print("--dest does not apply to the Wine/Proton route: Setup runs and picks its own "
+              "folder")
     if args.apply_setup_entries:
         print("--apply-setup-entries does not apply to the Wine/Proton route: Setup runs and "
               "writes its own registry entries and shortcuts")
@@ -537,7 +553,7 @@ def _extract_command(args) -> int:
         installer = validate_installer(args.installer)
         plan = plan_extract(installer, args.prefix,
                             accept_bad_index_crc=args.accept_bad_index_crc,
-                            keep_bad_file_crc=args.keep_bad_file_crc)
+                            keep_bad_file_crc=args.keep_bad_file_crc, dest=args.dest)
     except ValueError as exc:  # ExtractRefused is a ValueError
         print(f"error: {exc}. Nothing was written.", file=sys.stderr)
         return 1
@@ -868,7 +884,8 @@ def _native_install(args, installer, det, choice, links=None) -> int:
         if args.progress_interval <= 0:
             raise ValueError("--progress-interval must be above 0")
         scan_plan = _scan_plan(args, installer)
-        clean = plan_cleanup(installer, args.cleanup, [xplan.prefix, prefixes_root(), logs_root()])
+        clean = plan_cleanup(installer, args.cleanup,
+                             [xplan.prefix, xplan.dest, prefixes_root(), logs_root()])
     except ValueError as exc:
         print(f"error: {exc}. Nothing was run.", file=sys.stderr)
         return 1

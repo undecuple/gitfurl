@@ -6,8 +6,9 @@ farc_rolz.py).
 
 Off unless asked for, per run, after an approval that shows the plan. gitfurl reads each
 FreeArc archive beside the installer itself (gitfurl.farc) and writes the files into a new
-folder in the prefix, C:\\Games\\<prefix> (the folder the unattended install uses). The
-installer is not run: no registry entries, no redistributables, no shortcuts and none of its
+folder in the prefix, C:\\Games\\<prefix> (the folder the unattended install uses) unless
+another folder on the prefix's drive C: was chosen (--dest; parse_destination has the rules).
+The installer is not run: no registry entries, no redistributables, no shortcuts and none of its
 own steps, so the result may not work.
 
 Refused before anything is written: no FreeArc archive found; an archive gitfurl cannot read;
@@ -16,7 +17,9 @@ name that is not a safe relative path; a name Windows cannot use (a trailing dot
 character from <>:"|?*, or a device name such as CON or NUL); two files, or a file and a
 folder, whose names would be the same with letter case ignored (as Windows does); more than
 MAX_FOLDERS folders; too little free space (blocks and inodes); a destination folder that
-already exists; a prefix that does not exist. Folders whose names differ only in letter case
+already exists; a destination that is not a new folder below C:\\ on the prefix's own drive_c
+(Wine's own folders refused, no link followed on the way: ExtractPlan.dest_problem); a prefix
+that does not exist. Folders whose names differ only in letter case
 are one folder, as on Windows: the first spelling is used.
 
 While writing: every file is created new (O_CREAT|O_EXCL|O_NOFOLLOW) inside folders this
@@ -35,12 +38,14 @@ written stay, and nothing else is deleted (only files removed for a CRC-32 misma
 
 from __future__ import annotations
 
+import errno
 import os
 import re
+import stat
 import threading
 import zlib
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from gitfurl import farc, farc_codecs
@@ -68,6 +73,102 @@ KEEP_BAD_CRC_SUGGESTION = (
     "CRC-32 does not match (gitfurl cannot tell a damaged file from an archive with wrong "
     "checksums; the destination must not exist yet, so delete it or use another prefix).")
 SHOWN_KEPT = 5  # files kept with a CRC-32 mismatch named in the end text (the log has all)
+
+# --- the destination (C:\Games\<prefix> unless another folder is chosen) -------------------
+
+DEFAULT_PARENT = "Games"
+# Wine's own folders on drive C: (case folded): nothing is written in or below them.
+WINE_FOLDERS = {"windows": "C:\\windows", "users": "C:\\users",
+                "programdata": "C:\\ProgramData"}
+# Wine's program folders: only a folder that is new directly below them may be chosen.
+PROGRAM_FILES = {"program files": "C:\\Program Files",
+                 "program files (x86)": "C:\\Program Files (x86)"}
+DEST_EXAMPLE = "C:\\Games\\My Game"
+
+
+class DestinationRefused(ValueError):
+    """The chosen destination is not a folder gitfurl writes into. Nothing was written.
+    Not an ExtractRefused: a bad --dest is the user's input, not a reason to pick another
+    route."""
+
+
+def default_destination(prefix_name: str) -> str:
+    """The Windows path the native route uses when no folder was chosen."""
+    return f"C:\\{DEFAULT_PARENT}\\{prefix_name}"
+
+
+def windows_path(parts) -> str:
+    """C:\\ followed by the parts, joined with backslashes."""
+    return "C:\\" + "\\".join(parts)
+
+
+def parse_destination(text: str) -> tuple[str, ...]:
+    """The parts below C:\\ of a chosen destination, such as C:\\Games\\My Game (or
+    C:/Games/My Game). Pure: reads nothing. Raises DestinationRefused with the reason.
+
+    Rules: on drive C: and below C:\\ (C:\\ itself is refused); every part a name Windows can
+    use (as for the archives' own names), with no empty part, no '.' or '..' and no control
+    character; not in or below C:\\windows, C:\\users or C:\\ProgramData; not C:\\Program Files
+    or C:\\Program Files (x86) themselves (a folder that is new directly below them is
+    allowed). Whether the folders exist is checked later, against the prefix
+    (ExtractPlan.dest_problem)."""
+    raw = text.strip()
+    shown = clean(raw, 120)
+    if not raw:
+        raise DestinationRefused(f"the destination is empty; give a Windows path such as "
+                                 f"{DEST_EXAMPLE}")
+    if any(ord(c) < 32 or ord(c) == 127 for c in raw):
+        raise DestinationRefused("the destination contains a control character")
+    path = raw.replace("/", "\\")
+    if len(path) < 3 or path[:3].upper() != "C:\\":
+        raise DestinationRefused(f"the destination must be a folder on drive C: of the prefix, "
+                                 f"for example {DEST_EXAMPLE} (got {shown!r})")
+    rest = path[3:]
+    if rest.endswith("\\"):  # one trailing separator, as folder pickers write it
+        rest = rest[:-1]
+    if not rest:
+        raise DestinationRefused(f"the destination cannot be C:\\ itself; give a folder below "
+                                 f"it, for example {DEST_EXAMPLE}")
+    parts = tuple(rest.split("\\"))
+    if any(not p for p in parts):
+        raise DestinationRefused(f"the destination has an empty part (two separators in a "
+                                 f"row): {shown!r}")
+    if any(p in (".", "..") for p in parts):
+        raise DestinationRefused(f"the destination may not contain '.' or '..': {shown!r}")
+    for p in parts:
+        if _windows_problem(p):
+            raise DestinationRefused(
+                f"the destination has a name Windows cannot use: {clean(p, 80)!r} (a trailing "
+                "dot or space, a character from <>:\"|?*, or a device name such as CON or NUL)")
+    sizes = [len(p.encode("utf-8", "surrogateescape")) for p in parts]
+    if max(sizes) > NAME_MAX or sum(sizes) + len(sizes) > PATH_MAX:
+        raise DestinationRefused(f"the destination is too long for this system: {shown!r}")
+    top = parts[0].casefold()
+    if top in WINE_FOLDERS:
+        raise DestinationRefused(f"the destination cannot be in {WINE_FOLDERS[top]} (Wine's own "
+                                 f"folder); choose another folder, for example {DEST_EXAMPLE}")
+    if top in PROGRAM_FILES and len(parts) == 1:
+        raise DestinationRefused(f"the destination cannot be {PROGRAM_FILES[top]} itself; a "
+                                 f"folder that is new directly below it is allowed, for "
+                                 f"example {PROGRAM_FILES[top]}\\My Game")
+    return parts
+
+
+def _case_variant(folder: Path, name: str) -> str | None:
+    """Another entry of `folder` whose name is `name` with letter case ignored, or None.
+    Reads at most MAX_DIR_ENTRIES entries; follows no link."""
+    key = name.casefold()
+    try:
+        with os.scandir(folder) as it:
+            for n, e in enumerate(it):
+                if n >= MAX_DIR_ENTRIES:
+                    break
+                if e.name != name and e.name.casefold() == key:
+                    return e.name
+    except OSError:
+        return None
+    return None
+
 
 EXTRACTS_ONLY = ("This extracts files only. The installer is not run: no registry entries, no "
                  "redistributables, no shortcuts and none of its own steps. The result may "
@@ -118,6 +219,21 @@ class ExtractPlan:
 
     accept_bad_index_crc: bool = False
     keep_bad_file_crc: bool = False  # keep a file whose CRC-32 does not match (opt-in, per run)
+    # the destination's parts below C:\ (empty: C:\Games\<prefix>); dest is drive_c/<parts>
+    dest_parts: tuple[str, ...] = ()
+    dest_chosen: bool = False  # another folder than the default was chosen (--dest)
+
+    @property
+    def win_parts(self) -> tuple[str, ...]:
+        return self.dest_parts or (DEFAULT_PARENT, self.prefix_name)
+
+    def with_destination(self, text: str | None) -> ExtractPlan:
+        """This plan with the destination `text` (a Windows path, see parse_destination), or
+        the default for None. Reads nothing; raises DestinationRefused."""
+        default = (DEFAULT_PARENT, self.prefix_name)
+        parts = default if text is None else parse_destination(text)
+        return replace(self, dest=self.prefix.joinpath("drive_c", *parts), dest_parts=parts,
+                       dest_chosen=parts != default)
 
     def archive_warnings(self, ap: ArchivePlan) -> list[str]:
         """The archive's index warnings, worded for this run's file CRC choice."""
@@ -142,7 +258,47 @@ class ExtractPlan:
 
     @property
     def target(self) -> str:
-        return f"C:\\Games\\{self.prefix_name}"
+        return windows_path(self.win_parts)
+
+    def dest_problem(self) -> str | None:
+        """What is wrong with the destination in the prefix as it is now, or None: the folder
+        must be new; each folder above it that exists must be a real folder (no symbolic link)
+        spelt as on disk (Windows ignores letter case); below a Program Files folder, which must
+        exist, the folder directly below it must be new. Reads lstat and folder listings only.
+        """
+        parts = self.win_parts
+        at = self.prefix / "drive_c"
+        pf = PROGRAM_FILES.get(parts[0].casefold())
+        for i, part in enumerate(parts):
+            win = clean(windows_path(parts[:i + 1]), 160)
+            path = at / part
+            try:
+                st = os.lstat(path)
+            except FileNotFoundError:
+                other = _case_variant(at, part)
+                if other is not None:
+                    there = clean(windows_path((*parts[:i], other)), 160)
+                    return (f"{win} would be the same folder as {there}, which exists (Windows "
+                            "ignores letter case); use that spelling or another name")
+                if pf is not None and i == 0:
+                    return (f"{pf} does not exist in this prefix; gitfurl does not create "
+                            "Wine's own folders")
+                return None  # this folder and the ones below it are created
+            except OSError as exc:
+                return f"{win} could not be checked ({exc.strerror or exc})"
+            if i == len(parts) - 1:
+                return (f"the destination already exists: {self.dest}. gitfurl only extracts "
+                        "into a new folder")
+            if pf is not None and i == 1:
+                return (f"{win} already exists; below {pf} gitfurl only creates a folder that "
+                        f"is new directly below it (use another name, or C:\\{DEFAULT_PARENT})")
+            if stat.S_ISLNK(st.st_mode):
+                return (f"{win} is a symbolic link in the prefix ({path}); gitfurl does not "
+                        "follow links on the way to the destination")
+            if not stat.S_ISDIR(st.st_mode):
+                return f"{win} is not a folder in the prefix ({path})"
+            at = path
+        return None
 
     def problem(self) -> str | None:
         """What stops a real extraction now (prefix missing, folder exists, space), or None."""
@@ -158,10 +314,7 @@ class ExtractPlan:
                     "creating it stopped, timed out or failed). Use a new prefix name")
         if not drive_c.is_dir() or drive_c.is_symlink():
             return f"the prefix has no drive_c folder: {drive_c}"
-        if os.path.lexists(self.dest):
-            return (f"the destination already exists: {self.dest}. gitfurl only extracts "
-                    "into a new folder")
-        return self.space_problem(drive_c)
+        return self.dest_problem() or self.space_problem(drive_c)
 
     def space_problem(self, at: Path, extra: int = 0) -> str | None:
         """Free space and inodes on the file system of `at` against what the files need, plus
@@ -207,8 +360,10 @@ class ExtractPlan:
             lines.append(f"  {KEEP_BAD_CRC_WARNING}")
         lines += [
             f"  {EXTRACTS_ONLY}",
-            (f"  destination: {self.target} (in the prefix: {self.dest}); it must not exist "
-            "yet, and no existing file is overwritten"),
+            (f"  destination: {clean(self.target, 300)} (in the prefix: {self.dest}"
+             + ("; the folder you chose" if self.dest_chosen else "")
+             + "); it must not exist yet, folders above it that are missing are created, and "
+             "no existing file is overwritten"),
         ]
         for ap in self.archives:
             lines.append(f"  archive: {clean(ap.path.name, 80)} ({farc._size(ap.archive.size)}"
@@ -300,9 +455,14 @@ def unpacked_size(installer: Path) -> Unpacked | None:
 def plan_extract(installer: Path, prefix_name: str,
                  env: dict[str, str] | None = None, *,
                  accept_bad_index_crc: bool = False,
-                 keep_bad_file_crc: bool = False) -> ExtractPlan:
-    """Read every archive's index and check every name. Writes nothing. Raises ExtractRefused."""
+                 keep_bad_file_crc: bool = False,
+                 dest: str | None = None) -> ExtractPlan:
+    """Read every archive's index and check every name. Writes nothing. Raises ExtractRefused,
+    or DestinationRefused for a `dest` (a Windows path on drive C:, default
+    C:\\Games\\<prefix>) that parse_destination refuses."""
     validate_prefix_name(prefix_name)
+    if dest is not None:
+        parse_destination(dest)  # before any archive is read
     installer = Path(installer)
     paths, notes = find_archives(installer)
     if not paths:
@@ -396,9 +556,10 @@ def plan_extract(installer: Path, prefix_name: str,
         notes.append(f"the cm stage decodes {cm} job{'s' if cm > 1 else ''} at a time, each "
                      f"up to {farc._size(farc_codecs.CM_JOB_MEMORY)} (counted in the memory "
                      "line), with gitfurl's native decoder module")
-    dest = prefix / "drive_c" / "Games" / prefix_name
-    return ExtractPlan(installer, prefix_name, prefix, dest, archives, total, count, memory,
-                       notes, folders, accept_bad_index_crc, keep_bad_file_crc)
+    plan = ExtractPlan(installer, prefix_name, prefix,
+                       prefix / "drive_c" / DEFAULT_PARENT / prefix_name, archives, total,
+                       count, memory, notes, folders, accept_bad_index_crc, keep_bad_file_crc)
+    return plan.with_destination(dest)
 
 
 def _windows_problem(part: str) -> bool:
@@ -551,37 +712,55 @@ def _open_dir(parent: int, name: str) -> int:
 
 
 def _make_dest(plan: ExtractPlan) -> int:
-    """Create the destination folder and return its fd. Raises ExtractRefused, which lists
-    the (empty) folders this call created before it failed."""
+    """Create the destination folder and return its fd. The folders above it are walked from
+    drive_c one part at a time through fds, never following a link (O_NOFOLLOW); a missing one
+    is created (mode 0755), except a Program Files folder, which is Wine's own. Raises
+    ExtractRefused, which lists the (empty) folders this call created before it failed."""
     try:
         drive_c = os.open(plan.prefix / "drive_c",
                           os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError as exc:
         raise ExtractRefused(f"the prefix's drive_c could not be opened ({exc.strerror})") \
             from exc
+    parts = plan.win_parts
     created: list[Path] = []
+    cur = drive_c
+    path = plan.prefix / "drive_c"
     try:
-        try:
-            games = _open_dir(drive_c, "Games")
-        except FileNotFoundError:
+        for i, part in enumerate(parts[:-1]):
+            path = path / part
             try:
-                os.mkdir("Games", 0o755, dir_fd=drive_c)
-                created.append(plan.dest.parent)
-            except FileExistsError:  # made by something else meanwhile; opened as any other
-                pass
-            games = _open_dir(drive_c, "Games")
-        try:
-            os.mkdir(plan.prefix_name, 0o755, dir_fd=games)
-            created.append(plan.dest)
-            return _open_dir(games, plan.prefix_name)
-        finally:
-            os.close(games)
+                nxt = _open_dir(cur, part)
+            except FileNotFoundError:
+                if i == 0 and part.casefold() in PROGRAM_FILES:
+                    raise ExtractRefused(f"{PROGRAM_FILES[part.casefold()]} does not exist in "
+                                         "this prefix; gitfurl does not create Wine's own "
+                                         "folders", created) from None
+                try:
+                    os.mkdir(part, 0o755, dir_fd=cur)
+                    created.append(path)
+                except FileExistsError:  # made by something else meanwhile; opened as any other
+                    pass
+                nxt = _open_dir(cur, part)
+            if cur != drive_c:
+                os.close(cur)
+            cur = nxt
+        path = plan.dest
+        os.mkdir(parts[-1], 0o755, dir_fd=cur)
+        created.append(plan.dest)
+        return _open_dir(cur, parts[-1])
     except FileExistsError as exc:
         raise ExtractRefused(f"the destination already exists: {plan.dest}", created) from exc
     except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+            raise ExtractRefused(f"a folder on the way to the destination is a symbolic link or "
+                                 f"not a folder ({path}); gitfurl does not follow links",
+                                 created) from exc
         raise ExtractRefused(f"the destination could not be created ({exc.strerror})",
                              created) from exc
     finally:
+        if cur != drive_c:
+            os.close(cur)
         os.close(drive_c)
 
 

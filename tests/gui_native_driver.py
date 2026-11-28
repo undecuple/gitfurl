@@ -113,9 +113,58 @@ def scenario(root, ui, name):
         assert "add the registry entries" in messages[-1], messages[-1][-1500:]
         settle(root)
         assert not ui["busy"]["on"] and not started.is_set()
+    elif name == "destination":
+        check_destination(root, ui, plan_text, texts)
     else:
         raise AssertionError(f"unknown scenario {name}")
     assert not errors, errors
+
+
+def check_destination(root, ui, plan_text, texts):
+    """The Destination row: the default, Browse (the folder dialog is a stand-in) inside and
+    outside the prefix's drive_c, a typed folder that is refused, the unpack into a nested new
+    folder, and the reset when another prefix is chosen."""
+    from gitfurl.prefixes import prefixes_root
+
+    drive_c = prefixes_root() / "default" / "drive_c"
+    settle(root)
+    assert ui["dest_var"].get() == "C:\\Games\\default", ui["dest_var"].get()
+    assert ui["dest_widgets"]["browse"]._state == "normal"
+    picked = {"path": str(drive_c / "Apps" / "Studio")}
+    seen: list[dict] = []
+    filedialog.askdirectory = lambda **k: (seen.append(k), picked["path"])[1]
+    ui["browse_dest"]()
+    settle(root)
+    assert seen[-1]["initialdir"] == str(drive_c), seen
+    assert ui["dest_var"].get() == "C:\\Apps\\Studio\\default", ui["dest_var"].get()
+    assert "destination: C:\\Apps\\Studio\\default" in plan_text(), plan_text()[-1500:]
+    picked["path"] = str(drive_c.parent)  # the prefix folder itself: outside drive_c
+    ui["browse_dest"]()
+    settle(root)
+    assert errors and errors[-1].startswith("Destination refused:"), errors
+    assert "is not inside this prefix's drive C:" in errors[-1], errors
+    errors.clear()
+    assert ui["dest_var"].get() == "C:\\Apps\\Studio\\default"  # unchanged
+    ui["dest_var"].set("C:\\windows\\x")  # typed: refused, Run is off
+    settle(root)
+    assert "Wine's own folder" in plan_text(), plan_text()[-1500:]
+    assert ui["run_btn"]._state == "disabled"
+    ui["dest_var"].set("C:\\Apps\\Studio\\My Game")
+    settle(root)
+    assert "destination: C:\\Apps\\Studio\\My Game" in plan_text(), plan_text()[-1500:]
+    assert "the folder you chose" in plan_text()
+    answers["Unpack this installer?"] = True
+    ui["run_clicked"]()
+    assert "destination: C:\\Apps\\Studio\\My Game" in messages[-1], messages[-1][-2000:]
+    pump(root, lambda: "Unpacked (Setup was not run)." in texts(), "the unpack", 30)
+    settle(root)
+    assert (drive_c / "Apps" / "Studio" / "My Game" / "bin" / "Game.exe").is_file()
+    assert ui["plan_checklist_rows"]()["plan"][1].startswith("Done: the files are in")
+    ui["prefix_var"].set("other")  # another prefix: back to the default, nothing remembered
+    ui["refresh_plan"]()
+    settle(root)
+    assert ui["dest_var"].get() == "C:\\Games\\other", ui["dest_var"].get()
+    assert ui["dest_widgets"]["browse"]._state == "disabled"  # "other" does not exist yet
 
 
 def check_timeline(root, ui):

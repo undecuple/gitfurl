@@ -76,6 +76,12 @@ class GuiNativeTests(unittest.TestCase):
     def test_declined(self):
         self.assertEqual(self.run_scenario("declined"), [])
 
+    def test_destination(self):
+        written = self.run_scenario("destination")
+        self.assertEqual(len(written), 1, written)
+        self.assertEqual(written[0].parts[-5:], ("Apps", "Studio", "My Game", "bin",
+                                                 "Game.exe"))
+
 
 if __name__ == "__main__":
     unittest.main()
