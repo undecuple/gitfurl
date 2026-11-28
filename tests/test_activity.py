@@ -500,24 +500,26 @@ class Proc(unittest.TestCase):
                          [("setup.exe", 50, 1000 * page), ("unpack (x).exe", 0, 2000 * page)])
         mon = progress.ProgressMonitor(self.root / "setup.exe", self.prefix, lambda s: None,
                                        1.0, str(self.proc), group=lambda: 100)
-        mon._t0 = time.monotonic()
-        first = mon.sample()
+        clock = Clock()
+        mon._t0 = clock()
+        with mock.patch.object(progress.time, "monotonic", clock):
+            first = mon.sample()
         self.assertEqual(sorted(n for n, _c, _r in first.processes),
                          ["setup.exe", "umu-run", "unpack (x).exe"])
         self.assertTrue(all(c is None for _n, c, _r in first.processes))
         self.assertIsNone(first.write_bps)
         hz = os.sysconf("SC_CLK_TCK")
-        mon._ticks_t -= 1.0  # one second ago
         self.put(102, "unpack (x).exe", 300, hz, 2500, self.prefix)  # a full core for 1 s
         (self.prefix / "drive_c" / "Games" / "new.bin").write_bytes(b"x" * 4096)
-        mon._size_last = (mon._size_last[0] - 1.0, mon._size_last[1])
-        second = mon.sample()
+        clock.t += 1.0
+        with mock.patch.object(progress.time, "monotonic", clock):
+            second = mon.sample()
         name, cpu, rss = second.processes[0]  # busiest first
         self.assertEqual((name, rss), ("unpack (x).exe", 2500 * page))
-        self.assertAlmostEqual(cpu, 100.0, delta=5.0)
+        self.assertEqual(cpu, 100.0)
         self.assertEqual(second.newest, "drive_c/Games/new.bin")
         self.assertLess(second.newest_age_s, 60)
-        self.assertGreater(second.write_bps, 3000)
+        self.assertEqual(second.write_bps, 4096.0)
         self.assertIn("unpack (x).exe: CPU", activity.wine_lines(second)[0])
 
     def test_a_real_child_in_its_own_group(self):
