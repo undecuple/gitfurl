@@ -274,8 +274,10 @@ class Timeline:
 
 # ---- entries from the plan, shared by the command line and the window ----------------------
 
-def detection_entries(tl: Timeline, det) -> None:
+def detection_entries(tl: Timeline, det, choice=None) -> None:
     """What the headers and archive indexes showed (a gitfurl.detect.Detection)."""
+    from gitfurl.detect import evidence_lines
+
     if det is None:
         return
     if not det.readable:
@@ -285,7 +287,7 @@ def detection_entries(tl: Timeline, det) -> None:
         first = ev.detail.split("; ")[0]
         tl.add("plan", f"Detected {ev.format} ({ev.confidence})",
                first + (f" ({ev.where})" if ev.where and len(ev.where) < 120 else ""))
-        for line in ev.lines:
+        for line in evidence_lines(ev, choice):
             text = line.strip()
             if text.startswith("warning:"):
                 first, _sep, rest = text[len("warning:"):].strip().partition("; ")
@@ -361,7 +363,7 @@ def archive_warning_entries(tl: Timeline, plan) -> None:
 
 def plan_entries(tl: Timeline, det, choice, prefix: Path, exists: bool, create: bool,
                  target: str | None = None, setup_entries: bool = False) -> None:
-    detection_entries(tl, det)
+    detection_entries(tl, det, choice)
     route_entries(tl, choice)
     if choice is not None and choice.extract is not None:
         archive_warning_entries(tl, choice.extract)
