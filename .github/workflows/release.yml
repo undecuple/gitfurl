@@ -62,11 +62,14 @@ jobs:
           ./dist/gitfurl cli --version
           ./dist/gitfurl cli doctor | tee doctor.txt
           grep -qx "native decoders: cm, rolz" doctor.txt || { echo "the native module is not in the program"; exit 1; }
-          # The window should stay open until timeout stops it (exit status 124).
+          # The window should stay open until timeout stops it (exit status 124). The status
+          # is taken inside xvfb-run: its own exit status can also report a failed clean-up
+          # of its temporary folder (status 5), which says nothing about the program.
           set +e
-          xvfb-run -a timeout 6 ./dist/gitfurl
-          status=$?
-          test "$status" = 124 || { echo "window did not stay open (status $status)"; exit 1; }
+          xvfb-run -a sh -c 'timeout 6 ./dist/gitfurl; echo $? > window-status.txt'
+          echo "xvfb-run exit status: $?"
+          status=$(cat window-status.txt 2>/dev/null)
+          test "$status" = 124 || { echo "window did not stay open (status ${status:-none})"; exit 1; }
       # What PyInstaller put into the program, read back from the built file, with the
       # versions of the runner's libraries that CPython reports. THIRD_PARTY.md names the
       # components; this list records what this build actually contains.
