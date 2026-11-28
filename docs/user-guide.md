@@ -45,6 +45,34 @@ You need:
 
 With Nix, `nix develop` gives you Python with tkinter, and `nix develop .#wine` adds Wine.
 
+## Install script
+`install.sh` in the repository downloads the release's single-file program and installs it, or runs it once. gitfurl itself never goes online; this script is the one part that does, and only when you run it. Read it first if you can:
+
+    curl -fsSL https://raw.githubusercontent.com/undecuple/gitfurl/main/install.sh -o install.sh
+    less install.sh
+    sh install.sh --help
+
+Or straight from the pipe:
+
+    curl -fsSL https://raw.githubusercontent.com/undecuple/gitfurl/main/install.sh | sh
+    curl -fsSL https://raw.githubusercontent.com/undecuple/gitfurl/main/install.sh | sh -s -- --run cli install ~/setup.exe --dry-run
+
+What it does:
+- It downloads the release's `SHA256SUMS` and the program `gitfurl-vX.Y.Z-linux-x86_64` from `https://github.com/undecuple/gitfurl/releases/latest/download/` (with `--version vX.Y.Z`, from `.../releases/download/vX.Y.Z/`). For the latest release the program's exact name is read from its line in `SHA256SUMS`. It uses curl (`--proto '=https' --proto-redir '=https' --tlsv1.2`), or wget (`--https-only --secure-protocol=TLSv1_2`) when there is no curl. It refuses `http://`.
+- Both files go into a new private temporary folder (`mktemp -d`, mode 0700, in `$TMPDIR` or `/tmp`), which is removed when the script ends, also after an error or Ctrl-C.
+- The program is checked with `sha256sum -c` against its own line of `SHA256SUMS`. If it does not match, the script stops: nothing is installed or run. Both files come from the same release, so this catches a damaged or cut-off download; it does not prove who made the release.
+- It runs only on Linux x86_64 (else it names the platform and stops), never uses sudo, refuses to run as root unless you add `--allow-root`, and never touches `~/.wine`.
+
+Modes:
+- **Install** (the default): the program goes to `${XDG_BIN_HOME:-$HOME/.local/bin}/gitfurl` (or `--dir DIR`), mode 0755, written to a temporary file in that folder and renamed into place, so a running copy is not changed under it. An existing `gitfurl` file there is replaced; a link or a folder in its place is refused. The script says where it went and warns when the folder is not on your PATH. `--desktop-entry` then runs `gitfurl cli desktop-entry --yes` (see "Start the app"), which prints its plan.
+- **`--uninstall`**: removes that one file. If the installed program has the `cli desktop-entry` command, `gitfurl cli desktop-entry --remove --yes` runs first and removes the menu entry and icon it wrote. Nothing else is removed: your prefixes, logs and settings stay (see "Logs").
+- **`--run ARGS...`**: downloads and checks the program as above and runs `gitfurl ARGS...` from the temporary folder, with your terminal's input and output, then deletes the folder and exits with gitfurl's exit status. Nothing is installed. Every argument after `--run` goes to gitfurl unchanged, so `--run` comes last. The script's own lines go to stderr in this mode. When the script itself comes through a pipe (`curl ... | sh -s -- --run ...`), gitfurl reads its input from your terminal (`/dev/tty`), or from nothing if there is none, so its typed approval still works.
+- **`--dry-run`**: prints the URLs, the target and the steps, and downloads nothing.
+
+`GITFURL_BASE_URL` replaces `https://github.com/undecuple/gitfurl/releases` (a mirror with the same layout, or a local `file:///` folder for tests). Unknown options stop with an error.
+
+If you prefer to do it by hand: download the program and `SHA256SUMS` from the release page, run `sha256sum -c SHA256SUMS` in that folder, `chmod +x` the program and put it on your PATH.
+
 ## Start the app
     python -m gitfurl
 

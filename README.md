@@ -43,7 +43,25 @@ To remove a prefix, use **Delete...** in the library or `gitfurl cli prefix dele
 
 ## Getting started
 
-The [latest release](https://github.com/undecuple/gitfurl/releases/latest) has a single-file Linux program and a `SHA256SUMS` file (check it with `sha256sum -c SHA256SUMS`). It is not proven on every desktop (see [docs/status.md](docs/status.md#known-issues)). Or run it from source. You need Linux and Wine; from source also Python 3.11 or newer and tkinter (`python3-tk` on Debian and Ubuntu).
+### Get it
+Install the latest release's program as `~/.local/bin/gitfurl` (Linux x86_64; checked against the release's `SHA256SUMS` first, no sudo). Both files come from the same release, so the check catches a damaged download, not a release someone changed:
+
+    curl -fsSL https://raw.githubusercontent.com/undecuple/gitfurl/main/install.sh | sh
+
+Or run it once without installing anything (downloaded and checked into a temporary folder, deleted afterwards):
+
+    curl -fsSL https://raw.githubusercontent.com/undecuple/gitfurl/main/install.sh | sh -s -- --run cli install ~/setup.exe --dry-run
+
+Better, read the script before you run it:
+
+    curl -fsSL https://raw.githubusercontent.com/undecuple/gitfurl/main/install.sh -o install.sh
+    less install.sh
+    sh install.sh            # --help lists --version, --dir, --desktop-entry, --uninstall, --run and --dry-run
+
+Or by hand: download the program and `SHA256SUMS` from the [latest release](https://github.com/undecuple/gitfurl/releases/latest), run `sha256sum -c SHA256SUMS` in that folder, then `chmod +x` the program and put it on your PATH. More in the [user guide](docs/user-guide.md#install-script).
+
+### Use it
+The release program is not proven on every desktop (see [docs/status.md](docs/status.md#known-issues)). You need Linux and Wine; to run from source, also Python 3.11 or newer and tkinter (`python3-tk` on Debian and Ubuntu). From source (with the installed program, type `gitfurl` where the steps say `python -m gitfurl`):
 
 1. `git clone https://github.com/undecuple/gitfurl.git && cd gitfurl`
 2. `python -m gitfurl cli doctor` reports Wine, tkinter, bubblewrap and umu-run.
@@ -81,7 +99,7 @@ Optional: `python -m gitfurl cli desktop-entry` (or `gitfurl cli desktop-entry` 
 <p align="center"><img src="docs/assets/divider-rule.svg" width="660" alt=""></p>
 
 ## Privacy
-Nothing goes online from gitfurl itself: no network requests, no telemetry, no uploads. Two things you start yourself can use the network: umu-run downloading its runtime on first use, and anything the installer does. Nothing is written to `~/.wine`. Gitfurl keeps its own files here:
+Nothing goes online from gitfurl itself: no network requests, no telemetry, no uploads. The one exception is `install.sh`, which is not part of the app: when you run it yourself, it downloads the release's program and `SHA256SUMS` from GitHub (over HTTPS) and nothing else. Two other things you start yourself can use the network: umu-run downloading its runtime on first use, and anything the installer does. Nothing is written to `~/.wine`. Gitfurl keeps its own files here:
 - Prefixes in `~/.local/share/gitfurl/prefixes/`.
 - Logs in `~/.local/state/gitfurl/logs/`, with each run's timeline beside its log (`.timeline.txt`), and a `.delete.log` when you delete a prefix. Before the setup's registry entries change a prefix's `system.reg` or `user.reg`, a copy of each goes into the log folder. These files are readable only by you; they can hold your user name and local paths, so remove those before sharing one.
 - View settings in `~/.config/gitfurl/view.json`.
