@@ -144,7 +144,13 @@ def read_positions(files: list[Path], proc_root: str = "/proc") -> dict[str, int
 
 
 def tree_size(root: Path) -> int:
-    total = 0
+    return tree_scan(root)[0]
+
+
+def tree_scan(root: Path) -> tuple[int, str | None, float]:
+    """(bytes in regular files under root, the most recently changed file's path relative to
+    root, its mtime). Metadata only, no link followed; the path is cleaned for display."""
+    total, newest, newest_t = 0, None, 0.0
     stack = [root]
     while stack:
         cur = stack.pop()
@@ -155,12 +161,46 @@ def tree_size(root: Path) -> int:
                         if e.is_dir(follow_symlinks=False):
                             stack.append(Path(e.path))
                         elif e.is_file(follow_symlinks=False):
-                            total += e.stat(follow_symlinks=False).st_size
+                            st = e.stat(follow_symlinks=False)
+                            total += st.st_size
+                            if st.st_mtime > newest_t:
+                                newest, newest_t = e.path, st.st_mtime
                     except OSError:
                         continue
         except OSError:
             continue
-    return total
+    if newest is not None:
+        newest = clean(os.path.relpath(newest, root), 160)
+    return total, newest, newest_t
+
+
+@dataclass(frozen=True)
+class ProcInfo:
+    pid: int
+    name: str
+    ticks: int  # CPU ticks, user plus system, since it started
+    rss: int  # resident memory in bytes
+
+
+def process_info(pids, proc_root: str = "/proc") -> list[ProcInfo]:
+    """Name, CPU ticks and resident memory of each process, from /proc/<pid>/stat only (the
+    processes gitfurl's run started: its process group and the prefix's processes)."""
+    page = os.sysconf("SC_PAGE_SIZE") if hasattr(os, "sysconf") else 4096
+    out = []
+    for pid in pids:
+        try:
+            with open(os.path.join(proc_root, str(pid), "stat"), encoding="ascii",
+                      errors="replace") as fh:
+                stat = fh.read()
+            head, _, rest = stat.rpartition(")")
+            fields = rest.split()
+            if fields[0] == "Z":
+                continue
+            out.append(ProcInfo(int(pid), head.partition("(")[2],
+                                int(fields[11]) + int(fields[12]), int(fields[21]) * page))
+        except (OSError, IndexError, ValueError):
+            continue
+    return out
 
 
 @dataclass
@@ -175,6 +215,12 @@ class Sample:
     helpers: tuple = ()  # program names other than Wine's own background processes
     pids: tuple = ()  # the processes running in the prefix
     crash_pids: tuple = ()  # Wine's crash handler (winedbg.exe) processes in the prefix
+    # (name, CPU % of one core since the last sample or None, resident bytes), busiest first:
+    # the run's own process group and the prefix's processes
+    processes: tuple = ()
+    newest: str | None = None  # the most recently changed file, relative to the prefix
+    newest_age_s: float | None = None
+    write_bps: float | None = None  # the prefix's growth per second since the last sample
 
     @property
     def percent(self) -> float | None:
@@ -229,7 +275,7 @@ class ProgressMonitor:
     """Samples progress on a background thread and hands each Sample to on_sample."""
 
     def __init__(self, installer: Path, prefix: Path, on_sample, interval: float = 10.0,
-                 proc_root: str = "/proc"):
+                 proc_root: str = "/proc", group=None):
         self.files = payload_files(installer)
         self.total = sum(f.stat().st_size for f in self.files)
         self.prefix, self.on_sample, self.interval, self.proc_root = prefix, on_sample, interval, proc_root
@@ -243,6 +289,10 @@ class ProgressMonitor:
         self._last: tuple[float, int] | None = None
         self._rate = 0.0
         self._cpu_last: tuple[float, int] | None = None
+        self._ticks: dict[int, int] = {}  # per process, at the last sample
+        self._ticks_t: float | None = None
+        self._size_last: tuple[float, int] | None = None
+        self.group = group  # callable: the run's process group id, or None
         self.last: Sample | None = None
 
     def sample(self) -> Sample:
@@ -259,10 +309,39 @@ class ProgressMonitor:
             cpu = max(0.0, 100.0 * (act.ticks - self._cpu_last[1]) / hz
                       / (now - self._cpu_last[0]))
         self._cpu_last = (now, act.ticks)
-        s = Sample(now - self._t0, read, self.total, max(0, tree_size(self.prefix) - self._base),
-                   self._rate, act.count, cpu, act.names, act.pids, act.crash_pids)
+        size, newest, newest_t = tree_scan(self.prefix)
+        write = None
+        if self._size_last is not None and now > self._size_last[0]:
+            write = max(0.0, (size - self._size_last[1]) / (now - self._size_last[0]))
+        self._size_last = (now, size)
+        s = Sample(now - self._t0, read, self.total, max(0, size - self._base),
+                   self._rate, act.count, cpu, act.names, act.pids, act.crash_pids,
+                   self._processes(act.pids, now), newest,
+                   max(0.0, time.time() - newest_t) if newest else None, write)
         self.last = s
         return s
+
+    def _processes(self, prefix_pids, now: float) -> tuple:
+        from gitfurl.procgroup import group_members
+
+        try:
+            pgid = self.group() if self.group is not None else None
+        except Exception:  # noqa: BLE001 - never let the details break a sample
+            pgid = None
+        pids = sorted(set(prefix_pids) | set(group_members(pgid, self.proc_root)))
+        infos = process_info(pids, self.proc_root)
+        span = now - self._ticks_t if self._ticks_t is not None else 0.0
+        hz = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+        rows = []
+        for p in infos:
+            before = self._ticks.get(p.pid)
+            cpu = 100.0 * (p.ticks - before) / hz / span \
+                if before is not None and span > 0 else None
+            rows.append((p.name, None if cpu is None else max(0.0, cpu), p.rss))
+        self._ticks = {p.pid: p.ticks for p in infos}
+        self._ticks_t = now
+        rows.sort(key=lambda r: (-(r[1] or 0.0), -r[2]))
+        return tuple(rows)
 
     def start(self) -> None:
         self._t0 = time.monotonic()

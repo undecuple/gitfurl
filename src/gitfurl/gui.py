@@ -14,6 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from gitfurl import __version__
+from gitfurl import activity
 from gitfurl import scan as scanmod
 from gitfurl.cleanup import MODES, perform_cleanup, plan_cleanup
 from gitfurl.detect import describe as describe_detection
@@ -595,6 +596,7 @@ def support_report_view(source, names=(), wine_version=None, umu=None, **kw):
 
 
 RUN_ENDED = "The last run has ended; its result is above."
+ACTIVITY_MS = 1000  # the Activity panel is read from its record this often
 DONE_REASON = ("Done: this installer was unpacked into this prefix. To unpack it again, choose "
                "another prefix (New prefix in the library or the File menu).")
 
@@ -1461,6 +1463,30 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                               font=F(T["caption"]), justify="left", anchor="w")
     progress_label.pack(fill="x", pady=(SP["sm"], 0))
     autowrap(progress_label, c.body)
+
+    # ---- Activity: what the run is doing now (gitfurl.activity), read on the Tk thread ----
+    heading(det, "Activity")
+    c = w.RoundCard(det)
+    c.pack(fill="x")
+    activity_var = tk.StringVar(value=activity.panel_text(None))
+    activity_label = tk.Label(c.body, textvariable=activity_var, bg=w.PANEL, fg=w.MUTED,
+                              font=F(T["caption"]), justify="left", anchor="w")
+    activity_label.pack(fill="x")
+    autowrap(activity_label, c.body)
+    live: dict = {"text": None}  # a callable giving the panel's text while a run works
+
+    def activity_tick(last: bool = False):
+        if live["text"] is not None:
+            try:  # a snapshot reads counters only; it never waits for the unpack
+                activity_var.set(live["text"]())
+            except Exception:  # noqa: BLE001 - the panel must never stop the window
+                activity_var.set("Activity is unavailable for this run.")
+        if last:
+            live["text"] = None
+        else:
+            root.after(ACTIVITY_MS, activity_tick)
+
+    root.after(ACTIVITY_MS, activity_tick)
 
     # ---- Timeline: what each step of the run did and why (gitfurl.timeline) ----
     # Self-contained: the run code calls timeline_begin, timeline_tick, timeline_note_stop
@@ -2417,11 +2443,14 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         pending["notes"] = []
         stop_btn.state(["!disabled"])
         stop_btn.pack(side="left", padx=(0, SP["md"]), before=create_btn)
+        record = activity.Activity()
+        live["text"] = lambda: activity.panel_text(record.snapshot())
         run_in_thread(lambda: perform_native(
             plan, control, memory_limit=memory_on, scan_plan=scan_plan,
             scan_result=scan_result, allow_scan_hit=allow_hit,
             on_progress=lambda d, t, e: ui_updates.put(NativeSample(d, t, e)),
-            on_note=note_received, detailed_log=detail, timeline=tl_state["tl"]), results)
+            on_note=note_received, detailed_log=detail, timeline=tl_state["tl"],
+            activity=record), results)
         poll("native")
 
     def native_hit_override(blocked) -> bool:
@@ -2479,6 +2508,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         """Start the approved run in a thread (the scan, if any, runs first inside it)."""
         pending["rerun"] = (plan, tool, create, track, options, ctx)
         pending["notes"] = []
+        live["text"] = None
+        activity_var.set("Waiting for the first look at the run's processes...")
         stop_btn.state(["!disabled"])  # a Stop from an earlier run must not leave it disabled
         stop_btn.pack(side="left", padx=(0, SP["md"]), before=create_btn)
         staging = ctx.get("staging")
@@ -2590,6 +2621,8 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                     continue
                 bar.set(smp.percent or 0)
                 progress_var.set(smp.line())
+                if not isinstance(smp, NativeSample):  # a Setup run's sample
+                    live["text"] = lambda smp=smp: activity.wine_panel_text(smp)
         except queue.Empty:
             pass
         except Exception:  # noqa: BLE001 - a bad sample must not stop polling or leave the app busy
@@ -2600,6 +2633,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             root.after(300, poll, kind, ctx)
             return
         progress_var.set(RUN_ENDED)  # not the last sample's percentage and ETA
+        activity_tick(last=True)  # the run's last state stays on screen
         root.after_idle(timeline_finish)  # after the result below has set the headline
         end_busy()
         stop_btn.pack_forget()

@@ -38,7 +38,7 @@ flowchart TB
     prefixes["prefixes.py"]
     staging["namelinks.Staging (links for Setup)"]
     apply["setup_entries.apply_entries()"]
-    progress["progress.py · windows.py"]
+    progress["progress.py · windows.py · activity.py"]
     changes["changes.py · cleanup.py · prefix_delete.py · desktop.py"]
   end
   subgraph shared["Shared helpers"]
@@ -68,8 +68,8 @@ Arrows point from a module to the modules it imports. Modules with no gitfurl im
 flowchart LR
   main["__main__"] --> app
   app --> cli & gui
-  cli --> cleanup & desktop & detect & doctor & extract & inno & memlimit & namelinks & portable & prefix_delete & prefixes & preflight & report & route & runner & safety & scan & setup_choices & setup_entries & timeline & unattended
-  gui --> choices_panel & cleanup & detect & doctor & memlimit & namelinks & portable & prefix_delete & prefixes & preflight & report & route & runner & safety & scan & setup_choices & setup_entries & theme & timeline & unattended & viewprefs & widgets
+  cli --> activity & cleanup & desktop & detect & doctor & extract & inno & memlimit & namelinks & portable & prefix_delete & prefixes & preflight & report & route & runner & safety & scan & setup_choices & setup_entries & timeline & unattended
+  gui --> activity & choices_panel & cleanup & detect & doctor & memlimit & namelinks & portable & prefix_delete & prefixes & preflight & report & route & runner & safety & scan & setup_choices & setup_entries & theme & timeline & unattended & viewprefs & widgets
   choices_panel --> setup_choices
   setup_choices --> detect & inno
   route --> setup_choices
@@ -80,14 +80,15 @@ flowchart LR
   setup_entries --> desktop & detect & inno & procgroup & route
   runner --> changes & memlimit & portable & prefixes & preflight & procgroup & progress & scan & timeline & unattended & windows
   namelinks --> detect & extract & inno
-  extract --> detect & farc & farc_codecs & prefixes
+  extract --> activity & detect & farc & farc_codecs & prefixes
+  activity --> detect & timeline
   farc_codecs --> farc & farc_rolz & codecsmod
   inno --> detect & extract & farc & prefixes
   detect --> farc & inno
   farc --> detect
   timeline --> detect
   windows --> detect
-  progress --> detect
+  progress --> detect & procgroup
   scan --> detect & procgroup
   unattended --> detect & prefixes
   doctor --> memlimit & scan
@@ -181,7 +182,7 @@ sequenceDiagram
   R-->>G: TrackedResult: status, log path, ChangeReport
 ```
 
-When the route is native, `run_clicked` hands over to `run_native_clicked`. It builds the plan with `native_plan_for` (the same stop checks as the command line, `route.native_stops`) and shows one approval. It then runs `route.perform_native` in a thread (scan, prefix creation, unpack), with `NativeControl` as Stop; the progress arrives as `gui.NativeSample`s, and the end text comes from `native_end_text`. The "Run Setup instead" switch and the Setup-only options choose the Wine/Proton flow above.
+When the route is native, `run_clicked` hands over to `run_native_clicked`. It builds the plan with `native_plan_for` (the same stop checks as the command line, `route.native_stops`) and shows one approval. It then runs `route.perform_native` in a thread (scan, prefix creation, unpack), with `NativeControl` as Stop; the progress arrives as `gui.NativeSample`s, the Activity card reads an `activity.Activity` record once a second with `after()`, and the end text comes from `native_end_text`. The "Run Setup instead" switch and the Setup-only options choose the Wine/Proton flow above.
 
 ## Data flow: from the installer to files in the prefix (native route)
 
@@ -280,6 +281,7 @@ flowchart LR
 | `tests/test_scan.py` | `scan`, the scan gate, the database version (with the `clamconf` fallback), `doctor` lines | - |
 | `tests/test_memlimit.py` | `memlimit`, `runner` scope, `doctor`, window option | `tests/test_gui_polish.py` (`run_window`) |
 | `tests/test_progress.py` | `progress` (monitor stop), the memory limit's adjuster stop | - |
+| `tests/test_activity.py` | `activity` (the live record through chains, srep, cm jobs, wording, rates and estimate, the command line and window text), the stages' counters in `farc_codecs`, `progress.process_info`, `tree_scan` and `procgroup.group_members` (fake `/proc`, a real child), the counters' cost | `tests/farc_writer.py`, `tests/cm_writer.py` |
 | `tests/test_crash.py` | `progress.prefix_processes` (crash handler), `windows` (fake `xwininfo`/`xprop`: order, size and map-state filters, the newest and top window), the crash and stall notes in `runner` | `tests/test_gitfurl.py` (`RunEventHelpers`) |
 | `tests/test_gui_polish.py` | `theme`, `widgets`, window polish (window parts skipped without `xvfb-run` or tkinter) | - |
 | `tests/test_timeline.py` | `timeline` (format, folding, caps, cleaning, the file), rows from a mocked Wine run and a native unpack, `cli log` and `install --timeline` | `tests/test_gitfurl.py` (`RunEventHelpers`), `tests/test_native_run.py` (`NativeBase`), `tests/test_route.py` |

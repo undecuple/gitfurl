@@ -67,8 +67,8 @@ The **Route** column says where an option has an effect: **both**, **native** (g
 | `--find-exe` | After the run, guess which new program was installed. | off | Setup |
 | `--stall-after SECONDS` | Print an advisory note each time nothing moves for this long. Never stops anything. | off | Setup |
 | `--no-memory-limit` | Setup route: run without the systemd memory scope. Native route: create the prefix without it, and skip the check of the decoders' memory against free memory. | the limit is on | both |
-| `--progress` | Print progress lines while it runs (read, rate, ETA). | off | both |
-| `--progress-interval SECONDS` | How often progress is sampled and printed. Must be above 0. (No help text in `--help`.) | `10` | both |
+| `--progress` | Print what the run is doing at each interval. Setup route: the payload read, the rate, an estimate and gitfurl's own processes with their CPU and memory. Native route: the data block, each decoder's counters, the files done, the rates and an estimate. Several lines on a terminal, one line otherwise. See [What gitfurl shows while it works](user-guide.md#what-gitfurl-shows-while-it-works). | off | both |
+| `--progress-interval SECONDS` | Seconds between two `--progress` outputs. Must be above 0. | `10` | both |
 | `--timeline` | Also print the timeline rows as they come. The timeline is saved either way. | off | both |
 | `--detailed-log` | Also write a JSON-lines event log beside the log. | off | both |
 | `--scan` | Scan the installer and the files beside it with the `clamscan` on PATH first. A match or a scan error stops the run. | off | both |

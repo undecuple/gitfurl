@@ -61,6 +61,29 @@ def group_alive(pgid: int) -> bool:
     return False
 
 
+def group_members(pgid: int | None, proc: str = "/proc") -> list[int]:
+    """The live (not zombie) processes of process group `pgid` (gitfurl's own run), from
+    /proc/<pid>/stat only. Empty for None."""
+    if pgid is None:
+        return []
+    found = []
+    try:
+        entries = os.listdir(proc)
+    except OSError:
+        return found
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"{proc}/{entry}/stat", encoding="utf-8", errors="replace") as fh:
+                fields = fh.read().rpartition(")")[2].split()
+            if int(fields[2]) == pgid and fields[0] != "Z":
+                found.append(int(entry))
+        except (OSError, ValueError, IndexError):
+            continue
+    return sorted(found)
+
+
 def wineserver_for(wine: str) -> str | None:
     """`wineserver` beside an absolute wine path, else found on PATH. Always an absolute path.
 

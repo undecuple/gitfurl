@@ -480,7 +480,12 @@ class NativeCliTests(Base):
         logs = list((self.state / "gitfurl" / "logs").glob("p1-*.log"))
         self.assertEqual(len(logs), 1)
         self.assertEqual(stat.S_IMODE(logs[0].stat().st_mode), 0o600)
-        self.assertIn("route: native", logs[0].read_text())
+        log_text = logs[0].read_text()
+        self.assertIn("route: native", log_text)
+        # one row per stage when a block ends (the live view's summary)
+        self.assertRegex(log_text, r"block 1 of NAME-01\.bin: lzma: [\d.]+ (KB|bytes) in, ")
+        self.assertRegex(log_text, r"block 1 of NAME-02\.bin: rep: .*\n.*: exe: .*\n.*: delta: "
+                                   r".*\n.*: lzma: ")
         ev_path = logs[0].with_suffix(".events.jsonl")
         self.assertEqual(stat.S_IMODE(ev_path.stat().st_mode), 0o600)
         events = [json.loads(ln) for ln in ev_path.read_text().splitlines()]
@@ -488,6 +493,9 @@ class NativeCliTests(Base):
         self.assertEqual(kinds[0], "start")
         self.assertEqual(events[0]["route"], "native")
         self.assertIn("progress", kinds)
+        ends = [e for e in events if e["event"] == "block_end"]
+        self.assertEqual(len(ends), 3)
+        self.assertEqual(ends[1]["stages"][0].split(":")[0], "rep")
         self.assertEqual(kinds[-1], "exit")
         self.assertEqual(events[-1]["status"], 0)
 

@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 from gitfurl import __version__
+from gitfurl.activity import CliProgress, wine_progress_text
 from gitfurl.cleanup import MODES, perform_cleanup, plan_cleanup
 from gitfurl.detect import describe as describe_detection
 from gitfurl.detect import detect
@@ -105,13 +106,17 @@ def build_parser() -> argparse.ArgumentParser:
     inst.add_argument("--find-exe", action="store_true",
                       help="after the run, guess which new program was installed (local only)")
     inst.add_argument("--progress", action="store_true",
-                      help="print progress while the installer runs (payload read, rate, ETA)")
+                      help="print what the run is doing every interval: for Setup, the payload "
+                           "read, rate, estimate and the processes; for gitfurl's own unpack, "
+                           "the data block, each decoder's counters, the file, the rates and an "
+                           "estimate. Several lines on a terminal, one line otherwise")
     inst.add_argument("--stall-after", type=float, default=None, metavar="SECONDS",
                       help="print an advisory note each time nothing moves (no payload read, "
                            "no CPU use, no log growth) for this long; after the run moves again, "
                            "a later quiet period gets a note too. Off by default. It never "
                            "stops anything")
-    inst.add_argument("--progress-interval", type=float, default=10.0, metavar="SECONDS")
+    inst.add_argument("--progress-interval", type=float, default=10.0, metavar="SECONDS",
+                      help="seconds between two --progress outputs (default 10)")
     inst.add_argument("--timeline", action="store_true",
                       help="also print the run's timeline rows as they come (what each step "
                            "did and why); the timeline is saved next to the log either way")
@@ -855,8 +860,8 @@ def _real_install(args, det, choice, links=None, picked=None) -> int:
     control = RunControl()
     try:
         options = RunOptions(timeline=tl,
-            on_progress=(lambda smp: print(f"[progress] {smp.line()}", flush=True))
-            if args.progress else None,
+            on_progress=(lambda smp: print(wine_progress_text(smp, sys.stdout.isatty()),
+                                           flush=True)) if args.progress else None,
             progress_interval=args.progress_interval,
             detailed_log=args.detailed_log, wine_debug=args.wine_debug, control=control,
             stall_after_s=args.stall_after,
@@ -1145,11 +1150,10 @@ def _native_steps(args, plan, xplan, scan_plan, clean, create, tl) -> int:
                   file=sys.stderr)
             return 1
     try:
-        res = run_native(
-            plan, on_line=(lambda text: print(f"[progress] {text}", flush=True))
-            if args.progress else None,
-            detailed_log=args.detailed_log, progress_interval=args.progress_interval,
-            scan_summary=scan_summary, timeline=tl)
+        with CliProgress(args.progress, args.progress_interval) as live:
+            res = run_native(plan, detailed_log=args.detailed_log,
+                             progress_interval=args.progress_interval,
+                             scan_summary=scan_summary, timeline=tl, **live.kwargs())
     except ExtractRefused as exc:
         tl.add("note", "The unpack did not start", f"{exc}. {exc.outcome()}")
         print(f"error: {exc}. {exc.outcome()}", file=sys.stderr)

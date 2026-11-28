@@ -503,13 +503,14 @@ def _rate_text(done: int, total: int, elapsed: float) -> str:
 def run_native(plan: NativeInstallPlan, cancel=None, on_line=None, detailed_log: bool = False,
                progress_interval: float = 10.0, env: dict[str, str] | None = None,
                scan_summary: str | None = None, clock=time.monotonic,
-               on_progress=None, timeline=None) -> NativeResult:
+               on_progress=None, timeline=None, activity=None) -> NativeResult:
     """Unpack an approved native plan. The prefix must exist. Starts no process.
 
     `on_line(text)` receives throttled progress lines and `on_progress(done, total, elapsed)`
     the same samples as numbers (both on this thread; there is no progress thread).
     `timeline` (a gitfurl.timeline.Timeline) gets a row for each step and is saved next to
-    the log. Raises
+    the log. `activity` (a gitfurl.activity.Activity) is kept up to date for a live view, and
+    each block's stage rows go into the log and the timeline either way. Raises
     ExtractRefused before anything is written (nothing was created then
     except, rarely, empty folders the refusal lists); afterwards every problem is in the
     result. A Ctrl-C while files are written ends the unpack (status 130); files already
@@ -577,11 +578,22 @@ def run_native(plan: NativeInstallPlan, cancel=None, on_line=None, detailed_log:
             event("start", route=ROUTE_NATIVE, prefix=str(plan.prefix),
                   destination=str(xplan.dest), archives=[ap.path.name for ap in xplan.archives],
                   total_bytes=xplan.total_size, files=xplan.file_count)
-            on_event = _tl_unpack_start(timeline, xplan, log_dir / f"{plan.prefix_name}-{stamp}",
+            tl_event = _tl_unpack_start(timeline, xplan, log_dir / f"{plan.prefix_name}-{stamp}",
                                         log_path)
+
+            def on_event(kind, ap, *details):
+                if kind == "block_end":
+                    k, _blk, rows, _secs = details
+                    for row in rows:
+                        log.write(f"block {k + 1} of {clean(ap.path.name, 80)}: {row}\n")
+                    log.flush()
+                    event("block_end", archive=clean(ap.path.name, 80), block=k + 1, stages=rows)
+                if tl_event is not None:
+                    tl_event(kind, ap, *details)
+
             try:
-                result = extract(xplan, cancel, progress,
-                                 **({"on_event": on_event} if on_event else {}))
+                result = extract(xplan, cancel, progress, on_event=on_event,
+                                 **({"activity": activity} if activity is not None else {}))
             except BaseException as exc:
                 started = isinstance(exc, KeyboardInterrupt) and os.path.lexists(xplan.dest)
                 if started:
@@ -659,6 +671,9 @@ def run_native(plan: NativeInstallPlan, cancel=None, on_line=None, detailed_log:
 
 # ---- timeline rows for the unpack (gitfurl.timeline); nothing without a timeline -----------
 
+TL_STAGE_ROWS_S = 5.0  # a block that took this long gets a timeline row per stage
+
+
 def _tl_unpack_start(tl, xplan, stem: Path, log_path: Path):
     """Attach the timeline file beside the log, add the start rows, and return the
     on_event handler for extract() (None without a timeline)."""
@@ -686,6 +701,15 @@ def _tl_unpack_start(tl, xplan, stem: Path, log_path: Path):
                    f"block{'s' if blocks != 1 else ''}",
                    "its index was read again and matches the plan")
             run["key"] = None
+            return
+        if kind == "block_end":
+            k, _blk, rows, secs = details
+            if secs < TL_STAGE_ROWS_S:  # quick blocks: their rows are in the log only
+                return
+            for row in rows:
+                tl.add("archive", f"Data block {k + 1} of {name}: {row}",
+                       "this stage's own decoding time, without the stages it reads from")
+            run["key"] = None  # the next block starts a new row
             return
         k, blk, files = details
         kind_text = blk.method.kind  # gitfurl's own stage names, never the archive's text
@@ -902,7 +926,7 @@ def perform_native(plan: NativeInstallPlan, control: NativeControl, *, memory_li
                    on_progress=None, on_note=None, detailed_log: bool = False,
                    progress_interval: float = 3.0, env: dict[str, str] | None = None,
                    create=native_prefix_create, run=run_native,
-                   timeline=None) -> NativeOutcome:
+                   timeline=None, activity=None) -> NativeOutcome:
     """Run an approved native plan, in the command line's order: the ClamAV scan (if any),
     the prefix creation (if asked), then the unpack. Meant for a worker thread.
 
@@ -973,7 +997,8 @@ def perform_native(plan: NativeInstallPlan, control: NativeControl, *, memory_li
         res = run(plan, cancel=control.event, detailed_log=detailed_log,
                   progress_interval=progress_interval, env=env, scan_summary=summary,
                   on_progress=on_progress,
-                  **({"timeline": timeline} if timeline is not None else {}))
+                  **({"timeline": timeline} if timeline is not None else {}),
+                  **({"activity": activity} if activity is not None else {}))
     except ExtractRefused as exc:
         if exc.stopped:
             return NativeOutcome(130, "Stopped before the unpack. Nothing was unpacked.",
