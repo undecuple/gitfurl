@@ -4,6 +4,10 @@ All notable changes are documented here. The format follows [Keep a Changelog](h
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-28
+
+The native route gains more decoders, destination selection, setup choices, optional registry and menu entries, and explicit checksum exceptions. Runs show live activity, and support reports can be previewed, copied or saved on request. The release build includes the native decoder module and third-party notices. Compatibility with any particular installer remains unverified.
+
 - Native-route plans suggest reviewing an available numbered archive-name mapping, describe mapped names without a stale Setup-only missing-file warning, and no longer deny the registry entries and shortcuts that the plan schedules after extraction. Checksum exceptions remain opt-in.
 
 ### Changed
