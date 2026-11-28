@@ -33,15 +33,30 @@ jobs:
         run: |
           ruff check .
           PYTHONPATH=src python -m pytest -q
+      # The native decoder module (gitfurl._codecs: the cm and rolz stages), built the way the
+      # native job in ci.yml builds it, so the program can decode the cm stage.
+      - name: Rust toolchain (pinned; rustup is on the runner)
+        run: |
+          rustup toolchain install 1.99.1 --profile minimal --component clippy,rustfmt
+          rustup default 1.99.1
+      - name: install the module's build tool
+        run: python -m pip install maturin==1.15.0 pytest==8.3.5
+      - name: cargo test
+        working-directory: native/gitfurl-codecs
+        run: cargo test --locked
+      - name: build the native module with maturin
+        run: sh tools/build_codecs.sh  # writes src/gitfurl/_codecs.abi3.so
       - name: build the program
         run: |
           pyinstaller --onefile --noconfirm --name gitfurl --paths src \
-            --hidden-import tkinter --add-data "src/gitfurl/icon.png:gitfurl" \
+            --hidden-import tkinter --hidden-import gitfurl._codecs \
+            --add-data "src/gitfurl/icon.png:gitfurl" \
             src/gitfurl/__main__.py
       - name: smoke test the built program
         run: |
           ./dist/gitfurl cli --version
-          ./dist/gitfurl cli doctor
+          ./dist/gitfurl cli doctor | tee doctor.txt
+          grep -qx "native decoders: cm, rolz" doctor.txt || { echo "the native module is not in the program"; exit 1; }
           # The window should stay open until timeout stops it (exit status 124).
           set +e
           xvfb-run -a timeout 6 ./dist/gitfurl

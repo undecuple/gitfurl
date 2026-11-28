@@ -119,7 +119,7 @@ Notes:
 | Install script (run by a user) | `install.sh` | downloads the release program and `SHA256SUMS` over HTTPS, checks it, installs it or runs it once; the only network-using file, never called by the app (see the [user guide](user-guide.md#install-script)) |
 | Sandbox wrapper (manual) | `tools/sandbox.sh` | bubblewrap, network off, NixOS only; not part of the app |
 | Asset generator | `tools/make_assets.py` | `assets/*.svg`, dividers, the facts label colours |
-| Release build | `.github/workflows/release.yml` | PyInstaller single file on a `v*` tag, draft release; it does not build the native module |
+| Release build | `.github/workflows/release.yml` | PyInstaller single file on a `v*` tag, draft release; it builds the native module (Rust 1.99.1, maturin 1.15.0, `cargo test --locked`) and bundles it, and the smoke test requires `native decoders: cm, rolz` |
 
 ## Control flow: `gitfurl cli install`
 
@@ -243,7 +243,7 @@ flowchart LR
     c5["secrets job: gitleaks over the whole history"]
   end
   codeql["codeql.yml: push, PR, weekly schedule"]
-  rel["release.yml: v* tag → lint, test, PyInstaller, smoke test, SHA256SUMS, draft release"]
+  rel["release.yml: v* tag → lint, test, native module, PyInstaller, smoke test, SHA256SUMS, draft release"]
   notify["release-notify.yml: published release → Discord"]
   hook[".githooks/pre-commit: same file rules locally"]
 ```

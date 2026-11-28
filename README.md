@@ -61,7 +61,7 @@ Better, read the script before you run it:
 Or by hand: download the program and `SHA256SUMS` from the [latest release](https://github.com/undecuple/gitfurl/releases/latest), run `sha256sum -c SHA256SUMS` in that folder, then `chmod +x` the program and put it on your PATH. More in the [user guide](docs/user-guide.md#install-script).
 
 ### Use it
-The release program is not proven on every desktop (see [docs/status.md](docs/status.md#known-issues)). You need Linux and Wine; to run from source, also Python 3.11 or newer and tkinter (`python3-tk` on Debian and Ubuntu). From source (with the installed program, type `gitfurl` where the steps say `python -m gitfurl`):
+From the next release on, the release program includes gitfurl's native decoder module (the cm and rolz stages); from source the module is optional (see [docs/development.md](docs/development.md)). The release program is not proven on every desktop (see [docs/status.md](docs/status.md#known-issues)). You need Linux and Wine; to run from source, also Python 3.11 or newer and tkinter (`python3-tk` on Debian and Ubuntu). From source (with the installed program, type `gitfurl` where the steps say `python -m gitfurl`):
 
 1. `git clone https://github.com/undecuple/gitfurl.git && cd gitfurl`
 2. `python -m gitfurl cli doctor` reports Wine, tkinter, bubblewrap and umu-run.
