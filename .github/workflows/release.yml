@@ -2,7 +2,10 @@ name: Release
 
 # Builds the graphical app as a single Linux program and, for a version tag, attaches it
 # to a DRAFT release. A person reviews and publishes the draft. Running this by hand
-# (workflow_dispatch) only builds and uploads the artifact; it creates no release.
+# (workflow_dispatch, for example `gh workflow run release.yml --ref main`) is a build-only
+# dry run: the same build and smoke test, and the program, THIRD_PARTY.md, BUNDLED.txt and
+# SHA256SUMS uploaded as a workflow artifact. It creates no release, tag or draft, so the
+# notify workflow (which runs on a published release) does not run either.
 on:
   push:
     tags: ['v*']
@@ -14,6 +17,8 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-22.04  # an older glibc, so the program runs on more distributions
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
@@ -62,13 +67,27 @@ jobs:
           xvfb-run -a timeout 6 ./dist/gitfurl
           status=$?
           test "$status" = 124 || { echo "window did not stay open (status $status)"; exit 1; }
+      # What PyInstaller put into the program, read back from the built file, with the
+      # versions of the runner's libraries that CPython reports. THIRD_PARTY.md names the
+      # components; this list records what this build actually contains.
+      - name: list what PyInstaller bundled
+        run: |
+          {
+            echo "# What PyInstaller bundled into the program: pyi-archive_viewer -l -r -b dist/gitfurl"
+            echo "# runner image: ${ImageOS:-unknown} ${ImageVersion:-unknown}; PyInstaller $(pyinstaller --version)"
+            python -c "import platform,ssl,sqlite3,zlib,pyexpat,tkinter; print('# CPython', platform.python_version()); print('#', ssl.OPENSSL_VERSION); print('# SQLite', sqlite3.sqlite_version); print('# zlib', zlib.ZLIB_RUNTIME_VERSION); print('#', pyexpat.EXPAT_VERSION); print('# Tcl', tkinter.Tcl().eval('info patchlevel'), '/ Tk', tkinter.TkVersion)"
+            pyi-archive_viewer -l -r -b dist/gitfurl
+          } > bundled.txt
+          grep -q "_codecs" bundled.txt || { echo "the native module is not in the bundle list"; exit 1; }
       - name: name the files and write checksums
         run: |
           ref="${GITHUB_REF_NAME:-dev}"
           name="gitfurl-${ref//\//-}-linux-x86_64"  # a branch name may contain slashes
           mkdir out
           cp dist/gitfurl "out/$name"
-          (cd out && sha256sum "$name" > SHA256SUMS)
+          cp THIRD_PARTY.md out/THIRD_PARTY.md
+          cp bundled.txt out/BUNDLED.txt
+          (cd out && sha256sum "$name" THIRD_PARTY.md BUNDLED.txt > SHA256SUMS)
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: gitfurl-linux-x86_64
@@ -77,7 +96,8 @@ jobs:
 
   draft-release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Only a pushed version tag makes a draft; a run started by hand never does, even on a tag.
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-22.04
     permissions:
       contents: write  # only this job can create the draft release

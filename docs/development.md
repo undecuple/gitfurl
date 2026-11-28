@@ -38,6 +38,19 @@ Without Nix: a Rust toolchain (CI pins 1.99.1) and `pip install maturin==1.15.0`
 
 CI runs these in its `native` job, builds the module and runs the Python suite with it. Keep local builds to a few threads (`CARGO_BUILD_JOBS=4`, `nice -n 19`). `examples/cmcheck.rs` is a manual checksum tool for the real-data check in [testing.md](testing.md): it prints CRC-32s and SHA-256s and writes no decoded data.
 
+## Release build dry run
+`.github/workflows/release.yml` builds the single-file program. A pushed `v*` tag builds it and attaches it to a draft release; started by hand, it is a build-only dry run:
+
+    gh workflow run release.yml --ref main
+
+The dry run runs the same steps as a release build (lint, tests, `cargo test --locked`, the native module, PyInstaller, the smoke test with `cli doctor` and the window under Xvfb) and uploads one workflow artifact, `gitfurl-linux-x86_64`, holding:
+- `gitfurl-main-linux-x86_64`: the program (named after the ref; slashes in a branch name become `-`);
+- `THIRD_PARTY.md`: the third-party notices;
+- `BUNDLED.txt`: what PyInstaller put into the program (`pyi-archive_viewer -l -r -b`), with the runner image and the CPython, OpenSSL, SQLite, zlib, expat and Tcl/Tk versions the runner's CPython reports;
+- `SHA256SUMS`: checksums of those three files.
+
+It creates no release, tag or draft, and so does not start the notify workflow; the draft-release job runs only when `github.event_name` is `push`, even if the run is started on a tag. Fetch the artifact with `gh run download RUN_ID -n gitfurl-linux-x86_64`. A release gets the same four files as assets. When `BUNDLED.txt` lists a library that `THIRD_PARTY.md` does not name, add it there before the release.
+
 ## Running an installer in a sandbox
 This wrapper is a manual script, **tested on NixOS only**: it binds `/nix` and `/run/current-system` and exits on other systems. It is not part of the app. It sets no `DISPLAY`, so a graphical installer opens no window unless you start Xvfb inside it. With `SANDBOX_ETC=1` it also exposes `/etc/passwd`, `/etc/group`, `/etc/hosts`, `/etc/machine-id`, `/etc/zoneinfo` and `/sys` read-only, which weakens the "empty home" idea.
 
