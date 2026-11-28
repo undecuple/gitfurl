@@ -325,6 +325,8 @@ class NativeInstallPlan:
     # setup_entries.SetupEntriesPlan when the setup's registry entries and shortcuts were asked
     # for (--apply-setup-entries); None otherwise
     setup_entries: object = None
+    # setup_choices.Picked: Setup's questions and the answers (shown, logged); None: none
+    choices: object = None
 
     @property
     def extract(self):
@@ -340,6 +342,12 @@ class NativeInstallPlan:
 
     def describe(self) -> list[str]:
         lines = [self.choice.line(), self.skipped()]
+        if self.choices is not None:
+            from gitfurl.setup_choices import native_notes
+
+            lines.extend(self.choices.lines())
+            lines.extend(f"  note: {n}" for n in native_notes(
+                self.choices, [ap.path.name for ap in self.extract.archives]))
         if self.extract.keep_bad_file_crc:
             from gitfurl.extract import KEEP_BAD_CRC_WARNING
 
@@ -559,6 +567,9 @@ def run_native(plan: NativeInstallPlan, cancel=None, on_line=None, detailed_log:
                       + (" (the folder you chose)" if xplan.dest_chosen else "") + "\n")
             if scan_summary:
                 log.write("".join(f"scan: {ln}\n" for ln in scan_summary.splitlines()))
+            if plan.choices is not None:
+                log.write(f"{plan.choices.record()} ({clean(plan.choices.how, 120)}; "
+                          f"{'applied' if plan.choices.applied else 'not used'})\n")
             for warning in xplan.warnings:
                 log.write(f"warning: {warning}\n")
             log.write("---\n")

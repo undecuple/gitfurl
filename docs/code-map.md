@@ -26,6 +26,7 @@ flowchart TB
     preflight["preflight.py"]
     doctor["doctor.py"]
     builders["runner.build_plan() · portable.py · unattended.py · scan.build_scan_plan() · memlimit.compute_budget()"]
+    choices["setup_choices.py: Setup's questions (inno.choices()), asked or shown"]
   end
   subgraph run["After approval: run or unpack"]
     runner["runner.py: run_tracked() → run_with_prefix() → execute()"]
@@ -66,8 +67,12 @@ Arrows point from a module to the modules it imports. Modules with no gitfurl im
 flowchart LR
   main["__main__"] --> app
   app --> cli & gui
-  cli --> cleanup & desktop & detect & doctor & extract & inno & memlimit & namelinks & portable & prefix_delete & prefixes & preflight & route & runner & safety & scan & setup_entries & timeline & unattended
-  gui --> cleanup & detect & doctor & memlimit & namelinks & portable & prefix_delete & prefixes & preflight & route & runner & safety & scan & setup_entries & theme & timeline & unattended & viewprefs & widgets
+  cli --> cleanup & desktop & detect & doctor & extract & inno & memlimit & namelinks & portable & prefix_delete & prefixes & preflight & route & runner & safety & scan & setup_choices & setup_entries & timeline & unattended
+  gui --> choices_panel & cleanup & detect & doctor & memlimit & namelinks & portable & prefix_delete & prefixes & preflight & route & runner & safety & scan & setup_choices & setup_entries & theme & timeline & unattended & viewprefs & widgets
+  choices_panel --> setup_choices
+  setup_choices --> detect & inno
+  route --> setup_choices
+  timeline --> setup_choices
   prefix_delete --> desktop & prefixes & procgroup & runner & timeline
   route --> changes & detect & extract & farc & inno & memlimit & prefixes & runner & scan & setup_entries & timeline
   setup_entries --> desktop & detect & inno & procgroup & route
@@ -95,6 +100,7 @@ Notes:
 - `detect` ↔ `farc` is the same kind of cycle: `detect` imports `farc` at the top, and `farc.summarise()` imports `detect.clean` inside the function.
 - `inno` imports `extract` to reuse its folder handling (`_Tree`, `_make_dest`, name checks) and the `ExtractPlan` checks.
 - `inno._temporary_files()` lists the stored `{tmp}` and `dontcopy` files; `_carried_names()` keeps those the `[Code]` also names bare or with `{tmp}`. `beside_files()` skips them and `summarise()` explains them once.
+- Setup's questions: `inno.choices()` reads them from the parsed setup (`Choices`: languages, setup types, components and tasks as `Item`s, postinstall entries, what is not seen) and `Choices.answer()` / `resolve()` turn answers into the `inno.Choice` that `Choice.decide()` (the condition evaluator) already uses. `setup_choices.pick()` asks them (`ask()`, `yes_no()`, `number()`), takes them from `--language`/`--type`/`--components`/`--tasks`, or takes the defaults, and returns a `Picked` that knows its mode (Inno's switches for `unattended.UnattendedPlan.choice_args`; the `choice` for `setup_entries.plan_setup_entries()` and `inno.plan_inno_extract()`; or information only). `NativeInstallPlan.choices`, `RunOptions.choices_line` and `timeline.choices_entry()` record it. `choices_panel.ChoicesPanel` is the window's card, over `setup_choices.window_rows()` / `window_choice()`.
 - `route` and `setup_entries` import each other inside functions only (`route.run_native()` calls `setup_entries.apply_entries`; `setup_entries` uses `route.written_files`), so loading either module first works.
 - `route` imports `runner` only for `logs_root()`; the Wine fallback is run by `cli.py` through `runner`. The native route starts no process except `wineboot` (and `clamscan` with `--scan`).
 - Most imports in `cli`, `gui`, `route`, `runner` and `prefix_delete` are inside functions, so `gitfurl cli doctor` does not load `extract`, `farc_codecs` or `farc_rolz` (checked by importing `cli`).
@@ -265,6 +271,7 @@ flowchart LR
 | `native/gitfurl-codecs` (`cargo test`) | the cm-stage decoder in Rust: header, models, every match kind and special mode it decodes, refusals, damage, threads; the rolz decoder: the rANS reader (random round trips, several packets, damage), tables, container, records, refusals, random damage without a panic | `src/cm/testkit.rs` (test encoder), `src/rolz/testkit.rs` (rANS encoder, literal records) |
 | `tests/test_inno.py` | `inno` reader, `[Code]` scan, preflight, `extract-inno`, `detect` and `cli` lines | `tests/inno_writer.py` |
 | `tests/test_unattended.py` | `unattended`, its CLI and window options | - |
+| `tests/test_setup_choices.py` | `inno.choices()` (defaults from types and flags, exclusive groups, names checked, the record line, Inno's switches, what is not seen), `setup_choices` (y/n and numbered questions asked again, the wizard order, end of input, `pick`), `cli install` (dry run, `--yes`, no terminal, a mocked terminal, the answer options), `extract-inno` and `setup_entries` filtered by the answers, the FreeArc and `[Run]` notes, the native log, the window's rows and choice, and the card in the real window | `tests/inno_writer.py` (components and tasks with descriptions, group headings and conditions), `tests/farc_writer.py`, `tests/gui_choices_driver.py` (`xvfb-run -a`) |
 | `tests/test_portable.py` | `portable`, `runner` wrapping, window option | - |
 | `tests/test_scan.py` | `scan`, the scan gate, the database version (with the `clamconf` fallback), `doctor` lines | - |
 | `tests/test_memlimit.py` | `memlimit`, `runner` scope, `doctor`, window option | `tests/test_gui_polish.py` (`run_window`) |

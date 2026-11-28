@@ -247,8 +247,10 @@ class Spec:
     arch_64: str = ""
     languages: list = field(default_factory=lambda: [("english", 0x0409)])
     types: list = field(default_factory=list)  # (name, kind, custom)
-    components: list = field(default_factory=list)  # (name, types, options)
-    tasks: list = field(default_factory=list)  # (name, options)
+    # (name, types, options[, description[, languages[, check]]])
+    components: list = field(default_factory=list)
+    # (name, options[, description[, group description[, components[, check]]]])
+    tasks: list = field(default_factory=list)
     dirs: list = field(default_factory=list)  # names
     files: list = field(default_factory=list)  # WFile
     icons: int | list = 0  # a count of placeholder entries, or WIcon records
@@ -363,13 +365,17 @@ def build_block1(sp: Spec, nlocations: int) -> bytes:
     for name, kind, custom in sp.types:
         out += text(name) + text(name.title()) + text("") + text("")
         out += _ver() + _ver() + u8(int(custom)) + u8(kind) + i64(0)
-    for name, types, options in sp.components:
-        out += text(name) + text(name.title()) + text(types) + text("") + text("")
+    for name, types, options, *more in sp.components:
+        desc, langs, check = (*more, "", "", "")[:3] if more else (name.title(), "", "")
+        out += text(name) + text(desc or name.title()) + text(types) + text(langs) + text(check)
         out += i64(0) + (i32(name.count("\\")) if f < F["6.7.0"] else u8(name.count("\\")))
         out += u8(0) + _ver() + _ver() + u8(options) + i64(0)
-    for name, options in sp.tasks:
-        out += text(name) + text(name.title()) + text("") + text("") + text("") + text("")
-        out += (i32(0) if f < F["6.7.0"] else u8(0)) + u8(0) + _ver() + _ver() + u8(options)
+    for name, options, *more in sp.tasks:
+        desc, group, comps, check = (*more, "", "", "", "")[:4]
+        out += text(name) + text(desc or name.title()) + text(group) + text(comps) + text("")
+        out += text(check)
+        out += (i32(name.count("\\")) if f < F["6.7.0"] else u8(name.count("\\")))
+        out += u8(0) + _ver() + _ver() + u8(options)
     for name in sp.dirs:
         out += b"".join(text(s) for s in [name] + _six()) + i32(0) + _ver() + _ver() + \
             struct.pack("<h", -1) + u8(0)

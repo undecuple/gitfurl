@@ -172,6 +172,8 @@ def build_parser() -> argparse.ArgumentParser:
                      "files go to C:\\Games\\PREFIX in it")
     ixt.add_argument("--dry-run", action="store_true", help="show the plan and change nothing")
     ixt.add_argument("--yes", action="store_true", help="approve without prompting")
+    for command in (inst, ixt):
+        _choice_options(command)
     pre = sub.add_parser("prefix", help="manage dedicated prefixes")
     pre_sub = pre.add_subparsers(dest="prefix_command", required=True)
     create = pre_sub.add_parser("create", help="create a dedicated prefix")
@@ -241,8 +243,11 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         print(f"error: {exc}. Nothing was run.", file=sys.stderr)
         return 1
+    picked = _setup_choices(args, installer, _choices_mode(args, choice))
+    if isinstance(picked, int):
+        return picked
     if choice.route == ROUTE_NATIVE:
-        return _native_install(args, installer, det, choice, links)
+        return _native_install(args, installer, det, choice, links, picked)
     if args.keep_bad_file_crc:
         print("--keep-bad-file-crc does not apply to the Wine/Proton route: Setup runs and "
               "checks its own files")
@@ -253,14 +258,14 @@ def main(argv: list[str] | None = None) -> int:
         print("--apply-setup-entries does not apply to the Wine/Proton route: Setup runs and "
               "writes its own registry entries and shortcuts")
     if not args.dry_run:
-        return _real_install(args, det, choice, links)
+        return _real_install(args, det, choice, links, picked)
     try:
         scan_plan = _scan_plan(args, installer)
         plan = build_plan(installer, args.prefix or DEFAULT_PREFIX, runtime=args.runtime,
                           proton_path=args.proton_path, portable=args.portable, scan=scan_plan,
                           memory_limit=not args.no_memory_limit,
                           unattended=_unattended_plan(args, args.prefix or DEFAULT_PREFIX,
-                                                      det),
+                                                      det, picked),
                           wine_addons=args.wine_addons)
         portable_lines = _portable_lines(plan, installer, shutil.which("wine") or "wine",
                                          full=True) if args.portable else []
@@ -287,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
         print(line)
     for line in _link_lines(links, staging):
         print(line)
-    for line in _unattended_lines(plan):
+    for line in _unattended_lines(plan) + (picked.lines() if picked else []):
         print(line)
     if scan_plan is not None:
         from gitfurl.scan import describe_scan_plan
@@ -326,14 +331,69 @@ def _link_lines(links, staging) -> list[str]:
     return [*links.lines(), "  Setup runs from the installer's own folder"]
 
 
-def _unattended_plan(args, prefix_name, det):
+def _unattended_plan(args, prefix_name, det, picked=None):
     """The unattended plan when --unattended is given, else None. Uses the detection of the
-    installer's headers. Raises ValueError (UnattendedRefused) when it is not Inno Setup."""
+    installer's headers; `picked` (setup_choices.Picked) adds Inno's switches for the answers.
+    Raises ValueError (UnattendedRefused) when it is not Inno Setup."""
     if not args.unattended:
         return None
+    from dataclasses import replace
+
     from gitfurl.unattended import plan_unattended
 
-    return plan_unattended(prefix_name, det)
+    plan = plan_unattended(prefix_name, det)
+    if picked is not None and picked.switches():
+        plan = replace(plan, choice_args=tuple(picked.switches()), choices_line=picked.record())
+    return plan
+
+
+# ---- Setup's own questions (gitfurl.setup_choices) ------------------------------------------
+
+def _choice_options(command) -> None:
+    g = command.add_argument_group(
+        "Setup's choices (Inno Setup)", "Answers to the questions Setup's wizard would ask. "
+        "Without them a terminal is asked each question; --yes or no terminal takes the "
+        "script's defaults. Names not given keep the default; !name deselects")
+    g.add_argument("--language", metavar="NAME", help="the setup's language (its [Languages] "
+                   "name)")
+    g.add_argument("--type", dest="setup_type", metavar="NAME", help="the setup type")
+    g.add_argument("--components", metavar="A,!B", help="components to select or deselect")
+    g.add_argument("--tasks", metavar="X,!Y", help="tasks to check or uncheck")
+
+
+def _choices_mode(args, choice) -> str:
+    from gitfurl import setup_choices as sc
+
+    if choice.route == ROUTE_NATIVE:
+        return sc.MODE_ENTRIES if args.apply_setup_entries else sc.MODE_NATIVE
+    return sc.MODE_SWITCHES if args.unattended else sc.MODE_WIZARD
+
+
+def _setup_choices(args, installer, mode):
+    """Setup's questions for this route: asked on the terminal, given as options, or the
+    script's defaults; the dry run prints them. Returns a setup_choices.Picked, None (not an
+    Inno Setup installer, or nothing to ask) or an exit status."""
+    from gitfurl import setup_choices as sc
+
+    if not args.dry_run and not args.prefix:
+        return None  # the run stops for the missing --prefix before anything is asked
+    try:
+        picked = sc.pick(installer, mode, answers=sc.given(args.language, args.setup_type,
+                                                           args.components, args.tasks),
+                         yes=args.yes, tty=sys.stdin.isatty(), dry_run=args.dry_run)
+    except ValueError as exc:
+        print(f"error: {exc}. Nothing was run.", file=sys.stderr)
+        return 1
+    except sc.ChoicesStopped as exc:
+        print(f"error: {sc.HEADING}: {exc}. Nothing was run.", file=sys.stderr)
+        return 2
+    if picked is not None and (args.dry_run or picked.how != "asked"):
+        mine = picked.how.startswith("given")
+        print(f"{sc.HEADING}: the questions, with "
+              + ("your answers:" if mine else "the script's defaults:"))
+        for line in picked.choices.lines(picked.choice, "answer" if mine else "default"):
+            print(line)
+    return picked
 
 
 def _desktop_command(args) -> int:
@@ -618,16 +678,22 @@ def _extract_inno_command(args) -> int:
     if not args.dry_run and running_as_root():
         print(f"error: {ROOT_MESSAGE}", file=sys.stderr)
         return 1
+    from gitfurl.setup_choices import MODE_FILES
+
     try:
         installer = validate_installer(args.installer)
-        plan = plan_inno_extract(installer, args.prefix)
+        picked = _setup_choices(args, installer, MODE_FILES)
+        if isinstance(picked, int):
+            return picked
+        plan = plan_inno_extract(installer, args.prefix,
+                                 choice=picked.entry_choice() if picked else None)
     except ValueError as exc:  # ExtractRefused is a ValueError
         print(f"error: {exc}. Nothing was written.", file=sys.stderr)
         return 1
     problem = plan.problem()
     if args.dry_run:
         print("DRY RUN: nothing was extracted, created or changed.")
-    for line in plan.describe():
+    for line in plan.describe() + (picked.lines() if picked else []):
         print(line)
     print("Only extract installers you are authorised to use.")
     if args.dry_run:
@@ -657,7 +723,7 @@ def _extract_inno_command(args) -> int:
     return 0 if result.ok else 1
 
 
-def _real_install(args, det, choice, links=None) -> int:
+def _real_install(args, det, choice, links=None, picked=None) -> int:
     if running_as_root():
         print(f"error: {ROOT_MESSAGE}", file=sys.stderr)
         return 1
@@ -671,7 +737,7 @@ def _real_install(args, det, choice, links=None) -> int:
         plan = build_plan(installer, args.prefix, runtime=args.runtime,
                           proton_path=args.proton_path, portable=args.portable, scan=scan_plan,
                           memory_limit=not args.no_memory_limit,
-                          unattended=_unattended_plan(args, args.prefix, det),
+                          unattended=_unattended_plan(args, args.prefix, det, picked),
                           wine_addons=args.wine_addons)
         if args.portable and args.runtime != "wine":
             raise ValueError("portable install is only supported with the wine runtime")
@@ -733,7 +799,7 @@ def _real_install(args, det, choice, links=None) -> int:
         print("Wine prefixes are not sandboxes: the installer can reach files you can reach.")
     for line in _link_lines(links, staging):
         print(line)
-    for line in _unattended_lines(plan):
+    for line in _unattended_lines(plan) + (picked.lines() if picked else []):
         print(line)
     for line in memory_lines:
         print(line)
@@ -758,7 +824,8 @@ def _real_install(args, det, choice, links=None) -> int:
     print("Ctrl-C stops this run gracefully (see docs/user-guide.md for what it leaves behind).")
     if args.cleanup != "none":
         print("After the installer exits with status 0, " + clean.describe())
-    tl = _new_timeline(args, det, choice, plan.prefix, not missing, args.create_prefix)
+    tl = _new_timeline(args, det, choice, plan.prefix, not missing, args.create_prefix,
+                       picked=picked)
     if not args.yes:
         refused = _confirm("Type 'yes' to run the installer: ", "Nothing was run.")
         if refused is not None:
@@ -773,7 +840,8 @@ def _real_install(args, det, choice, links=None) -> int:
             detailed_log=args.detailed_log, wine_debug=args.wine_debug, control=control,
             stall_after_s=args.stall_after,
             on_note=(lambda note: print(f"[note] {note}", flush=True)),
-            allow_scan_hit=args.allow_scan_hit)
+            allow_scan_hit=args.allow_scan_hit,
+            choices_line=picked.record() if picked is not None and picked.applied else None)
         result = run_staged(staging, lambda: run_tracked(
             plan, wine, args.create_prefix, args.show_changes or args.find_exe, options=options),
             on_line=lambda line: print(line, flush=True))
@@ -865,7 +933,7 @@ def _native_unused(args) -> list[str]:
     return out
 
 
-def _native_install(args, installer, det, choice, links=None) -> int:
+def _native_install(args, installer, det, choice, links=None, picked=None) -> int:
     """The native route: Setup is not run; gitfurl unpacks the archives itself after one
     approval of the whole plan (scan, prefix creation, unpack, listings, cleanup)."""
     from gitfurl.route import NativeInstallPlan, native_stops
@@ -930,12 +998,13 @@ def _native_install(args, installer, det, choice, links=None) -> int:
     if args.apply_setup_entries:
         from gitfurl.setup_entries import plan_setup_entries
 
-        entries = plan_setup_entries(installer, xplan)
+        entries = plan_setup_entries(installer, xplan,
+                                     choice=picked.entry_choice() if picked else None)
     plan = NativeInstallPlan(installer, prefix_name, xplan.prefix, choice, create, wine,
                              scan_lines,
                              clean.describe() if args.cleanup != "none" else None,
                              _native_unused(args), memory_check=not args.no_memory_limit,
-                             setup_entries=entries)
+                             setup_entries=entries, choices=picked)
     if dry:
         print("DRY RUN: nothing was executed, created or changed.")
     for line in plan.describe():
@@ -985,7 +1054,7 @@ def _native_install(args, installer, det, choice, links=None) -> int:
         return 2
     print("Ctrl-C stops the unpack; files already written are kept and nothing is deleted.")
     tl = _new_timeline(args, det, choice, xplan.prefix, not missing, args.create_prefix,
-                       xplan.target)
+                       xplan.target, picked)
     if not args.yes:
         refused = _confirm("Type 'yes' to unpack the files" + (
             " and add the setup entries listed above" if entries is not None else "") + ": ",
@@ -1105,13 +1174,15 @@ NATIVE_HEADLINES = {0: "Unpacked (Setup was not run).",
                     1: "The unpack ended with an error, or did not start."}
 
 
-def _new_timeline(args, det, choice, prefix: Path, exists: bool, create: bool, target=None):
-    from gitfurl.timeline import Timeline, plan_entries
+def _new_timeline(args, det, choice, prefix: Path, exists: bool, create: bool, target=None,
+                  picked=None):
+    from gitfurl.timeline import Timeline, choices_entry, plan_entries
 
     tl = Timeline(on_line=(lambda line: print(f"[timeline] {line}", flush=True))
                   if getattr(args, "timeline", False) else None)
     plan_entries(tl, det, choice, prefix, exists, create, target,
                  bool(getattr(args, "apply_setup_entries", False)))
+    choices_entry(tl, picked)
     return tl
 
 

@@ -34,9 +34,15 @@ lists the slice files, present or missing, by name only. Formats and layouts tha
 checked against a real installer are noted as unverified (slice and setup-0.bin reading was
 checked for data formats 6.3.0, 6.7.0 and 7.1.1 only).
 
+Setup's questions (choices): the languages, setup types, components, tasks, [Run] postinstall
+entries and install folder its wizard would ask about, with the script's defaults; the answers
+(Choices.answer) are an inno.Choice, which the condition evaluator (Choice.decide) uses.
+gitfurl.setup_choices asks them and applies them per route.
+
 Extraction (plan_inno_extract, extract_inno_files) writes only the files stored in setup.exe
-or its slice files whose destination is under {app}, for the default choice of setup type,
-components, tasks and the first language; everything else (temporary helpers, files outside
+or its slice files whose destination is under {app}, for the user's answers to Setup's
+questions or else the default choice of setup type, components, tasks and the first
+language; everything else (temporary helpers, files outside
 {app}, external and downloaded files, the uninstaller, entries that depend on a [Code] check
 function) is listed as skipped. Refused before anything is written: a missing, short or wrong
 slice file (opened with O_NOFOLLOW; signature and size checked), a chunk that does not fit its
@@ -66,7 +72,7 @@ import stat
 import struct
 import threading
 import zlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 # --- formats ---------------------------------------------------------------------------------
@@ -160,6 +166,7 @@ class Conditions:
 class Language:
     name: str
     language_id: int
+    display: str = ""  # its LanguageName, as the wizard's list shows it
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +202,7 @@ class Task:
     cond: Conditions
     level: int
     options: int  # bit 0 exclusive, 1 unchecked, 2 restart, 3 checked once, 4 no inherit
+    group: str = ""  # its GroupDescription, the heading the wizard shows above it
 
     @property
     def unchecked(self) -> bool:
@@ -959,7 +967,7 @@ class _Parser:
             s = rec(6 if f <= F652 else 4, 4)
             lid = b.u32() if f <= F652 else b.u16()
             b.skip(17)
-            return Language(s[0], lid)
+            return Language(s[0], lid, s[1])
 
         def custom_message():
             s = rec(2)
@@ -1003,7 +1011,7 @@ class _Parser:
             opts = b.u8()
             if opts >> 5:
                 self.odd("a task has options gitfurl does not know")
-            return Task(s[0], s[1], Conditions(s[3], "", s[4], s[5]), level, opts)
+            return Task(s[0], s[1], Conditions(s[3], "", s[4], s[5]), level, opts, s[2])
 
         def dir_entry():
             s = rec(7)
@@ -1871,6 +1879,7 @@ class Choice:
     components: set[str]
     tasks: set[str]
     notes: list[str] = field(default_factory=list)
+    answered: bool = False  # the user's answers (Choices.answer), not the script's defaults
 
     def decide(self, cond: Conditions) -> tuple[bool | None, str]:
         """(selected, reason). None: it depends on something gitfurl cannot evaluate."""
@@ -1885,7 +1894,8 @@ class Choice:
             if got is None:
                 return None, f"its {what} condition is not understood"
             if not got:
-                return False, f"not part of the default {what}"
+                return False, (f"not part of the chosen {what}" if self.answered
+                               else f"not part of the default {what}")
         return True, ""
 
 
@@ -1914,6 +1924,437 @@ def default_choice(s: Setup) -> Choice:
     if s.types:
         notes.append(f"setup type: the first one ({s.types[0].name})")
     return Choice(lang, stype, comps, tasks, notes)
+
+
+# --- Setup's questions: what its wizard would ask, read from the script ---------------------
+
+UNSEEN_CODE = ("the setup may ask other questions in its own code; gitfurl cannot see or "
+               "answer those")
+# Names passed on in Inno's own switches (/COMPONENTS=a,b): a name with other characters
+# could change what the switch means, so it is not passed.
+_SWITCH_NAME = re.compile(r"^[A-Za-z0-9_\\]{1,128}$")
+COMP_FIXED, COMP_EXCLUSIVE, COMP_NO_INHERIT = 1, 8, 16
+TASK_EXCLUSIVE, TASK_UNCHECKED, TASK_CHECKED_ONCE, TASK_NO_INHERIT = 1, 2, 8, 16
+_CHOICE_SECTIONS = ("[Files]", "[Icons]", "[Registry]", "[Dirs]", "[INI]")
+
+
+@dataclass(frozen=True)
+class Item:
+    """One component or task as Setup's wizard lists it."""
+
+    kind: str  # "component" or "task"
+    name: str
+    description: str
+    default: bool  # for the default setup type and language
+    fixed: bool = False  # a component the user cannot change (it follows the setup type)
+    exclusive: bool = False  # one of a group of radio buttons (siblings with the flag)
+    flags: tuple[str, ...] = ()  # the script's flags, in its own words
+    size: int = 0  # bytes of Setup's own files that name only this component (0: none known)
+    group: str = ""  # a task's group heading
+    cond: Conditions = Conditions()
+    types: frozenset = frozenset()  # a component's setup types (casefolded)
+
+    @property
+    def key(self) -> str:
+        return self.name.casefold()
+
+    @property
+    def parent(self) -> str:
+        return self.key.rsplit("\\", 1)[0] if "\\" in self.name else ""
+
+    @property
+    def level(self) -> int:
+        return self.name.count("\\")
+
+
+@dataclass(frozen=True)
+class PostInstall:
+    """A [Run] entry with the postinstall flag: a checkbox on Setup's last page."""
+
+    description: str
+    filename: str
+    checked: bool  # the script's default (no unchecked flag)
+    silent: bool | None  # runs in a silent install (RunEntry.silent_runs)
+
+
+@dataclass
+class Choices:
+    """The questions Setup's wizard asks, in its order, with the script's defaults. Read from
+    the setup data only; nothing is run."""
+
+    languages: list[Language]
+    types: list[SetupType]
+    components: list[Item]
+    tasks: list[Item]
+    postinstall: list[PostInstall]
+    default_dir: str
+    unseen: list[str]
+
+    @property
+    def asks(self) -> bool:
+        """There is something to answer: more than one language, a setup type, a component
+        or a task."""
+        return len(self.languages) > 1 or bool(self.types or self.components or self.tasks)
+
+    # -- lookups --
+
+    def language_name(self, key: str) -> str:
+        for lang in self.languages:
+            if lang.name.casefold() == key:
+                return lang.display or lang.name
+        return key
+
+    def type_of(self, key: str) -> SetupType | None:
+        return next((t for t in self.types if t.name.casefold() == key), None)
+
+    def custom_type(self) -> SetupType | None:
+        return next((t for t in self.types if t.custom), None)
+
+    def components_free(self, stype: str) -> bool:
+        """The user picks the components: the setup has no types, or `stype` is custom."""
+        if not self.types:
+            return True
+        t = self.type_of(stype)
+        return t is not None and t.custom
+
+    @staticmethod
+    def _lang_ok(cond: Conditions, lang: str) -> bool:
+        return not cond.languages or bool(evaluate(cond.languages, {lang}))
+
+    def shown_components(self, lang: str) -> list[Item]:
+        return [c for c in self.components if not c.cond.check and self._lang_ok(c.cond, lang)]
+
+    def shown_tasks(self, comps: set[str], lang: str) -> list[Item]:
+        return [t for t in self.tasks if not t.cond.check and self._lang_ok(t.cond, lang)
+                and (not t.cond.components or bool(evaluate(t.cond.components, comps)))]
+
+    # -- defaults and answers --
+
+    def for_type(self, stype: str, lang: str) -> set[str]:
+        """The components a setup type selects (casefolded names)."""
+        shown = self.shown_components(lang)
+        on = {c.key for c in shown
+              if (stype and stype in c.types) or (not self.types and not c.types)}
+        return _consistent(shown, on)
+
+    def defaults(self) -> Choice:
+        """The script's defaults: the first language, the first setup type, the components
+        that type selects and the tasks that are not unchecked."""
+        lang = self.languages[0].name.casefold() if self.languages else ""
+        stype = self.types[0].name.casefold() if self.types else ""
+        comps = self.for_type(stype, lang)
+        shown = self.shown_tasks(comps, lang)
+        tasks = _consistent(shown, {t.key for t in shown if t.default})
+        return Choice(lang, stype, comps, tasks)
+
+    def resolve(self, lang: str, stype: str, comps: dict[str, bool] | None = None,
+                tasks: dict[str, bool] | None = None) -> Choice:
+        """A Choice from answers (casefolded names to on/off, applied in order on top of the
+        defaults for that language and type). Lenient: names that are not offered are left
+        out; answer() checks them first."""
+        shown = self.shown_components(lang)
+        on = self.for_type(stype, lang)
+        if comps and self.components_free(stype):
+            on = _apply(shown, on, comps)
+        tshown = self.shown_tasks(on, lang)
+        ton = _consistent(tshown, {t.key for t in tshown if t.default})
+        if tasks:
+            ton = _apply(tshown, ton, tasks)
+        return Choice(lang, stype, on, ton, answered=True)
+
+    def answer(self, language: str | None = None, setup_type: str | None = None,
+               components: list[str] | None = None, tasks: list[str] | None = None) -> Choice:
+        """The user's answers by name (as --language, --type, --components a,!b and --tasks
+        x,!y give them: a name selects, !name deselects, a name not given keeps the default).
+        Raises ValueError, naming the choices there are, for a name the setup does not have
+        or does not offer with these answers."""
+        base = self.defaults()
+        lang, stype = base.language, base.setup_type
+        if language is not None:
+            if len(self.languages) < 2:
+                raise ValueError("this setup has only one language" if self.languages else
+                                 "this setup names no language")
+            lang = _pick("language", language, [x.name for x in self.languages])
+        if setup_type is not None:
+            if not self.types:
+                raise ValueError("this setup has no setup types")
+            stype = _pick("setup type", setup_type, [t.name for t in self.types])
+        comps = None
+        if components is not None:
+            if not self.components:
+                raise ValueError("this setup has no components")
+            if not self.components_free(stype):
+                custom = self.custom_type()
+                names = ", ".join(_clean(t.name, 40) for t in self.types)
+                if custom is None:
+                    raise ValueError("this setup has no custom setup type, so its components "
+                                     f"follow the setup type; choose a type instead ({names})")
+                if setup_type is not None:
+                    raise ValueError(f"the setup type {setup_type!r} picks its own components; "
+                                     "choosing components needs the custom type "
+                                     f"({_clean(custom.name, 40)})")
+                stype = custom.name.casefold()
+            comps = _named("component", components, self.components,
+                           self.shown_components(lang))
+        on = self.resolve(lang, stype, comps).components
+        tsk = None
+        if tasks is not None:
+            if not self.tasks:
+                raise ValueError("this setup has no tasks")
+            tsk = _named("task", tasks, self.tasks, self.shown_tasks(on, lang))
+        return self.resolve(lang, stype, comps, tsk)
+
+    # -- what is shown and passed on --
+
+    def summary(self, c: Choice) -> str:
+        """One line for the plan, the approval, the log and the timeline."""
+        parts = []
+        if self.types:
+            t = self.type_of(c.setup_type)
+            parts.append(f"type {_clean(t.name if t else c.setup_type, 40)}")
+        if self.components:
+            on = [_clean(i.name, 40) for i in self.components if i.key in c.components]
+            parts.append("components " + (", ".join(on) or "none"))
+        if self.tasks:
+            on = [_clean(i.name, 40) for i in self.tasks if i.key in c.tasks]
+            off = [_clean(i.name, 40) for i in self.shown_tasks(c.components, c.language)
+                   if i.key not in c.tasks]
+            parts.append("tasks " + (", ".join(on) or "none")
+                         + (f" (not {', '.join(off)})" if off else ""))
+        if len(self.languages) > 1:
+            parts.append(f"language {_clean(self.language_name(c.language), 40)}")
+        return "choices: " + ("; ".join(parts) if parts else
+                              "none (the setup asks nothing gitfurl can see)")
+
+    def lines(self, c: Choice | None = None, mark: str = "default") -> list[str]:
+        """The questions, with the script's defaults (or the answers in `c`) marked."""
+        c = c or self.defaults()
+        out = []
+        if len(self.languages) > 1:
+            out.append("  language: " + "; ".join(
+                f"{_clean(x.display or x.name, 40)} ({_clean(x.name, 40)})"
+                + (f" [{mark}]" if x.name.casefold() == c.language else "")
+                for x in self.languages))
+        if self.types:
+            out.append("  setup type: " + "; ".join(
+                f"{_clean(t.description or t.name, 60)} ({_clean(t.name, 40)}"
+                + (", you pick the components" if t.custom else "") + ")"
+                + (f" [{mark}]" if t.name.casefold() == c.setup_type else "")
+                for t in self.types))
+        if self.components:
+            free = self.components_free(c.setup_type)
+            out.append("  components" + ("" if free else
+                                         " (set by the setup type; a custom type lets you "
+                                         "pick them)") + ":")
+            for i in self.components:
+                out.append(_item_line(i, i.key in c.components))
+        if self.tasks:
+            out.append("  tasks:")
+            shown = {t.key for t in self.shown_tasks(c.components, c.language)}
+            group = ""
+            for i in self.tasks:
+                if i.group and i.group != group:
+                    out.append(f"    {_clean(i.group, 80)}")
+                    group = i.group
+                line = _item_line(i, i.key in c.tasks)
+                if i.key not in shown and not i.cond.check:
+                    line += " (not offered with these components)"
+                out.append(line)
+        if self.postinstall:
+            out.append("  after the install, Setup offers to run (postinstall):")
+            for p in self.postinstall:
+                out.append(f"    [{'x' if p.checked else ' '}] {_clean(p.description, 80)} "
+                           f"({_clean(p.filename, 80)})")
+        if self.default_dir:
+            out.append(f"  install folder: {_clean(self.default_dir, 120)} (DefaultDirName)")
+        out.extend(f"  not seen: {u}" for u in self.unseen)
+        return out
+
+    def switches(self, c: Choice) -> tuple[list[str], list[str]]:
+        """(Inno's own command-line switches for these answers, notes). /LANG=, /TYPE=,
+        /COMPONENTS= (only with a custom type: Inno ignores it otherwise) and /TASKS= (with
+        !name for a task left unchecked)."""
+        out: list[str] = []
+        notes: list[str] = []
+
+        def put(switch: str, names: list[str]) -> None:
+            if any(not _SWITCH_NAME.match(n.lstrip("!")) for n in names):
+                notes.append(f"{switch} is not passed: a name holds characters gitfurl does "
+                             "not pass on, so Setup keeps its own default there")
+            else:
+                out.append(f"{switch}={','.join(names)}")
+
+        lang = next((x.name for x in self.languages if x.name.casefold() == c.language), None)
+        if len(self.languages) > 1 and lang is not None:
+            put("/LANG", [lang])
+        t = self.type_of(c.setup_type)
+        if t is not None:
+            put("/TYPE", [t.name])
+        if self.components:
+            if self.components_free(c.setup_type):
+                put("/COMPONENTS", [i.name for i in self.components if i.key in c.components])
+            else:
+                notes.append("the components are not passed: the setup type picks them")
+        shown = self.shown_tasks(c.components, c.language)
+        if shown:
+            put("/TASKS", [("" if i.key in c.tasks else "!") + i.name for i in shown])
+        return out, notes
+
+
+def _item_line(i: Item, on: bool) -> str:
+    box = f"({'o' if on else ' '})" if i.exclusive else f"[{'x' if on else ' '}]"
+    extra = list(i.flags)
+    if i.size:
+        extra.append(f"Setup's own files for it: {_size(i.size)}")
+    if i.cond.check:
+        extra.append("depends on a [Code] check gitfurl cannot evaluate; not asked")
+    tail = f" - {', '.join(extra)}" if extra else ""
+    return (f"    {'  ' * i.level}{box} {_clean(i.description or i.name, 80)} "
+            f"({_clean(i.name, 40)}){tail}")
+
+
+def _pick(what: str, value: str, names: list[str]) -> str:
+    key = value.strip().casefold()
+    if key not in {n.casefold() for n in names}:
+        raise ValueError(f"unknown {what} {value!r}; this setup's {what}s: "
+                         + ", ".join(_clean(n, 40) for n in names))
+    return key
+
+
+def _named(what: str, given: list[str], items: list[Item], offered: list[Item]
+           ) -> dict[str, bool]:
+    """{casefolded name: on} from a list of names and !names, checked against the setup."""
+    known = {i.key: i for i in items}
+    shown = {i.key for i in offered}
+    out: dict[str, bool] = {}
+    for raw in given:
+        neg = raw.startswith("!")
+        name = raw[1:].strip() if neg else raw.strip()
+        key = name.casefold()
+        if key not in known:
+            raise ValueError(f"unknown {what} {name!r}; this setup's {what}s: "
+                             + ", ".join(_clean(i.name, 40) for i in items))
+        item = known[key]
+        if key not in shown:
+            why = ("it depends on a [Code] check" if item.cond.check else
+                   "it is not offered with this language or these components")
+            raise ValueError(f"the {what} {name!r} cannot be chosen: {why}")
+        if item.fixed:
+            raise ValueError(f"the component {name!r} is fixed: the setup type decides it")
+        if not neg and item.exclusive:
+            clash = [k for k, v in out.items() if v and known[k].exclusive
+                     and known[k].parent == item.parent and k != key]
+            if clash:
+                raise ValueError(f"only one of these {what}s can be chosen: "
+                                 f"{known[clash[0]].name}, {item.name}")
+        out[key] = not neg
+    return out
+
+
+def _apply(items: list[Item], on: set[str], answers: dict[str, bool]) -> set[str]:
+    """`on` with the answers applied: an exclusive item turns its siblings off, turning an
+    item off turns its children off, turning one on turns its parents on (as the wizard's
+    list does). Fixed items keep their state."""
+    by = {i.key: i for i in items}
+    on = set(on)
+    for key, value in answers.items():
+        item = by.get(key)
+        if item is None or item.fixed:
+            continue
+        if value:
+            on.add(key)
+            if item.exclusive:
+                on -= {i.key for i in items if i.exclusive and i.parent == item.parent
+                       and i.key != key}
+            p = item.parent
+            while p:
+                if p in by:
+                    on.add(p)
+                p = p.rsplit("\\", 1)[0] if "\\" in p else ""
+        else:
+            on.discard(key)
+            on -= {i.key for i in items if i.key.startswith(key + "\\")}
+    return _consistent(items, on)
+
+
+def _consistent(items: list[Item], on: set[str]) -> set[str]:
+    """One item per exclusive group (the first), and no child whose parent is off."""
+    by = {i.key: i for i in items}
+    out: set[str] = set()
+    taken: set[str] = set()  # parents whose exclusive group has its item
+    for i in items:  # parents come before their children in the script's order
+        if i.key not in on:
+            continue
+        if i.parent and i.parent in by and i.parent not in out:
+            continue
+        if i.exclusive:
+            if i.parent in taken:
+                continue
+            taken.add(i.parent)
+        out.add(i.key)
+    return out
+
+
+def _flag_words(o: int, table) -> tuple[str, ...]:
+    return tuple(n for bit, n in table if o & bit)
+
+
+_COMPONENT_FLAGS = ((COMP_FIXED, "fixed"), (COMP_EXCLUSIVE, "exclusive"),
+                    (COMP_NO_INHERIT, "dontinheritcheck"))
+_TASK_FLAGS = ((TASK_EXCLUSIVE, "exclusive"), (TASK_UNCHECKED, "unchecked"),
+               (TASK_CHECKED_ONCE, "checkedonce"), (TASK_NO_INHERIT, "dontinheritcheck"))
+
+
+def choices(s: Setup) -> Choices:
+    """Setup's questions, in the wizard's order (language, setup type, components, tasks, the
+    postinstall checkboxes), each with the default the script defines. Reads the parsed setup
+    only. What gitfurl cannot see is listed in `unseen`."""
+    sizes: dict[str, int] = {}
+    for fe in s.files:
+        if fe.kind == FILE_STORED and 0 <= fe.location < len(s.locations) \
+                and re.fullmatch(r"[\w\\]+", fe.cond.components):
+            k = fe.cond.components.casefold()
+            sizes[k] = sizes.get(k, 0) + s.locations[fe.location].size
+    unseen: list[str] = []
+    types = [t for t in s.types if not t.cond.check]
+    if len(types) < len(s.types):
+        unseen.append("a setup type that depends on a [Code] check is left out")
+    comps = [Item("component", c.name, c.description, False,
+                  fixed=bool(c.options & COMP_FIXED), exclusive=bool(c.options & COMP_EXCLUSIVE),
+                  flags=_flag_words(c.options, _COMPONENT_FLAGS),
+                  size=sizes.get(c.name.casefold(), 0), cond=c.cond,
+                  types=frozenset(t.casefold() for t in re.split(r"[,\s]+", c.types) if t))
+             for c in s.components]
+    tasks = [Item("task", t.name, t.description, not t.options & TASK_UNCHECKED,
+                  exclusive=bool(t.options & TASK_EXCLUSIVE),
+                  flags=_flag_words(t.options, _TASK_FLAGS), group=t.group, cond=t.cond)
+             for t in s.tasks]
+    if any(i.cond.check for i in comps + tasks):
+        unseen.append("components or tasks that depend on a [Code] check are not asked "
+                      "(gitfurl cannot run the check; they count as not chosen)")
+    if any("checkedonce" in t.flags for t in tasks):
+        unseen.append("checkedonce tasks are checked, as for a first install")
+    post = [PostInstall(r.description or r.filename, r.filename, "unchecked" not in r.flags,
+                        r.silent_runs())
+            for r in s.run if "post-install" in r.flags]
+    unseen.append(UNSEEN_CODE)
+    ch = Choices(list(s.languages), types, comps, tasks, post, s.default_dir, unseen)
+    on = ch.defaults().components
+    ch.components = [replace(i, default=i.key in on) for i in comps]
+    return ch
+
+
+def choice_effects(s: Setup, c: Choice) -> list[tuple[str, int, int]]:
+    """(section, entries that name components, tasks or languages, how many of them the
+    answers keep) for each section that has such entries. Uses the plans' evaluator."""
+    out = []
+    for section, entries in zip(_CHOICE_SECTIONS, (
+            [f for f in s.files if f.kind == FILE_STORED], s.icons, s.registry, s.dirs, s.ini)):
+        named = [e for e in entries if e.cond.components or e.cond.tasks
+                 or (e.cond.languages and len(s.languages) > 1)]
+        if named:
+            out.append((section, len(named), sum(1 for e in named if c.decide(e.cond)[0])))
+    return out
 
 
 # --- what the plan shows ---------------------------------------------------------------------
@@ -2494,8 +2935,11 @@ def _lzma_dict(declared: int, full: int) -> int:
 
 
 def plan_inno_extract(installer: Path, prefix_name: str, env: dict[str, str] | None = None,
-                      setup: Setup | None = None) -> InnoExtractPlan:
-    """Read the setup and decide what is written where. Writes nothing. Raises ExtractRefused."""
+                      setup: Setup | None = None, choice: Choice | None = None
+                      ) -> InnoExtractPlan:
+    """Read the setup and decide what is written where. Writes nothing. Raises ExtractRefused.
+    `choice`: the user's answers to Setup's questions (Choices.answer); default: the script's
+    defaults as default_choice() reads them."""
     from gitfurl.extract import (
         FILE,
         MAX_FOLDERS,
@@ -2521,7 +2965,7 @@ def plan_inno_extract(installer: Path, prefix_name: str, env: dict[str, str] | N
     if s.slice_layout and not 1 <= s.slices_per_disk <= MAX_SLICES_PER_DISK:
         raise ExtractRefused("the installer keeps its files in slice files whose "
                              + NAMES_NOT_KNOWN)
-    choice = default_choice(s)
+    choice = choice if choice is not None else default_choice(s)
     skipped: list[tuple[str, str]] = []
     notes: list[str] = []
     picked: dict[tuple[int, str], tuple[int, int, str]] = {}  # (folder, key) -> (file idx, ...)

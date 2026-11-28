@@ -372,6 +372,7 @@ class RunOptions:
     allow_scan_hit: bool = False  # run even if the ClamAV scan matched a signature
     scan_result: object = None  # a ScanResult already obtained (the app's second confirmation)
     scan_summary: str | None = None  # set by run_with_prefix; written to the log
+    choices_line: str | None = None  # the answers to Setup's questions; written to the log
     cgroup_root: str = "/sys/fs/cgroup"  # injected in tests (memory limit)
     memory_interval: float = 5.0  # seconds between memory limit adjustments
     # A gitfurl.timeline.Timeline: plain rows of what the run did and why, saved next to the
@@ -648,6 +649,8 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
             log.write(f"command: {shlex.join(argv)}\ncwd: {plan.cwd}\nprefix: {plan.prefix}\n")
             if options.scan_summary:
                 log.write("".join(f"scan: {ln}\n" for ln in options.scan_summary.splitlines()))
+            if options.choices_line:
+                log.write(f"{options.choices_line}\n")
             log.write("---\n")
             log.flush()
             output_start = log.tell()  # the run's own output starts here
