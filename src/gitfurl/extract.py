@@ -24,7 +24,10 @@ run created, opened relative to the destination's own file descriptor, so nothin
 is written and nothing is overwritten. Output per data block stops at the sum of its files'
 declared sizes; every decoder's buffers are capped before the block is read, and damaged data
 is reported in the result. Each file's CRC-32 is checked; a file that does not match is removed
-again and named in the result (as extract-inno does with its checksums).
+again and named in the result (as extract-inno does with its checksums), unless the run was
+explicitly asked to keep such files (--keep-bad-file-crc, per run): then it is kept and listed
+with its stored and computed CRC-32. Sizes, the decoders' own checks and "nothing is
+overwritten" apply either way.
 File times are set through the open file. Nothing from an archive is run or passed to a
 program. Stop (a cancel flag, or Ctrl-C) ends the extraction between chunks; files already
 written stay, and nothing else is deleted (only files removed for a CRC-32 mismatch). At most _Tree.CACHE folders are held open at a time.
@@ -55,6 +58,16 @@ FILE = -1  # in plan_extract's name table: the name is a file
 _WIN_BAD = re.compile(r'[<>:"|?*]')
 _WIN_DEVICES = frozenset(["CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
                           *(f"LPT{i}" for i in range(1, 10))])
+
+KEEP_BAD_CRC_WARNING = (
+    "WARNING: files whose CRC-32 does not match the archive are KEPT (--keep-bad-file-crc). "
+    "gitfurl cannot tell a damaged file from an archive with wrong checksums; use this only "
+    "for an installer you trust.")
+KEEP_BAD_CRC_SUGGESTION = (
+    "If you trust this installer, run it again with --keep-bad-file-crc to keep files whose "
+    "CRC-32 does not match (gitfurl cannot tell a damaged file from an archive with wrong "
+    "checksums; the destination must not exist yet, so delete it or use another prefix).")
+SHOWN_KEPT = 5  # files kept with a CRC-32 mismatch named in the end text (the log has all)
 
 EXTRACTS_ONLY = ("This extracts files only. The installer is not run: no registry entries, no "
                  "redistributables, no shortcuts and none of its own steps. The result may "
@@ -104,11 +117,19 @@ class ExtractPlan:
     folders: list[tuple[int, str]] = field(default_factory=lambda: [(-1, "")])
 
     accept_bad_index_crc: bool = False
+    keep_bad_file_crc: bool = False  # keep a file whose CRC-32 does not match (opt-in, per run)
+
+    def archive_warnings(self, ap: ArchivePlan) -> list[str]:
+        """The archive's index warnings, worded for this run's file CRC choice."""
+        if not self.keep_bad_file_crc:
+            return list(ap.archive.warnings)
+        return [w.replace(farc.FILE_CRC_NOT_KEPT, "a file that fails is KEPT "
+                          "(--keep-bad-file-crc) and listed.") for w in ap.archive.warnings]
 
     @property
     def warnings(self) -> list[str]:
         return [f"{clean(ap.path.name, 80)}: {warning}"
-                for ap in self.archives for warning in ap.archive.warnings]
+                for ap in self.archives for warning in self.archive_warnings(ap)]
 
     def parts(self, folder: int) -> list[str]:
         """The folder's path below the destination, as parts."""
@@ -181,6 +202,10 @@ class ExtractPlan:
             ("NATIVE EXTRACTION (FreeArc: storing, lzma, exe, x86, delta, rep, 4x4, srep, "
              "cm and rolz): "
             "gitfurl reads the archives itself."),
+        ]
+        if self.keep_bad_file_crc:
+            lines.append(f"  {KEEP_BAD_CRC_WARNING}")
+        lines += [
             f"  {EXTRACTS_ONLY}",
             (f"  destination: {self.target} (in the prefix: {self.dest}); it must not exist "
             "yet, and no existing file is overwritten"),
@@ -195,8 +220,14 @@ class ExtractPlan:
                          "(the decoders of its methods added together)")
         lines.append("  each archive's own folder layout is used; the installer's script may "
                      "have placed files differently")
-        lines.append("  each file's CRC-32 is checked; a file that does not match is removed "
-                     "again and listed")
+        if self.keep_bad_file_crc:
+            lines.append("  each file's CRC-32 is checked; a file that does not match is KEPT "
+                         "and listed with its stored and computed CRC-32 (--keep-bad-file-crc); "
+                         "each file's size must still match exactly, a decoder that finds "
+                         "damaged data still stops the unpack, and nothing is overwritten")
+        else:
+            lines.append("  each file's CRC-32 is checked; a file that does not match is "
+                         "removed again and listed")
         lines.extend(f"  warning: {warning}" for warning in self.warnings)
         lines.extend(f"  note: {n}" for n in self.notes)
         return lines
@@ -268,7 +299,8 @@ def unpacked_size(installer: Path) -> Unpacked | None:
 
 def plan_extract(installer: Path, prefix_name: str,
                  env: dict[str, str] | None = None, *,
-                 accept_bad_index_crc: bool = False) -> ExtractPlan:
+                 accept_bad_index_crc: bool = False,
+                 keep_bad_file_crc: bool = False) -> ExtractPlan:
     """Read every archive's index and check every name. Writes nothing. Raises ExtractRefused."""
     validate_prefix_name(prefix_name)
     installer = Path(installer)
@@ -366,7 +398,7 @@ def plan_extract(installer: Path, prefix_name: str,
                      "line), with gitfurl's native decoder module")
     dest = prefix / "drive_c" / "Games" / prefix_name
     return ExtractPlan(installer, prefix_name, prefix, dest, archives, total, count, memory,
-                       notes, folders, accept_bad_index_crc)
+                       notes, folders, accept_bad_index_crc, keep_bad_file_crc)
 
 
 def _windows_problem(part: str) -> bool:
@@ -399,6 +431,12 @@ class ExtractResult:
     folders: int = 0
     bytes_written: int = 0
     crc_errors: list[str] = field(default_factory=list)  # removed again
+    crc_kept: list[str] = field(default_factory=list)  # failed the CRC, kept (opt-in)
+    # every CRC-32 mismatch: (name, stored, computed, what happened to the file)
+    crc_details: list[tuple[str, int, int, str]] = field(default_factory=list)
+    # archives every one of whose files was checked and failed: (name, number of files)
+    all_failed: list[tuple[str, int]] = field(default_factory=list)
+    keep_bad_file_crc: bool = False
     not_removed: list[str] = field(default_factory=list)  # failed the CRC, removal failed
     incomplete: str | None = None  # a file that was being written when it ended early
     stopped: bool = False
@@ -425,6 +463,19 @@ class ExtractResult:
             out.append("could not be removed after failing the CRC-32 check (damaged, still "
                        "there): " + ", ".join(self.not_removed[:5])
                        + (", ..." if len(self.not_removed) > 5 else ""))
+        if self.crc_kept:
+            kept = [d for d in self.crc_details if d[3] == "kept"]
+            shown = ", ".join(f"{n} (stored {s:08X}, computed {c:08X})"
+                              for n, s, c, _ in kept[:SHOWN_KEPT])
+            more = len(kept) - SHOWN_KEPT
+            out.append(f"WARNING: {farc._n(len(self.crc_kept), 'file', 'files')} kept although "
+                       "the CRC-32 does not match the archive (--keep-bad-file-crc): " + shown
+                       + (f", and {more} more (every one is in the log)" if more > 0 else ""))
+        for name, count in self.all_failed:
+            out.append(f"note: every one of the {farc._n(count, 'file', 'files')} in {name} "
+                       "failed its CRC-32 check")
+        if self.crc_errors and not self.keep_bad_file_crc:
+            out.append(KEEP_BAD_CRC_SUGGESTION)
         if self.stopped or self.error:
             out.append("Files already written were kept, except those removed for a CRC-32 "
                        "mismatch (listed above)." if self.crc_errors else
@@ -611,8 +662,9 @@ def extract(plan: ExtractPlan, cancel: threading.Event | None = None,
 
 
 def _write_all(plan, opened, root, cancel, on_progress, on_event=None) -> ExtractResult:
-    res = ExtractResult(plan.dest)
+    res = ExtractResult(plan.dest, keep_bad_file_crc=plan.keep_bad_file_crc)
     tree = _Tree(root, plan.folders)
+    counts: list[list] = []  # per archive: [name, files, files checked, files that failed]
 
     def stop():
         if cancel is not None and cancel.is_set():
@@ -622,6 +674,8 @@ def _write_all(plan, opened, root, cancel, on_progress, on_event=None) -> Extrac
     done = 0  # bytes decoded into files, for progress (removed files included)
     try:
         for fd, ap in opened:
+            count = [clean(ap.path.name, 80), len(ap.files), 0, 0]
+            counts.append(count)
             for folder in ap.dirs:
                 tree.fd(folder)
             by_block: dict[int, list] = {}
@@ -661,12 +715,24 @@ def _write_all(plan, opened, root, cancel, on_progress, on_event=None) -> Extrac
                         os.close(out)
                     current.clear()
                     done += entry.size
+                    count[2] += 1
                     if crc != entry.crc:
-                        res.crc_errors.append(shown)
-                        try:  # by name in the folder this run created; never follows a link
-                            os.unlink(name, dir_fd=tree.fd(folder))
-                        except OSError:
-                            res.not_removed.append(shown)
+                        count[3] += 1
+                        if plan.keep_bad_file_crc:
+                            # Asked for, for this run: the file is kept (its size matched).
+                            res.crc_kept.append(shown)
+                            res.crc_details.append((shown, entry.crc, crc, "kept"))
+                            res.bytes_written += entry.size
+                            res.files += 1
+                        else:
+                            res.crc_errors.append(shown)
+                            try:  # by name in the folder this run created; no link followed
+                                os.unlink(name, dir_fd=tree.fd(folder))
+                                what = "removed again"
+                            except OSError:
+                                res.not_removed.append(shown)
+                                what = "could not be removed"
+                            res.crc_details.append((shown, entry.crc, crc, what))
                     else:
                         res.bytes_written += entry.size
                         res.files += 1
@@ -692,4 +758,6 @@ def _write_all(plan, opened, root, cancel, on_progress, on_event=None) -> Extrac
         os.close(root)
     if current:
         res.incomplete = current[0]
+    res.all_failed = [(name, files) for name, files, checked, failed in counts
+                      if files and checked == files == failed]
     return res

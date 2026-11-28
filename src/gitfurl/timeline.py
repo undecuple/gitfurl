@@ -347,10 +347,16 @@ def skip_entries(tl: Timeline, choice, target: str | None = None,
 
 
 def archive_warning_entries(tl: Timeline, plan) -> None:
-    """Index CRC exceptions explicitly chosen for this extraction plan."""
+    """CRC exceptions explicitly chosen for this extraction plan: index warnings, and files
+    whose CRC-32 does not match being kept (--keep-bad-file-crc)."""
     for ap in plan.archives:
-        for warning in ap.archive.warnings:
+        for warning in plan.archive_warnings(ap):
             tl.add("note", f"Archive warning: {shown(ap.path.name, 80)}", warning)
+    if plan.keep_bad_file_crc:
+        tl.add("note", "Warning: files whose CRC-32 does not match the archive are KEPT",
+               "you chose --keep-bad-file-crc for this run; gitfurl cannot tell a damaged "
+               "file from an archive with wrong checksums; sizes must still match and "
+               "nothing is overwritten")
 
 
 def plan_entries(tl: Timeline, det, choice, prefix: Path, exists: bool, create: bool,

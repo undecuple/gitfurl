@@ -487,6 +487,11 @@ def _pread(fd: int, size: int, pos: int, n: int) -> bytes:
     return data
 
 
+# The end of the index CRC warning; extract.ExtractPlan rewords it when the run keeps files
+# whose own CRC-32 does not match (--keep-bad-file-crc).
+FILE_CRC_NOT_KEPT = "a file that fails is not kept."
+
+
 class _Reader:
     def __init__(self, fd: int, size: int, index_limit: int | None = None, *,
                  accept_bad_index_crc: bool = False):
@@ -549,7 +554,7 @@ class _Reader:
             f"The archive's {what} failed its CRC check "
             f"(stored {stored:08X}, computed {computed:08X}). "
             "You chose to read it anyway; each file is still checked against its own CRC, "
-            "and a file that fails is not kept.")
+            "and " + FILE_CRC_NOT_KEPT)
 
 
 def has_signature(path: Path) -> bool:

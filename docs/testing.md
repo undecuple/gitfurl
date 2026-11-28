@@ -405,6 +405,16 @@ Synthetic fixtures only, from `tests/farc_writer.py`; temporary prefixes are pla
 
 Not tested: a real archive with a bad index CRC (the approved test archive is to be tried next, in the sandbox), real installers, Wine, and the window's switch on a real display (only its route helper was called).
 
+## Keeping files whose CRC-32 does not match (2026-11-27, UTC)
+
+Synthetic fixtures only, from `tests/farc_writer.py` (a file's stored CRC-32 flipped in the index); temporary prefixes are plain folders; no Wine. `tests/test_farc_keep_bad_crc.py` covers: without the option, the file is removed, the end text names it and suggests `--keep-bad-file-crc`, and the log has its stored and computed CRC-32; with it, the file is kept, the plan starts with the warning, and the end text (the first five, then a count), the log (mode 0600) and the timeline (a warning row with the count) list it; an archive whose every file failed is named, with and without the option; a data block shorter than its files' sizes, a decoder error (a mocked decoder) and an existing destination still fail with the option; the bad-index-CRC warning is reworded when files are kept; the command line (parsing for `extract` and `install`, dry runs that write nothing, a declined approval, a real `extract`, and `install --cleanup installer`, whose cleanup is skipped when a file was kept); the window's route helper, its words for both flags, the end text and cleanup decision with a kept file, and the helper that resets both switches when another installer is chosen.
+
+Run on 2026-11-27 (UTC), at `nice -n 19`: `ruff==0.11.13` (no findings) and the full suite with `pytest==8.3.5`, window tests under `xvfb-run -a`, on the change rebased onto the cm stage, without the native module: Python 3.11 and 3.12, 1027 passed, 15 skipped each.
+
+One approved test installer, in `tools/sandbox.sh` with no network, the installer read-only, on 2026-11-27 from 23:30:07 to 23:40:23 UTC, with `cli extract --accept-bad-index-crc --keep-bad-file-crc --yes` and the native module built (the cm stage native, the rolz stage in Python): its index and footer CRCs fail, and no file's stored CRC-32 matches its decoded data. With the option, all 99 files (10,119,695,245 bytes) were written and kept, the end text and timeline list them as kept with both CRC-32s and name both archives as every-file-failed, and the run ended complete. An earlier run of the same installer without the option removed all 99 files and kept nothing. The decoded data was checked separately, layer by layer, against the original tool's output (see the cm and rolz sections); the kept files themselves were not compared with anything else.
+
+Not tested: any other real archive with wrong file CRCs, Wine (the kept files were not run), the switch and its reset in the real window (only the helper was called; the reset lives in `refresh_plan`, which was not driven under Xvfb with the switch on), and very many kept files in the log.
+
 ## The single-file build (release workflow)
 `release.yml` builds one Linux program with PyInstaller. Checked on 2026-11-16 by running the workflow by hand (it builds and uploads only):
 - The checksum file matches. `cli --version` prints the release version (1.0.0 for that build) and `cli doctor` runs. The 1.1.0, 1.2.0, 1.2.1, 1.3.0 and 1.4.0 builds have not been checked this way yet.
