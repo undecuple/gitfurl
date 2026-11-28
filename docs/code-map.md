@@ -15,6 +15,7 @@ flowchart TB
     gui["gui.py (default)"]
     cli["cli.py (gitfurl cli …)"]
     widgets["widgets.py · theme.py · pixelfont.py · viewprefs.py"]
+    report["report.py (scrubbed support report)"]
   end
   subgraph plan["Read-only: detect and plan (nothing runs, nothing is written)"]
     detect["detect.py"]
@@ -67,14 +68,15 @@ Arrows point from a module to the modules it imports. Modules with no gitfurl im
 flowchart LR
   main["__main__"] --> app
   app --> cli & gui
-  cli --> cleanup & desktop & detect & doctor & extract & inno & memlimit & namelinks & portable & prefix_delete & prefixes & preflight & route & runner & safety & scan & setup_choices & setup_entries & timeline & unattended
-  gui --> choices_panel & cleanup & detect & doctor & memlimit & namelinks & portable & prefix_delete & prefixes & preflight & route & runner & safety & scan & setup_choices & setup_entries & theme & timeline & unattended & viewprefs & widgets
+  cli --> cleanup & desktop & detect & doctor & extract & inno & memlimit & namelinks & portable & prefix_delete & prefixes & preflight & report & route & runner & safety & scan & setup_choices & setup_entries & timeline & unattended
+  gui --> choices_panel & cleanup & detect & doctor & memlimit & namelinks & portable & prefix_delete & prefixes & preflight & report & route & runner & safety & scan & setup_choices & setup_entries & theme & timeline & unattended & viewprefs & widgets
   choices_panel --> setup_choices
   setup_choices --> detect & inno
   route --> setup_choices
   timeline --> setup_choices
   prefix_delete --> desktop & prefixes & procgroup & runner & timeline
   route --> changes & detect & extract & farc & inno & memlimit & prefixes & runner & scan & setup_entries & timeline
+  report --> desktop & doctor & farc & farc_codecs & inno & namelinks & prefixes & route & runner
   setup_entries --> desktop & detect & inno & procgroup & route
   runner --> changes & memlimit & portable & prefixes & preflight & procgroup & progress & scan & timeline & unattended & windows
   namelinks --> detect & extract & inno
@@ -120,6 +122,7 @@ Notes:
 | `gitfurl cli prefix delete` | `cli._prefix_delete_command()` → `prefix_delete.plan_delete_prefix()`, `perform_delete_prefix()` | also the library's "Delete..." (`gui.delete_clicked`, on a thread) |
 | `gitfurl cli desktop-entry` | `cli._desktop_command()` → `desktop.plan_desktop()`, `check()`, `apply()` | optional menu entry and icon in the user's data folder |
 | `gitfurl cli log` | `cli._log_command()` → `timeline.latest()`, `kept()`, `read_text()` | read-only: a prefix's latest timeline, or the list |
+| `gitfurl cli report` | `cli._report_command()` → `report.probe_wine()`, `report.build_report()`, `write_report()` | a scrubbed support report of a run, printed or written to a new file; also the window's "Copy support report" and "Save…" (`gui.support_report_view()`, `open_support_report`) |
 | Native module build | `tools/build_codecs.sh` (maturin), or `nix build .#codecs` | puts `gitfurl/_codecs.abi3.so` into `src/` (ignored by git); see [development.md](development.md) |
 | Native checksum tool (manual) | `native/gitfurl-codecs/examples/cmcheck.rs` | prints CRC-32s and SHA-256s, writes no decoded data |
 | Install script (run by a user) | `install.sh` | downloads the release program and `SHA256SUMS` over HTTPS, checks it, installs it or runs it once; the only network-using file, never called by the app (see the [user guide](user-guide.md#install-script)) |
@@ -228,6 +231,7 @@ For `extract-inno` the source is the setup file itself: `inno.read_setup()` give
 | The window's view settings | `$XDG_CONFIG_HOME/gitfurl/view.json` (usually `~/.config`; 0600) | `viewprefs.py` |
 | Prefix deletion log `<prefix>-<stamp>.delete.log` and timeline (mode 0600) | `runner.logs_root()` | `prefix_delete.perform_delete_prefix()` (it also removes the prefix and the menu entries gitfurl wrote for it) |
 | Inno Setup's own log (unattended) | inside the prefix | Setup itself; read by `unattended.read_report()` |
+| A support report (only when asked, mode 0600, a new file, never through a link) | the file the user names (`report -o FILE`, the window's Save…) | `report.write_report()` |
 | Nothing else | - | the read-only layer writes nothing |
 
 ## Build and test map
@@ -279,13 +283,14 @@ flowchart LR
 | `tests/test_crash.py` | `progress.prefix_processes` (crash handler), `windows` (fake `xwininfo`/`xprop`: order, size and map-state filters, the newest and top window), the crash and stall notes in `runner` | `tests/test_gitfurl.py` (`RunEventHelpers`) |
 | `tests/test_gui_polish.py` | `theme`, `widgets`, window polish (window parts skipped without `xvfb-run` or tkinter) | - |
 | `tests/test_timeline.py` | `timeline` (format, folding, caps, cleaning, the file), rows from a mocked Wine run and a native unpack, `cli log` and `install --timeline` | `tests/test_gitfurl.py` (`RunEventHelpers`), `tests/test_native_run.py` (`NativeBase`), `tests/test_route.py` |
+| `tests/test_report.py` | `report` (the three passes, stable placeholders, rounded and exact sizes, the check that refuses a name left in, `-o` mode 0600 without overwrite or links), `cli report`, `gui.support_report_view`; the logs a mocked Wine run and a native unpack really write | `tests/test_gitfurl.py` (`RunEventHelpers`), `tests/test_native_run.py` (`NativeBase`), `tests/inno_writer.py`, `tests/farc_writer.py` |
 | `tests/test_view.py` | `viewprefs`, the result headline and done row, the Help texts (no window) | - |
 | `tests/test_gui_stop.py` | Stop in the real window | `tests/gui_stop_driver.py` (`xvfb-run -a`) |
 | `tests/test_namelinks.py` | `namelinks` (mapping, staging folder and its removal), the route with links, `cli install --link-names`, the window's plain functions | `tests/inno_writer.py`, `tests/farc_writer.py` |
 | `tests/test_setup_entries.py` | `setup_entries` (constants, Wine's registry format and edits, plan, apply, menu entries), `procgroup.prefix_server_running`, `route.run_native` with the entries and their timeline rows, `cli install --apply-setup-entries` (also with `--timeline`) | `tests/test_route.py` (`Base`), `tests/inno_writer.py` (`WReg`, `WIcon`) |
 | `tests/test_native_run.py` | `route.native_stops`, `route.perform_native` (stop checks, Stop during the scan and wineboot, cancel) | `tests/test_route.py` (`Base`, archive builders on `tests/farc_writer.py`) |
 | `tests/test_gui_native.py` | the window's native-route plain functions (route switches, stop texts, footer, root refusal, plan and approval, progress, end text, cleanup) | `tests/test_native_run.py` (`NativeBase`) |
-| `tests/test_gui_native_xvfb.py` | the native route in the real window: Run and the unpack, Stop, the "Run Setup instead" switch, the setup entries switch in the plan and the approval, declining the approval, the Destination row (Browse with a stand-in folder dialog, a refusal, a nested unpack, the reset); the Timeline card (the plan's rows before the run, the route reason, Stop and the done line) and the library's Last run | `tests/gui_native_driver.py` (`xvfb-run -a`) |
+| `tests/test_gui_native_xvfb.py` | the native route in the real window: Run and the unpack, Stop, the "Run Setup instead" switch, the setup entries switch in the plan and the approval, declining the approval, the Destination row (Browse with a stand-in folder dialog, a refusal, a nested unpack, the reset); the Timeline card (the plan's rows before the run, the route reason, Stop and the done line), its "Copy support report" dialog (Copy, Save…) and the library's Last run | `tests/gui_native_driver.py` (`xvfb-run -a`) |
 | `tests/test_wineboot.py` | `prefixes.wineboot_env`, `with_wineboot_env`, `wineboot_line`; `--wine-addons` on `install` and `prefix create`; the window's plan line | - |
 | `tests/test_wine_menus.py` | `prefixes.merge_dll_overrides`, `without_wine_menus`, `MENU_LINE`; the menu-builder override in `runner.build_plan` (Wine, Proton, portable), `prefixes.plan_create`, `runner.execute`, `prefix create` and `install --create-prefix` (Wine and Proton) and the dry run | - |
 | `tests/test_gui_stall.py` | which crash and stall notes the window keeps on screen; the 120 s stall advice | - |

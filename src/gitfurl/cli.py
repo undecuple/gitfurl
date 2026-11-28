@@ -210,6 +210,25 @@ def build_parser() -> argparse.ArgumentParser:
     tlog.add_argument("prefix", nargs="?", help="the prefix name")
     tlog.add_argument("--all", action="store_true",
                       help="list the timelines kept (for this prefix, or for every prefix)")
+    rep = sub.add_parser(
+        "report", help="a support report of a run, scrubbed of the software's names, file "
+                       "names, checksums, your user, host and paths; printed (or written with "
+                       "-o), never sent")
+    rep.add_argument("prefix", nargs="?", help="the prefix name (its latest run)")
+    rep.add_argument("--run", metavar="STAMP",
+                     help="the run with this stamp (YYYYMMDD-HHMMSS, as in the log's name)")
+    rep.add_argument("--all-runs", action="store_true", help="every run of the prefix kept")
+    rep.add_argument("--log", metavar="FILE",
+                     help="a log or timeline file given directly (with the files of its run)")
+    rep.add_argument("--exact-sizes", action="store_true",
+                     help="keep exact sizes and byte counts (default: rounded to two "
+                          "significant figures; exact sizes can identify the software)")
+    rep.add_argument("-o", "--output", metavar="FILE",
+                     help="write the report to a new file (mode 0600); an existing file or a "
+                          "link there is refused")
+    rep.add_argument("--show-removed", action="store_true",
+                     help="also list what was removed, by category and count (never the "
+                          "values)")
     return p
 
 
@@ -228,6 +247,8 @@ def main(argv: list[str] | None = None) -> int:
         return _desktop_command(args)
     if args.command == "log":
         return _log_command(args)
+    if args.command == "report":
+        return _report_command(args)
     try:
         if args.dest is not None:
             from gitfurl.extract import parse_destination
@@ -1235,4 +1256,41 @@ def _log_command(args) -> int:
         return 1
     print(f"timeline: {path}")
     print(text)
+    return 0
+
+
+def _report_command(args) -> int:
+    """A scrubbed support report, printed or written to a new file. Sends nothing."""
+    from gitfurl import report
+
+    if (args.prefix is None) == (args.log is None):
+        print("error: name a prefix, or give a file with --log (not both)", file=sys.stderr)
+        return 1
+    try:
+        wine, umu = report.probe_wine()
+        rep = report.build_report(args.log if args.log else args.prefix,
+                                  run=args.run, all_runs=args.all_runs,
+                                  exact_sizes=args.exact_sizes, wine_version=wine, umu=umu)
+    except (report.ReportRefused, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.output:
+        try:
+            report.write_report(Path(args.output), rep.text)
+        except FileExistsError:
+            print(f"error: {args.output} exists (or is a link); nothing was written. Name a "
+                  "new file", file=sys.stderr)
+            return 1
+        except OSError as exc:
+            print(f"error: {args.output} could not be written ({exc.strerror or exc})",
+                  file=sys.stderr)
+            return 1
+        print(f"support report written to {args.output} (mode 0600). Check it before you "
+              "share it; nothing was sent anywhere.")
+        if args.show_removed:
+            print("\n".join(rep.removed_lines()))
+        return 0
+    sys.stdout.write(rep.text)
+    if args.show_removed:
+        print("\n".join(rep.removed_lines()), file=sys.stderr)
     return 0

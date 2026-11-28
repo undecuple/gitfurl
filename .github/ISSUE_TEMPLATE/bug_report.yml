@@ -6,7 +6,12 @@ body:
     attributes:
       value: |
         Do not attach installers, game files, keys or archives. Logs and screenshots only.
-        Before attaching a log, remove your user name and home-folder paths.
+        Best: paste a support report. In the window, press "Copy support report" in the
+        Timeline card (or in a prefix's Last run); on the command line, run
+        `gitfurl cli report PREFIX`. It replaces the software's names, file names, checksums,
+        your user, host and paths, and rounds sizes; nothing is sent anywhere. Read it before
+        you paste it.
+        Before attaching a log itself, remove your user name and home-folder paths.
   - type: textarea
     id: what
     attributes:
@@ -32,4 +37,4 @@ body:
   - type: textarea
     id: log
     attributes:
-      label: Log (user name and paths removed)
+      label: Support report (gitfurl cli report PREFIX), or a log with user name and paths removed
