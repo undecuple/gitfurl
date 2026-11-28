@@ -951,6 +951,23 @@ class ReviewFixTests(unittest.TestCase):
             with mock.patch.dict("os.environ", {"HOME": home}):
                 self.assertEqual(len(plan_cleanup(own / "setup.exe", "folder").files), 1)
 
+    def test_doctor_reports_native_decoders(self):
+        from gitfurl import doctor, farc_codecs
+
+        with mock.patch.object(farc_codecs, "_codecs", None):
+            gone = doctor.native_decoders()
+        self.assertEqual(gone, "not installed (the cm stage is refused; rolz is decoded in Python)")
+        with mock.patch.object(farc_codecs, "_codecs", mock.Mock(spec=["rolz_block"])):
+            self.assertEqual(doctor.native_decoders(), "cm, rolz")
+        with mock.patch.object(farc_codecs, "_codecs", mock.Mock(spec=["cm_header"])):
+            self.assertEqual(doctor.native_decoders(), "cm")  # a module built before rolz
+        r = doctor.ToolReport("x", "/x", "v", None)
+        base = {"platform": "p", "wine": r, "bwrap": r, "umu": r, "innoextract": r, "tkinter": r}
+        self.assertIn("\nnative decoders: cm, rolz\n",
+                      doctor.format_report({**base, "native": "cm, rolz"}))
+        self.assertIn("\nnative decoders: not installed (",
+                      doctor.format_report({**base, "native": gone}))
+
     def test_doctor_reports_tkinter(self):
         from gitfurl import doctor
 

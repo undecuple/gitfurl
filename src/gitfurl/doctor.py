@@ -79,6 +79,17 @@ def memory_limit_report(env=None) -> str:
             f"manager at {checked.manager_cgroup})")
 
 
+def native_decoders() -> str:
+    """Which stages gitfurl's optional native module (gitfurl._codecs) decodes, as imported."""
+    from gitfurl import farc_codecs
+
+    stages = [name for name, there in (("cm", farc_codecs.cm_available()),
+                                       ("rolz", farc_codecs.rolz_native())) if there]
+    if not stages:
+        return "not installed (the cm stage is refused; rolz is decoded in Python)"
+    return ", ".join(stages)
+
+
 def run_doctor() -> dict:
     return {
         "resources": machine_resources(),
@@ -90,6 +101,7 @@ def run_doctor() -> dict:
         "clamscan": probe_tool("clamscan", ["--version"]),
         "tkinter": probe_tkinter(),
         "memory_limit": memory_limit_report(),
+        "native": native_decoders(),
     }
 
 
@@ -110,6 +122,8 @@ def format_report(report: dict) -> str:
     scan = report.get("clamscan")
     if scan is not None:
         lines.extend(_clamscan_lines(scan))
+    if report.get("native"):
+        lines.append(f"native decoders: {report['native']}")
     if report.get("memory_limit"):
         lines.append(f"memory limit: {report['memory_limit']}")
     lines.append("Nothing was installed or changed.")
