@@ -764,12 +764,13 @@ def _make_dest(plan: ExtractPlan) -> int:
         os.close(drive_c)
 
 
-def _chunks(fd: int, blk: farc.DataBlock, stop):
+def _chunks(fd: int, blk: farc.DataBlock, stop, parts: list | None = None):
     """The block's decoded bytes, exactly blk.origsize of them, CHUNK at a time. Every decoder
-    of the chain is made here, before the block's first file is opened; raises _DataError."""
+    of the chain is made here, before the block's first file is opened; raises _DataError.
+    `parts` receives the chain's readers (see farc_codecs.open_chain)."""
     try:
         top = farc_codecs.open_chain(blk.method, fd, blk.offset, blk.compsize, blk.origsize,
-                                     CHUNK, stop)
+                                     CHUNK, stop, parts)
     except farc_codecs.StartError as exc:
         raise _DataError(str(exc)) from exc
     return _decode(top, blk.origsize, stop)
@@ -799,13 +800,16 @@ class ExtractStopped(ExtractRefused):
 
 
 def extract(plan: ExtractPlan, cancel: threading.Event | None = None,
-            on_progress=None, on_event=None) -> ExtractResult:
+            on_progress=None, on_event=None, activity=None) -> ExtractResult:
     """Write the planned files. Raises ExtractRefused before anything is written; once the
     destination exists, every problem is reported in the result instead.
 
     `on_event(kind, archive_plan, *details)` (optional, on this thread) is told when each
     archive's index has been read again ("archive"), and when each data block starts
-    ("block", block number, DataBlock, number of its files); the timeline uses it."""
+    ("block", block number, DataBlock, number of its files); the timeline uses it. When a
+    block's files are all written it is told ("block_end", block number, DataBlock, the
+    stage rows of gitfurl.activity.summary_row, the block's seconds). `activity` (a gitfurl.activity.Activity)
+    is kept up to date for a live view; one is made when none is given."""
     problem = plan.problem()
     if problem:
         raise ExtractRefused(problem)
@@ -834,14 +838,22 @@ def extract(plan: ExtractPlan, cancel: threading.Event | None = None,
         if cancel is not None and cancel.is_set():
             raise ExtractStopped("stopped before the unpack started")
         root = _make_dest(plan)
-        return _write_all(plan, opened, root, cancel, on_progress, on_event)
+        return _write_all(plan, opened, root, cancel, on_progress, on_event, activity)
     finally:
         for fd, _ in opened:
             os.close(fd)
 
 
-def _write_all(plan, opened, root, cancel, on_progress, on_event=None) -> ExtractResult:
+def _write_all(plan, opened, root, cancel, on_progress, on_event=None,
+               act=None) -> ExtractResult:
+    from gitfurl.activity import Activity
+
     res = ExtractResult(plan.dest, keep_bad_file_crc=plan.keep_bad_file_crc)
+    act = act if act is not None else Activity()
+    used = [{e.block for _f, _n, e in ap.files} for _fd, ap in opened]
+    act.begin_run(sum(b.compsize for (_fd, ap), ks in zip(opened, used)
+                      for k, b in enumerate(ap.archive.blocks) if k in ks),
+                  sum(len(ap.files) for _fd, ap in opened))
     tree = _Tree(root, plan.folders)
     counts: list[list] = []  # per archive: [name, files, files checked, files that failed]
 
@@ -866,7 +878,10 @@ def _write_all(plan, opened, root, cancel, on_progress, on_event=None) -> Extrac
                     continue
                 if on_event is not None:
                     on_event("block", ap, k, blk, len(files))
-                stream = _chunks(fd, blk, stop)
+                parts: list = []
+                stream = _chunks(fd, blk, stop, parts)
+                act.begin_block(ap.path.name, k, len(ap.archive.blocks), blk.method.kind,
+                                blk.compsize, blk.origsize, len(files), parts)
                 buf, at = b"", 0
                 for folder, name, entry in files:
                     stop()
@@ -875,6 +890,7 @@ def _write_all(plan, opened, root, cancel, on_progress, on_event=None) -> Extrac
                                   | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644,
                                   dir_fd=tree.fd(folder))
                     current[:] = [shown]
+                    act.file_start(shown)
                     crc, left = 0, entry.size
                     try:
                         while left:
@@ -893,6 +909,7 @@ def _write_all(plan, opened, root, cancel, on_progress, on_event=None) -> Extrac
                     finally:
                         os.close(out)
                     current.clear()
+                    act.file_end()
                     done += entry.size
                     count[2] += 1
                     if crc != entry.crc:
@@ -917,6 +934,9 @@ def _write_all(plan, opened, root, cancel, on_progress, on_event=None) -> Extrac
                         res.files += 1
                     if on_progress is not None:
                         on_progress(done, plan.total_size)
+                rows = act.end_block()
+                if on_event is not None:
+                    on_event("block_end", ap, k, blk, rows, act.last_block_s)
     except _Stopped:
         res.stopped = True
     except KeyboardInterrupt:
@@ -932,6 +952,7 @@ def _write_all(plan, opened, root, cancel, on_progress, on_event=None) -> Extrac
     except Exception as exc:  # noqa: BLE001 - once the destination exists, report, never raise
         res.error = f"unexpected error ({type(exc).__name__})"
     finally:
+        act.finish()
         res.folders = tree.made
         tree.close()
         os.close(root)

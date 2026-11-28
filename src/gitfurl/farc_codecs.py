@@ -12,6 +12,11 @@ and the plan shows their sum.
 Damaged input raises CodecError, whose message is gitfurl's own text (never the archive's).
 Nothing here writes files, runs anything or uses the network.
 
+For the live activity view (gitfurl.activity), every stage counts its output (`made`) and the
+seconds spent making it (`busy`, its own time plus the time of the stages it reads from),
+once per piece of output, never per byte; the readers of the archive count what they read
+(`taken`). Nothing is locked: another thread only reads these numbers.
+
 Written from the clean-room specifications of these methods (behaviour only); no FreeArc
 code is used.
 """
@@ -24,6 +29,7 @@ import lzma
 import os
 import re
 import sys
+import time
 from array import array
 from dataclasses import dataclass
 from itertools import accumulate
@@ -59,6 +65,7 @@ CHECK_BLOCKS = 256  # ... or, for VHASH, this many NH blocks, with a Stop check 
 CM_JOB_MEMORY = 520 << 20
 CM_THREADS = 1  # cm-stage jobs decoded at once, each on its own thread
 CM_HEADER = 11  # bytes of the cm stage's stream header
+CM_COUNT_MAX = 1 << 16  # cm jobs counted for the activity view, at most
 CM_MISSING = "the cm stage needs gitfurl's native decoder module, which is not installed"
 
 _LITTLE = sys.byteorder == "little"
@@ -215,6 +222,12 @@ class Source:
 
     def __init__(self, fd: int, offset: int, size: int, chunk: int, stop):
         self.fd, self.pos, self.left, self.chunk, self.stop = fd, offset, size, chunk, stop
+        self.size = size
+
+    @property
+    def taken(self) -> int:
+        """Stored bytes read so far."""
+        return self.size - self.left
 
     def read(self, n: int) -> bytes:
         if not self.left:
@@ -282,6 +295,9 @@ def _no_stop() -> None:
     return None
 
 
+_clock = time.perf_counter
+
+
 class _Stage:
     """Common read(): serve pending output, refill with _next() until it ends. stop() is
     called before each refill, so a Stop is seen even while a stage reads input that gives
@@ -290,6 +306,8 @@ class _Stage:
     def __init__(self, stop=None):
         self.out, self.out_at, self.done = b"", 0, False
         self.stop = stop or _no_stop
+        self.made = 0  # output so far (for gitfurl.activity)
+        self.busy = 0.0  # seconds spent in _next, the stages it reads from included
 
     def read(self, n: int) -> bytes:
         while self.out_at >= len(self.out):
@@ -297,7 +315,10 @@ class _Stage:
                 return b""
             self.stop()
             self.out = b""  # the last output is not held while the next is made
+            t = _clock()
             self.out, self.out_at = self._next(), 0
+            self.busy += _clock() - t
+            self.made += len(self.out)
         piece = self.out[self.out_at:self.out_at + n]
         self.out_at += len(piece)
         return piece
@@ -1068,6 +1089,7 @@ class _Spool:
 
     def __init__(self, size: int, data=None, fd: int = -1, base: int = 0):
         self.size, self.data, self.fd, self.base = size, data, fd, base
+        self.taken = 0  # bytes read from the archive (only when it reads the archive itself)
 
     def read(self, pos: int, n: int) -> bytes:
         if pos < 0 or n < 0 or pos + n > self.size:
@@ -1080,6 +1102,7 @@ class _Spool:
             raise CodecError(f"the archive could not be read ({exc.strerror or exc})") from exc
         if len(data) != n:
             raise CodecError("the archive could not be read completely (did it change?)")
+        self.taken += n
         return data
 
 
@@ -1191,6 +1214,19 @@ class SrepStage(_Stage):
         self.k = 0  # next block
         self.at = self.start  # next block's position
         self.iat = self.index_at  # its part of the index
+
+    @property
+    def taken(self) -> int:
+        """Stored bytes this stage read from the archive itself (format 4 as the last
+        method); otherwise its input is counted by the stage it reads from."""
+        sp = self.spool
+        return sp.taken if sp is not None and sp.data is None else 0
+
+    @property
+    def kept(self) -> int:
+        """Bytes counted against the budget now: earlier output kept for matches (formats
+        1 and 2), pending matches and a held copy of the input (formats 3 and 4)."""
+        return len(self.hist) + self.held
 
     def _hold(self, n: int) -> None:
         self.held += n
@@ -1827,12 +1863,41 @@ class CmStage(_Stage):
             raise StartError(CM_MISSING)
         self.fd, self.offset, self.size = fd, offset, size
         self.threads, self.chunk, self.left = max(1, threads), chunk, limit
+        self.taken = 0  # stored bytes read (for gitfurl.activity)
         self.head = self._read(0, CM_HEADER)
         try:
             self.job_size, _ = _codecs.cm_header(self.head)
         except _codecs.CmError as exc:
             raise CodecError(f"cm stage: {exc}") from None
         self.at, self.ended, self.outs = CM_HEADER, False, []
+        # For gitfurl.activity: jobs started and finished, the stream's job count (None when
+        # its job list could not be walked), the running job's stored size and start time.
+        # The native call decodes a whole job at once, so within a job only `taken` moves.
+        self.jobs_started = self.jobs_done = 0
+        self.jobs_total = self._count_jobs()
+        self.job_in, self.job_t0 = 0, 0.0
+
+    def _count_jobs(self) -> int | None:
+        """The number of jobs, from the job lengths alone (two small reads per job, before
+        anything is decoded); None when the list looks damaged or is very long. Only shown;
+        decoding checks the list again."""
+        at, n = CM_HEADER, 0
+        try:
+            while n <= CM_COUNT_MAX:
+                a_len = int.from_bytes(os.pread(self.fd, 4, self.offset + at), "little")
+                if not a_len:
+                    return n if at + 4 == self.size else None
+                b_at = at + 4 + a_len
+                if b_at + 4 > self.size:
+                    return None
+                b_len = int.from_bytes(os.pread(self.fd, 4, self.offset + b_at), "little")
+                at = b_at + 4 + b_len
+                if at + 4 > self.size:
+                    return None
+                n += 1
+        except OSError:
+            return None
+        return None
 
     def _read(self, off: int, n: int) -> bytes:
         if off < 0 or n < 0 or off + n > self.size:
@@ -1843,6 +1908,7 @@ class CmStage(_Stage):
             raise CodecError(f"the archive could not be read ({exc.strerror or exc})") from exc
         if len(data) != n:
             raise CodecError("the archive could not be read completely (did it change?)")
+        self.taken += n
         return data
 
     def _u32(self, off: int) -> int:
@@ -1872,6 +1938,9 @@ class CmStage(_Stage):
             return
         if not self.ended:
             self._at_end()  # whether the last of these is the stream's last job
+        self.job_in = sum(a_len + b_len for _a, a_len, _b, b_len in jobs)
+        self.job_t0 = _clock()
+        self.jobs_started += len(jobs)
         try:
             outs = _codecs.cm_decode_jobs(self.head, jobs, self._read, self.threads, self.stop)
         except _codecs.CmError as exc:
@@ -1886,6 +1955,7 @@ class CmStage(_Stage):
                 if len(out) > self.left:
                     raise CodecError("cm stage: more output than the block's files hold")
                 self.left -= len(out)
+        self.jobs_done += len(outs)
         self.outs = outs
 
     def _next(self) -> bytes:
@@ -1918,6 +1988,7 @@ class RolzStage(_Stage):
         super().__init__(stop)
         self.fd, self.offset, self.size = fd, offset, size
         self.native = rolz_native() if native is None else native
+        self.taken = 0  # stored bytes read (for gitfurl.activity; an index may be read twice)
         if self.native:
             self.gen = _codecs.rolz_block(self._read, size, window, chunk, limit, stop)
             self.errors = (farc_rolz.RolzError, _codecs.RolzError)
@@ -1934,6 +2005,7 @@ class RolzStage(_Stage):
             raise CodecError(f"the archive could not be read ({exc.strerror or exc})") from exc
         if len(data) != n:
             raise CodecError("the archive could not be read completely (did it change?)")
+        self.taken += n
         return data
 
     def _next(self) -> bytes:
@@ -1948,11 +2020,17 @@ class RolzStage(_Stage):
 
 
 def open_chain(method: farc.Method, fd: int, offset: int, compsize: int, out_size: int,
-               chunk: int, stop):
+               chunk: int, stop, parts: list | None = None):
     """The leftmost stage of the block's chain (read(n) gives the file data). Every decoder is
-    made here, before anything is read; raises StartError when one cannot be started."""
+    made here, before anything is read; raises StartError when one cannot be started.
+
+    `parts` (optional) receives (name, reader) pairs from the stored data to the file data:
+    ("source", Source) first, then each stage (storing adds none); gitfurl.activity reads
+    their counters."""
     plans = stage_plan(method, out_size)
     reader = Source(fd, offset, compsize, chunk, stop)
+    if parts is not None:
+        parts.append(("source", reader))
     for p in reversed(plans):
         name = p.stage.name
         if name == "lzma":
@@ -1978,4 +2056,6 @@ def open_chain(method: farc.Method, fd: int, offset: int, compsize: int, out_siz
                 raise StartError("rolz can only read the stored data (the last method)")
             reader = RolzStage(fd, offset, compsize, p.budget, chunk, p.limit, stop)
         # storing: output equals input, nothing to add
+        if parts is not None and name != "storing":
+            parts.append((name, reader))
     return reader

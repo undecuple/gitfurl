@@ -199,6 +199,12 @@ class RunControl:
             self._pgid = proc.pid  # the leader is its own group leader (start_new_session)
             return proc
 
+    def group_id(self) -> int | None:
+        """The run's process group while it runs (for the progress monitor to read /proc for
+        gitfurl's own processes only), else None."""
+        with self._lock:
+            return None if self._finished else self._pgid
+
     def mark_exited(self) -> None:
         """The leader has exited (it is not yet reaped). A stop requested from now on does nothing."""
         with self._lock:
@@ -624,7 +630,8 @@ def execute(plan: InstallPlan, wine: str, env: dict[str, str] | None = None, run
         seen_titles: set[str] = set()
         observer = ActivityObserver()
         monitor = ProgressMonitor(plan.source or plan.installer, plan.prefix, handle,
-                                  options.progress_interval, options.proc_root)
+                                  options.progress_interval, options.proc_root,
+                                  group=control.group_id)
     t0 = time.monotonic()
     # Variable names only, never values: the environment can hold secrets.
     event("start", command=shlex.join(argv), cwd=str(plan.cwd), prefix=str(plan.prefix),

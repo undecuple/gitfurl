@@ -134,6 +134,40 @@ If the prefix does not exist and "Create the prefix if it does not exist" is on 
 While an installer runs, the Progress card shows how far the installer has read into the large files beside it (its payload), the read rate, an estimated time left, and how much has been written into the prefix. This does not depend on the installer's own progress display, which can be poor.
 Limits: it assumes the large files next to the installer are its payload. The estimate is rough and appears only after about 1% has been read. If the installer reads its files in another way, the numbers can be wrong or stay at zero. It reads no file contents. To tell the prefix's processes from other Wine programs it also checks, for your own processes only, for the entry `WINEPREFIX=<this prefix>` in their environment and keeps only the match, the program name and CPU time (see SECURITY.md). The progress line also lists how many processes are running, their CPU use and helper program names, and says when it looks quiet.
 
+### What gitfurl shows while it works
+Some installers tell you not to worry when the progress does not move: one large decode step can run for minutes without a visible change. Under Progress, the **Activity** card shows what is happening instead, updated about once a second. It only reads counters the decoders keep, on the window's own timer, so the window stays responsive; on a 64 MiB lzma block the counters cost 2.3 % or less (measured on the test machine, within run-to-run noise).
+
+On the native route (gitfurl's own unpack) it shows:
+
+- the data block, its archive and its method chain (gitfurl's own stage names);
+- **archive read**: how much of the block's stored data has been read, against its stored size. This is the most honest "work done" figure, because a decoder can read for minutes before it gives any output;
+- **decoded**: the bytes ready for the block's files so far;
+- one line per stage, with its bytes in and out. For the **cm** stage: which job of how many is running, its stored size and how long it has run (each job is decoded in one call to the native module, so within a job only the archive position moves). For **srep**: how much it keeps now (earlier output it may copy from, pending matches), against its cap (1 GiB at most). For **rolz**, **lzma**, **delta**, **x86** and the others: bytes in and out;
+- the file being written and how many of the block's files are done;
+- the read and decode rates over the last 10 seconds, and **about N left (estimate)**, worked out from the archive bytes read; it appears once 1 % has been read;
+- **last change N s ago**. After 30 seconds without new output it says what is still moving, for example: "no new output for 2 min 10 s; the decoder is still reading the archive (34 % of this block)". When no counter moves at all it says so, with gitfurl's own CPU use, and that one large step (a cm job, an x86 code block) gives no figure until it ends. It never calls the run stuck, and Stop still works.
+
+When a block ends, the log and (for a block that took 5 seconds or more) the timeline get one row per stage, for example `cm: 17 jobs, 8.9 GB, 3 min 12 s`: the time is that stage's own decoding time, without the stages it reads from. With `--detailed-log`, the event log gets a `block_end` event with the same rows.
+
+On the Setup route the card adds what gitfurl can see without reading the installer's data: the processes in gitfurl's own process group or in the prefix, each with its CPU use (busy, CPU time growing, or not growing) and resident memory, from `/proc`; the newest file in the prefix (its path in the prefix, printable characters only) and how long ago it changed; and how fast the prefix grows. So a helper at 100 % CPU shows that it is busy even while no file grows.
+
+On the command line, `--progress` prints the same every `--progress-interval` seconds (default 10): several lines on a terminal, one line when the output is a file or a pipe. The lines are printed one after another, never redrawn in place, so a log of them stays readable. For example, from a small synthetic archive (so the rates cover only a fraction of a second):
+
+    [progress] native unpack: data block 2 of 3 in a.arc (exe+delta+lzma)
+               archive read: 304.6 KB of 304.6 KB (100 % of this block); decoded 786.4 KB of 900.0 KB
+               exe: 900.0 KB in, 786.4 KB out
+               delta: 900.0 KB in, 900.0 KB out
+               lzma: 304.6 KB in, 900.0 KB out
+               files: 1 of 2 in this block
+               last 0.0 s: archive 6.1 MB/s, decoded 33.6 MB/s; under 1 s left (estimate)
+               last change 0 s ago; elapsed 0 s
+
+and the one-line form of the same:
+
+    [progress] native unpack: block 2/3 (exe+delta+lzma), archive 100 % of this block, decoded 786.4 KB, files 1/2, 6.1 MB/s read, under 1 s left (estimate); last change 0 s ago
+
+Every figure is measured, except the time left, which is an estimate and says so.
+
 ### Timeline
 Under Progress, the Timeline card lists what each step of the run did and why, one line each, newest at the bottom. It follows the newest line unless you scroll up. Before a run it shows the rows the plan starts with (the route and its reasons, the prefix, what is skipped); after you approve, the run adds its own. For example, a native unpack:
 
@@ -224,7 +258,7 @@ Options for `install`:
 | `--create-prefix` | Create the prefix first if it is missing. |
 | `--wine-addons` | When gitfurl creates the prefix (Wine runtime), let Wine show its Mono and Gecko install dialogs. Off by default: `wineboot` runs with `WINEDLLOVERRIDES=mscoree,mshtml=` for that command only, so it needs no answer and Wine downloads nothing; the prefix then has no Mono (.NET) or Gecko (Internet Explorer parts), which most installers do not need. Also for `gitfurl cli prefix create`. In the window: the switch "Let Wine offer Mono and Gecko when it creates a prefix" (off by default), for Run and Create now. Not used for Proton, and not on the native route. Wine's menu builder stays off either way (see "Menu entries and file types"). |
 | `--yes` | Approve without the typed `yes` prompt. Without a terminal and without this, nothing runs. |
-| `--progress` | Print progress lines while the installer runs. `--progress-interval SECONDS` sets how often (default 10). |
+| `--progress` | Print what the run is doing while it runs (see "What gitfurl shows while it works"): several lines on a terminal, one line otherwise. `--progress-interval SECONDS` sets how often (default 10). |
 | `--detailed-log` | Also write the JSON event log. |
 | `--timeline` | Also print the run's timeline lines as they come (see "Timeline"). The timeline is saved either way. |
 | `--language NAME`, `--type NAME`, `--components A,!B`, `--tasks X,!Y` | Answer Setup's questions without being asked (also for `extract-inno`); see "Setup's choices". |
@@ -269,7 +303,7 @@ Why Setup is not run "only for its Windows parts" on the native route: the unpac
 **The native install, step by step** (all steps are in the plan, and one approval covers them):
 1. With `--scan`: the ClamAV scan of the installer and the files beside it. A match or a scan error stops the run before anything is created.
 2. With `--create-prefix` and a missing prefix: the prefix is created with `WINEDLLOVERRIDES='mscoree,mshtml=;winemenubuilder.exe=d' wine wineboot --init`, under the memory limit unless `--no-memory-limit`. The override, set for that command only and shown in the plan, turns off Wine's Mono and Gecko install dialogs, so this step needs no answer, and keeps Wine's menu builder off (see "Menu entries and file types"); the new prefix then has no Mono or Gecko (the unpack does not need them; a program that does can get them later from Wine). An empty `gitfurl-incomplete` file is written in the new prefix before wineboot starts and removed when wineboot exits with status 0. While it is there (creating the prefix stopped, timed out or failed) gitfurl will not unpack into that prefix; use a new prefix name. Before the approval, the free space on the nearest existing folder above the prefix is compared with the files to write plus 768 MiB for the prefix itself, so a run that cannot fit stops before the prefix is created. This is the only Wine step.
-3. gitfurl unpacks the archives into `C:\Games\PREFIX` (or the folder `--dest` names, see "The destination folder") with all the checks of "Native extraction (FreeArc)" below. `--progress` prints `[progress] native unpack: X of Y (P%), rate, ETA` lines. The local log (mode 0600) starts with `route: native`; `--detailed-log` adds an event log with `start`, `progress` and `exit` or `cancelled` events.
+3. gitfurl unpacks the archives into `C:\Games\PREFIX` (or the folder `--dest` names, see "The destination folder") with all the checks of "Native extraction (FreeArc)" below. `--progress` prints the data block, each stage's counters, the file, the rates and an estimate (see "What gitfurl shows while it works"). The local log (mode 0600) starts with `route: native`; `--detailed-log` adds an event log with `start`, `progress`, `block_end` (each stage's row) and `exit` or `cancelled` events.
 4. Program candidates in the new folder (a guess from names and sizes, with the line to start one in the prefix) and redistributable installers found there are listed. Nothing is run. Run a redistributable yourself with `gitfurl cli install FILE --prefix PREFIX` if the program needs it.
 5. With `--apply-setup-entries`: only after a complete unpack, the setup's own registry values and menu entries that the plan lists (see "Setup entries on the native route").
 6. With `--cleanup`: only after a complete unpack (every file written and every CRC-32 matching).
