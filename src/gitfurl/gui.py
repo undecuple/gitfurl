@@ -267,6 +267,78 @@ SETUP_ENTRIES_NOTE = ("Off by default. After a complete unpack, gitfurl also wri
                       "can do so exactly, without running Wine. The plan lists each one and "
                       "each skipped entry. On the Wine/Proton route Setup writes its own.")
 
+DEST_TITLE = "Destination (native route)"
+DEST_NOTE = ("The new folder gitfurl unpacks into, on the prefix's drive C: (default "
+             "C:\\Games\\<prefix>). Browse picks the folder it goes in; the last part stays "
+             "(the prefix name by default). It must not exist yet. Reset when another installer "
+             "or prefix is chosen; never remembered.")
+DEST_NO_BROWSE = ("Browse is off: the prefix does not exist yet (it is created first). Type "
+                  "the Windows path instead (default C:\\Games\\<prefix>); it is checked again "
+                  "once the prefix exists.")
+DEST_WINE = ("Not used on the Wine/Proton route: Setup runs and picks its own folder.")
+
+
+def destination_browse_state(prefix_path: Path) -> tuple[bool, str]:
+    """(Browse enabled, the row's note): Browse needs the prefix's own drive_c folder (a real
+    folder, not a link)."""
+    drive_c = Path(prefix_path) / "drive_c"
+    ok = (Path(prefix_path).is_dir() and not Path(prefix_path).is_symlink()
+          and drive_c.is_dir() and not drive_c.is_symlink())
+    return (True, DEST_NOTE) if ok else (False, DEST_NO_BROWSE)
+
+
+def destination_last_part(text: str, prefix_name: str) -> str:
+    """The last part of the destination text (kept when Browse picks a new folder above it),
+    or the prefix name when the text is not a destination gitfurl accepts."""
+    from gitfurl.extract import parse_destination
+
+    try:
+        return parse_destination(text)[-1]
+    except ValueError:
+        return prefix_name
+
+
+def destination_from_pick(drive_c: Path, picked: str, name: str) -> str:
+    """The Windows path for the folder `name` inside `picked`, a Linux folder the folder
+    dialog returned, which must be the prefix's drive_c or a folder below it (compared as
+    written: a link is refused later, when the plan checks the prefix). Raises
+    extract.DestinationRefused, also for a folder outside drive_c."""
+    from gitfurl.extract import DestinationRefused, parse_destination, windows_path
+
+    drive = Path(os.path.normpath(os.path.abspath(drive_c)))
+    got = Path(os.path.normpath(os.path.abspath(picked)))
+    try:
+        rel = got.relative_to(drive)
+    except ValueError:
+        raise DestinationRefused(f"the folder you chose ({short_path(got)}) is not inside this "
+                                 f"prefix's drive C: ({short_path(drive)}); gitfurl only "
+                                 "unpacks into a folder there") from None
+    text = windows_path((*rel.parts, name))
+    parse_destination(text)
+    return text
+
+
+def pick_destination(prefix_path: Path, current: str, prefix_name: str, ask):
+    """Browse for the destination: `ask` is the folder dialog (tkinter's askdirectory), opened
+    at the prefix's drive_c. The folder picked is the one the destination goes in; its last
+    part stays (destination_last_part). Returns (new Windows path, None), (None, None) when
+    the dialog was cancelled, or (None, why) when Browse cannot be used or the folder is
+    refused. Changes nothing."""
+    ok, why = destination_browse_state(prefix_path)
+    if not ok:
+        return None, why
+    drive_c = Path(prefix_path) / "drive_c"
+    picked = ask(title="Choose the folder to unpack into (inside the prefix's drive C:)",
+                 initialdir=str(drive_c), mustexist=True)
+    if not picked:
+        return None, None
+    try:
+        return destination_from_pick(drive_c, picked,
+                                     destination_last_part(current, prefix_name)), None
+    except ValueError as exc:
+        return None, f"{exc}.\n\nThe destination was not changed."
+
+
 # The native plan's text names command-line options; the window names its own switches.
 WINDOW_WORDS = (
     ("run it with: gitfurl cli install <file> --prefix ",
@@ -755,6 +827,12 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     bad_index_crc_var = tk.BooleanVar(value=False)  # this installer only; never remembered
     keep_bad_crc_var = tk.BooleanVar(value=False)  # this installer only; never remembered
     crc_for = {"installer": None}  # the installer the CRC switches were last seen with
+    # the native route's destination (a Windows path); reset to C:\Games\<prefix> when another
+    # installer or prefix is chosen, never remembered
+    from gitfurl.extract import default_destination
+
+    dest_var = tk.StringVar(value="")
+    dest_for: dict = {"key": None, "quiet": False}
     entries_var = tk.BooleanVar(value=False)  # the setup's registry entries and shortcuts: off
     route_cache: dict = {}
     progress_var = tk.StringVar(value="Shown while an installer runs: payload read, rate, rough ETA.")
@@ -1202,6 +1280,43 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     c.pack(fill="x")
     row(c, "Create the prefix if it does not exist", "On by default. The prefix is created first, "
         "then the installer runs.", lambda p: w.Switch(p, create_var), first=True)
+
+    dest_widgets: dict = {}
+
+    def browse_dest():
+        text, error = pick_destination(selected_prefix_path(), dest_var.get(),
+                                       selected_prefix(), filedialog.askdirectory)
+        if error is not None:
+            messagebox.showerror("Destination refused", error)
+        elif text is not None:
+            dest_var.set(text)
+
+    def dest_widget(p):
+        f = tk.Frame(p, bg=w.PANEL)
+        dest_widgets["entry"] = entry(f, dest_var)
+        dest_widgets["entry"].configure(width=30)
+        dest_widgets["entry"].pack(side="left", ipady=4)
+        dest_widgets["browse"] = w.PillButton(f, "Browse...", browse_dest, "plain",
+                                              F(T["caption"]), outer=w.PANEL, pad=(10, 5))
+        dest_widgets["browse"].pack(side="left", padx=(8, 0))
+        return f
+
+    dest_row = row(c, DEST_TITLE, DEST_NOTE, dest_widget)
+
+    def refresh_dest(native: bool, prefix_ok: bool) -> None:
+        """The Destination row's Browse button and note for the current route and prefix."""
+        if not native:
+            ok, why = False, DEST_WINE
+        elif not prefix_ok:
+            ok, why = False, DEST_NO_BROWSE
+        else:
+            ok, why = destination_browse_state(selected_prefix_path())
+        dest_widgets["browse"].state(["!disabled"] if ok else ["disabled"])
+        for child in dest_row.winfo_children()[-1:]:  # the title and note frame
+            for lab in child.winfo_children()[-1:]:
+                if lab.cget("text") != why:
+                    lab.configure(text=why)
+
     memory_switch = {}
 
     def memory_widget(p):
@@ -1445,7 +1560,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         return tl
 
     def timeline_key():
-        return (route_cache.get("key"), selected_prefix(), create_var.get())
+        return (route_cache.get("key"), selected_prefix(), create_var.get(), dest_var.get())
 
     def timeline_preview():
         """Before a run: the rows the plan starts the timeline with (route, reasons, prefix,
@@ -1464,6 +1579,10 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
         except Exception:  # noqa: BLE001 - the checklist shows the problem; nothing runs
             return
         preview = tlmod.Timeline()
+        try:
+            choice = with_dest(choice)
+        except ValueError:  # a destination gitfurl refuses: the plan box says why
+            pass
         target = choice.extract.target if choice is not None and choice.extract else None
         tlmod.plan_entries(preview, det_, choice, path, path.is_dir(), create_var.get(), target,
                            entries_var.get())
@@ -1721,9 +1840,19 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             return describe_detection(det) + f"\nroute: not chosen ({error})."
         return window_words(describe_detection(det, choice))
 
+    def with_dest(choice):
+        """The route choice with the Destination row's folder (native route only). Cheap: the
+        archives' indexes are not read again. Raises extract.DestinationRefused."""
+        if choice is None or choice.route != "native" or choice.extract is None:
+            return choice
+        text = dest_var.get()
+        if text.strip() == default_destination(selected_prefix()):
+            return choice
+        return replace(choice, extract=choice.extract.with_destination(text))
+
     def native_choice():
         _det, choice, _err = current_route()
-        return choice if choice is not None and choice.route == "native" else None
+        return with_dest(choice) if choice is not None and choice.route == "native" else None
 
     def refresh_plan(*_):
         now = installer_var.get()
@@ -1732,6 +1861,13 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             keep_bad_crc_var.set(False)
         crc_for["installer"] = now
         name = selected_prefix()
+        if dest_for["key"] != (now.strip(), name):  # another installer or prefix: the default
+            dest_for["key"] = (now.strip(), name)
+            dest_for["quiet"] = True
+            try:
+                dest_var.set(default_destination(name) if name else "")
+            finally:
+                dest_for["quiet"] = False
         title_var.set(name or "No prefix")
         try:
             path = prefixes_root() / validate_prefix_name(name)
@@ -1787,6 +1923,12 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                                   memory_limit_problem(memory_var.get()), as_root=running_as_root())
         if not (native is not None and preview_error is None):
             finished_here = False
+        try:
+            _d, routed, _e = current_route() if prefix_error is None else (None, None, None)
+        except Exception:  # noqa: BLE001 - only the Destination row's note depends on it
+            routed = None
+        refresh_dest(routed is None or routed.route == "native",
+                     prefix_error is None and exists)
         for key, (frame, mark, msg) in check_rows.items():
             hit = next((r for r in rows if r[0] == key), None)
             if hit is None:
@@ -2098,7 +2240,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
             scan_plan = scanmod.build_scan_plan(installer, scanmod.find_clamscan()) \
                 if scan_var.get() else None
             clean = plan_cleanup(installer, cleanup_var.get(),
-                                 [xplan.prefix, prefixes_root(), logs_root()])
+                                 [xplan.prefix, xplan.dest, prefixes_root(), logs_root()])
         except ValueError as exc:
             messagebox.showerror("Cannot run", f"{exc}. Nothing was run.")
             return
@@ -2421,6 +2563,7 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
     create_var.trace_add("write", refresh_plan)
     changes_var.trace_add("write", refresh_plan)  # a Setup-only option: it changes the route
     proton_var.trace_add("write", refresh_plan)
+    dest_var.trace_add("write", lambda *_: None if dest_for["quiet"] else refresh_plan())
     refresh_env()
     show(start)
     failed = {"on": False}
@@ -2469,6 +2612,9 @@ def main(start: str = "library", prefix: str | None = None, driver=None) -> int:
                     "entries_var": entries_var,
                     "bad_index_crc_var": bad_index_crc_var,
                     "keep_bad_crc_var": keep_bad_crc_var,
+                    "dest_var": dest_var,
+                    "dest_widgets": dest_widgets,
+                    "browse_dest": browse_dest,
                     "addons_var": addons_var,
                     "changes_var": changes_var,
                     "plan_checklist_rows": lambda: {k: (bool(f.winfo_manager()), m.cget("text"))

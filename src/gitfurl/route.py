@@ -11,7 +11,8 @@ and writes nothing. The route is:
           automatic choice) the archives are linked to the installer (its setup script names
           them all, or they share its name) and no option that only a Setup run uses was
           given. Setup is then NOT run at all: gitfurl
-          unpacks the archives itself into C:\\Games\\<prefix>, after creating the prefix with
+          unpacks the archives itself into C:\\Games\\<prefix> (or the folder chosen with
+          --dest), after creating the prefix with
           Wine when asked. Setup's own files, shortcuts, registry entries, redistributables and
           script steps are skipped, and the plan says so word for word.
   wine    otherwise (Setup runs under Wine/Proton, as before), with the reason.
@@ -200,7 +201,7 @@ def choose_route(installer: Path, prefix_name: str, det: Detection, requested: s
                  env: dict[str, str] | None = None,
                  setup_options: tuple[str, ...] | list[str] = (), links=None, *,
                  accept_bad_index_crc: bool = False,
-                 keep_bad_file_crc: bool = False) -> RouteChoice:
+                 keep_bad_file_crc: bool = False, dest: str | None = None) -> RouteChoice:
     """Pick the route. Writes nothing and runs nothing.
 
     `setup_options` are the options the user gave that only a Setup run uses (for example
@@ -209,6 +210,11 @@ def choose_route(installer: Path, prefix_name: str, det: Detection, requested: s
     `links` is a gitfurl.namelinks.LinkProposal (--link-names on). With a mapping, the
     archives it maps count as named by the setup script for the link check, and the reasons
     say which archive stands for which name.
+
+    `dest` is the native route's destination (a Windows path on the prefix's drive C:, see
+    extract.parse_destination; None for C:\\Games\\<prefix>). It does not change the
+    route; a destination that parse_destination refuses raises its DestinationRefused (a
+    ValueError) instead of choosing the Wine/Proton route.
 
     Raises ValueError when `requested` is "native" and the native route is not possible (the
     message says why), or when the prefix name is not valid.
@@ -256,7 +262,7 @@ def choose_route(installer: Path, prefix_name: str, det: Detection, requested: s
     try:
         plan = plan_extract(installer, prefix_name, env,
                             accept_bad_index_crc=accept_bad_index_crc,
-                            keep_bad_file_crc=keep_bad_file_crc)
+                            keep_bad_file_crc=keep_bad_file_crc, dest=dest)
     except ExtractRefused as exc:
         reasons = [f"the archives cannot be unpacked by gitfurl: {exc}"]
         if inno:
@@ -549,7 +555,8 @@ def run_native(plan: NativeInstallPlan, cancel=None, on_line=None, detailed_log:
             log.write(f"installer: {clean(str(plan.installer), 300)}\n")
             for ap in xplan.archives:
                 log.write(f"archive: {clean(str(ap.path), 300)}\n")
-            log.write(f"destination: {xplan.target} ({xplan.dest})\n")
+            log.write(f"destination: {clean(xplan.target, 300)} ({xplan.dest})"
+                      + (" (the folder you chose)" if xplan.dest_chosen else "") + "\n")
             if scan_summary:
                 log.write("".join(f"scan: {ln}\n" for ln in scan_summary.splitlines()))
             for warning in xplan.warnings:
@@ -651,8 +658,9 @@ def _tl_unpack_start(tl, xplan, stem: Path, log_path: Path):
     tl.log_path = log_path
     tl.attach(Path(f"{stem}{SUFFIX}"))
     n = len(xplan.archives)
-    tl.add("files", f"Destination: {xplan.target}",
-           f"a new folder in the prefix ({shown(str(xplan.dest), 200)}); it must not exist "
+    tl.add("files", f"Destination: {shown(xplan.target, 200)}",
+           ("the folder you chose: " if xplan.dest_chosen else "")
+           + f"a new folder in the prefix ({shown(str(xplan.dest), 200)}); it must not exist "
            "yet, and no file is overwritten")
     tl.add("start", "Started the unpack with gitfurl's own reader",
            f"{n} archive{'s' if n != 1 else ''}, {xplan.file_count} files, "

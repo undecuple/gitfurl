@@ -50,6 +50,7 @@ The **Route** column says where an option has an effect: **both**, **native** (g
 | `--link-names` | When the setup expects archives under other names, use one clear mapping (`other-01.bin` for `fg-01.bin`). Setup route: Setup runs from a folder of links that gitfurl removes afterwards. Native route: the archives are read under their own names. The route check counts them as named either way. | off | both |
 | `--accept-bad-index-crc` | Read a FreeArc index or footer whose CRC-32 is wrong, with a warning. Each file's CRC is still checked. | off | native |
 | `--keep-bad-file-crc` | Keep a file whose CRC-32 does not match instead of removing it, and list it. Its size must still match. Only for an installer you trust. | off | native |
+| `--dest WINPATH` | Unpack into this new folder on the prefix's drive C:, for example `'C:\Games\My Game'`. Not in `C:\windows`, `C:\users` or `C:\ProgramData`; missing folders above it are created; no link is followed. | `C:\Games\PREFIX` | native |
 | `--apply-setup-entries` | After a complete unpack, also add the registry values and menu entries the setup declares that gitfurl can apply exactly, without Wine. | off | native |
 | `--runtime wine\|proton` | Run Setup with Wine, or with Proton through `umu-run`. `proton` makes the automatic route Setup. | `wine` | Setup |
 | `--proton-path DIR` | The Proton folder you already have. Never downloaded. | `$PROTONPATH` | Setup |
@@ -71,7 +72,7 @@ The **Route** column says where an option has an effect: **both**, **native** (g
 | `--cleanup none\|installer\|folder` | After a complete run, delete the installer, or every file in its folder. Skipped after an error, a Stop, or a kept CRC mismatch. | `none` | both |
 | `--yes` | Approve without typing `yes`. | off | both |
 
-When an option does not apply to the route taken, the plan says so: `--apply-setup-entries` and `--keep-bad-file-crc` on the Setup route; `--wine-addons`, `--stall-after` and, with `--route native`, the Setup-only options on the native route. Two say nothing: `--find-exe` on the native route (which lists program candidates by itself), and `--accept-bad-index-crc` on the Setup route.
+When an option does not apply to the route taken, the plan says so: `--apply-setup-entries`, `--keep-bad-file-crc` and `--dest` on the Setup route; `--wine-addons`, `--stall-after` and, with `--route native`, the Setup-only options on the native route. Two say nothing: `--find-exe` on the native route (which lists program candidates by itself), and `--accept-bad-index-crc` on the Setup route.
 
 ### `gitfurl cli extract INSTALLER`
 
@@ -85,6 +86,7 @@ Files only: the FreeArc archives beside the installer go into `C:\Games\PREFIX` 
 | `--yes` | Approve without typing `yes`. | off | native |
 | `--accept-bad-index-crc` | As for `install`. | off | native |
 | `--keep-bad-file-crc` | As for `install`. | off | native |
+| `--dest WINPATH` | As for `install`. | `C:\Games\PREFIX` | native |
 
 With either CRC option on, `extract` also writes a log and a timeline.
 
@@ -182,6 +184,12 @@ This reads an index or footer whose CRC-32 is wrong, with a warning. Each file i
     gitfurl cli install setup.exe --prefix mygame2 --create-prefix --accept-bad-index-crc --keep-bad-file-crc
 
 Warning: gitfurl cannot tell a damaged file from an archive with wrong checksums. With `--keep-bad-file-crc` every kept file is listed with its stored and computed CRC-32, and `--cleanup` is skipped so the installer stays. Both options are off by default and last for one run.
+
+**Unpack into another folder.**
+
+    gitfurl cli install setup.exe --prefix mygame --dest 'C:\Apps\My Game'
+
+Native route only. The folder must be new and on the prefix's drive C:; in the window, use **Browse…** in Options.
 
 **Add the setup's menu entries and registry values after a native unpack.**
 

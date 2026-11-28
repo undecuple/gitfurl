@@ -2365,6 +2365,17 @@ class InnoExtractPlan:
         return f"C:\\Games\\{self.prefix_name}"
 
     @property
+    def win_parts(self) -> tuple[str, ...]:
+        """The destination's parts below C:\\ (always C:\\Games\\<prefix>; no --dest here),
+        for extract._make_dest and ExtractPlan.dest_problem."""
+        return ("Games", self.prefix_name)
+
+    def dest_problem(self) -> str | None:
+        from gitfurl.extract import ExtractPlan
+
+        return ExtractPlan.dest_problem(self)
+
+    @property
     def decoded(self) -> int:
         """Bytes decoded in all, including the parts of solid chunks that are thrown away."""
         return sum(ch.decoded for ch in self.chunks)
